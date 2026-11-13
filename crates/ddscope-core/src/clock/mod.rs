@@ -86,6 +86,8 @@ enum SyncEngine {
 pub struct StreamClockSynchronizer {
     mode: ClockMode,
     engine: SyncEngine,
+    recv_offset_ns: TimestampNs,
+    reanchor_pending: bool,
 }
 
 impl StreamClockSynchronizer {
@@ -129,7 +131,20 @@ impl StreamClockSynchronizer {
             },
         };
 
-        Ok(Self { mode, engine })
+        Ok(Self {
+            mode,
+            engine,
+            recv_offset_ns: 0,
+            reanchor_pending: false,
+        })
+    }
+
+    fn last_emitted_ns(&self) -> Option<TimestampNs> {
+        match &self.engine {
+            SyncEngine::Tier1(state) => state.last_emitted_ns(),
+            SyncEngine::Tier2(pll) => pll.last_emitted_ns(),
+            SyncEngine::Tier3 { last_emitted_ns } => *last_emitted_ns,
+        }
     }
 
     /// Assigns `count` strictly non-regressing nanosecond timestamps into `out_ns[..count]`.
@@ -150,14 +165,29 @@ impl StreamClockSynchronizer {
             return Ok(());
         }
 
+        if self.reanchor_pending {
+            self.reanchor_pending = false;
+            if let Some(floor) = self.last_emitted_ns() {
+                if pkt_recv_ns <= floor {
+                    self.recv_offset_ns = floor.saturating_add(1).saturating_sub(pkt_recv_ns);
+                } else {
+                    self.recv_offset_ns = 0;
+                }
+            }
+        }
+        let effective_recv_ns = pkt_recv_ns.saturating_add(self.recv_offset_ns);
+
         match &mut self.engine {
-            SyncEngine::Tier1(state) => state.assign(pkt_recv_ns, hw_ticks, count, out_ns),
+            SyncEngine::Tier1(state) => {
+                state.assign(effective_recv_ns, hw_ticks, count, out_ns)
+            }
             SyncEngine::Tier2(pll) => {
-                pll.assign(pkt_recv_ns, count, out_ns);
+                pll.assign(effective_recv_ns, count, out_ns);
                 Ok(())
             }
             SyncEngine::Tier3 { last_emitted_ns } => {
-                let ts = last_emitted_ns.map_or(pkt_recv_ns, |prev| pkt_recv_ns.max(prev));
+                let ts = last_emitted_ns
+                    .map_or(effective_recv_ns, |prev| effective_recv_ns.max(prev));
                 out_ns[..count].fill(ts);
                 *last_emitted_ns = Some(ts);
                 Ok(())
@@ -194,10 +224,23 @@ impl StreamClockSynchronizer {
 
     /// Resets internal clock tracking, unwrapper, and PLL state while preserving mode and config.
     pub fn reset(&mut self) {
+        self.recv_offset_ns = 0;
+        self.reanchor_pending = false;
         match &mut self.engine {
             SyncEngine::Tier1(state) => state.reset(),
             SyncEngine::Tier2(pll) => pll.reset(),
             SyncEngine::Tier3 { last_emitted_ns } => *last_emitted_ns = None,
+        }
+    }
+
+    /// Re-anchors phase and counter state (e.g. upon replay seek or stream reconnect)
+    /// while preserving the monotonic floor `last_emitted_ns` so storage timestamps never regress.
+    pub fn reanchor_preserve_monotonic(&mut self) {
+        self.reanchor_pending = true;
+        match &mut self.engine {
+            SyncEngine::Tier1(state) => state.reanchor_preserve_monotonic(),
+            SyncEngine::Tier2(pll) => pll.reanchor_preserve_monotonic(),
+            SyncEngine::Tier3 { .. } => {}
         }
     }
 

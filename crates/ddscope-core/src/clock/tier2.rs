@@ -121,7 +121,8 @@ impl SecondOrderPll {
         }
 
         if self.packet_count == 0 {
-            let t_base_hat = pkt_recv_ns as f64;
+            let min_base = self.last_emitted_ns.map_or(0.0, |p| (p as f64) + 1.0);
+            let t_base_hat = (pkt_recv_ns as f64).max(min_base);
             self.last_phase_error_ns = 0.0;
             self.emit_grid(t_base_hat, self.dt_hat, count, out_ns);
             self.t_next_hat = t_base_hat + (count as f64) * self.dt_hat;
@@ -302,6 +303,30 @@ impl SecondOrderPll {
                 self.adaptive_done = false;
             }
         }
+    }
+
+    /// Re-anchors PLL phase tracking (e.g. after a file replay seek or stream restart)
+    /// while preserving `last_emitted_ns` so emitted timestamps remain strictly monotonic.
+    pub fn reanchor_preserve_monotonic(&mut self) {
+        let preserved = self.last_emitted_ns;
+        let gaps = self.gap_resets.saturating_add(1);
+        self.t_next_hat = 0.0;
+        self.last_pkt_recv_ns = None;
+        self.last_phase_error_ns = 0.0;
+        self.packet_count = 0;
+        self.adaptive_start_recv_ns = 0;
+        self.adaptive_cum_samples = 0;
+        self.adaptive_anchors.clear();
+        self.last_emitted_ns = preserved;
+        self.gap_resets = gaps;
+        if self.nominal_sample_rate_hz.is_none() && self.dt_hat <= 0.0 {
+            self.adaptive_done = false;
+        }
+    }
+
+    /// Returns the most recently emitted sample timestamp, if any.
+    pub fn last_emitted_ns(&self) -> Option<TimestampNs> {
+        self.last_emitted_ns
     }
 
     /// Returns the current estimated sample period in nanoseconds.

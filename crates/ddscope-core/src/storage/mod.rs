@@ -1,11 +1,13 @@
 //! Native-width columnar channel storage, M4 pyramid, chunk pinning, and watermark hooks.
 
 pub mod event_series;
+pub mod hub;
 pub mod m4;
 pub mod quota;
 pub mod scalar_series;
 
 pub use event_series::EventSeries;
+pub use hub::{ChannelEntry, ChannelHub, ChannelStore};
 pub use m4::{
     aggregate_buckets_to_columns, compute_track_stats_from_columns, compute_track_stats_from_raw,
     feed_bucket_into_slots, finish_pixel_slots, ChunkM4Levels, M4QueryResult, MultiLevelM4Pyramid,

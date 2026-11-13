@@ -300,9 +300,18 @@ impl Tier1State {
             )));
         }
 
-        let is_gap = self
+        let host_gap = self
             .last_pkt_recv_ns
             .is_some_and(|prev| pkt_recv_ns.saturating_sub(prev) > self.gap_reset_ns);
+        let dev_gap = if !host_gap && self.last_pkt_recv_ns.is_some() {
+            let predicted_dev_ns = self.unwrapper.peek_next_dev_ns(ticks[0]);
+            let predicted_global = self.tracker.map_to_global_ns(predicted_dev_ns);
+            (pkt_recv_ns as i128 - predicted_global as i128).unsigned_abs()
+                > u128::from(self.gap_reset_ns.max(1_000_000_000))
+        } else {
+            false
+        };
+        let is_gap = host_gap || dev_gap;
 
         let first_dev_ns = if is_gap {
             self.gap_resets += 1;
@@ -321,7 +330,12 @@ impl Tier1State {
             };
 
             let dev0 = self.unwrapper.push_raw(ticks[0]);
-            self.tracker.push_anchor(dev0, pkt_recv_ns);
+            let anchor_host_ns = if self.last_pkt_recv_ns.is_none() {
+                self.last_emitted_ns.map_or(pkt_recv_ns, |p| pkt_recv_ns.max(p))
+            } else {
+                pkt_recv_ns
+            };
+            self.tracker.push_anchor(dev0, anchor_host_ns);
             dev0
         };
 
@@ -368,6 +382,24 @@ impl Tier1State {
         self.last_dt_ns = 0.0;
         self.last_phase_error_ns = 0.0;
         self.gap_resets = 0;
+    }
+
+    pub(crate) fn reanchor_preserve_monotonic(&mut self) {
+        let preserved = self.last_emitted_ns;
+        let preserved_dt = self.last_dt_ns;
+        let gaps = self.gap_resets.saturating_add(1);
+        self.unwrapper.reset();
+        self.tracker.reset();
+        self.last_pkt_recv_ns = None;
+        self.last_emitted_ns = preserved;
+        self.last_dev_ns = None;
+        self.last_dt_ns = preserved_dt;
+        self.last_phase_error_ns = 0.0;
+        self.gap_resets = gaps;
+    }
+
+    pub(crate) fn last_emitted_ns(&self) -> Option<TimestampNs> {
+        self.last_emitted_ns
     }
 
     pub(crate) fn estimated_dt_ns(&self) -> f64 {

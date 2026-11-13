@@ -330,10 +330,13 @@ impl ActiveScalarChunk {
             )));
         }
 
-        let values = std::mem::replace(
+        let mut values = std::mem::replace(
             &mut self.values,
             NativeScalarColumn::with_capacity(self.scalar_type, 0),
         );
+        if let NativeScalarColumn::Bool(ref mut bv) = values {
+            bv.compute_edge_indices();
+        }
         let m4 = std::mem::take(&mut self.m4);
         ScalarDataChunk::new_with_m4(ts_col, values, calibration, m4)
     }
