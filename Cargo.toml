@@ -30,6 +30,19 @@ dashmap = "6"
 arc-swap = "1"
 parking_lot = "0.12"
 clap = { version = "4", features = ["derive"] }
+memchr = "2.8"
+socket2 = { version = "0.6", features = ["all"] }
+hex = "0.4"
+fastrand = "2.5"
+crc32fast = "1.5"
+libc = "0.2"
+winreg = "0.56"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Memory",
+  "Win32_Devices_Communication",
+] }
 
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }
