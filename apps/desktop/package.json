@@ -1,0 +1,14 @@
+{
+  "name": "@ddscope/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "typecheck": "echo desktop-rust-crate"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

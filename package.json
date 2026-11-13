@@ -1,0 +1,12 @@
+{
+  "name": "ddscope-host",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "pnpm --filter @ddscope/desktop dev",
+    "dev:ui": "pnpm --filter @ddscope/web-ui dev",
+    "build": "pnpm --filter @ddscope/desktop build",
+    "build:ui": "pnpm --filter @ddscope/web-ui build",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

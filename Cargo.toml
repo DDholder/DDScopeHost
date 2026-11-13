@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ddscope-plugin-api",
+  "crates/ddscope-core",
+  "crates/ddscope-cli",
+  "apps/desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+ddscope-plugin-api = { path = "crates/ddscope-plugin-api" }
+ddscope-core = { path = "crates/ddscope-core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
+tokio = { version = "1", features = ["full"] }
+crossbeam-channel = "0.5"
+dashmap = "6"
+arc-swap = "1"
+parking_lot = "0.12"
+clap = { version = "4", features = ["derive"] }
+
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+specta = { version = "=2.0.0-rc.28", features = ["derive", "function"] }
+specta-typescript = "=0.0.15"
+tauri-specta = { version = "=2.0.0-rc.28", features = ["derive", "typescript"] }
