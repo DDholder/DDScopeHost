@@ -156,10 +156,10 @@ fn test_edge_case_empty_scopes_and_empty_payload_tracks() {
     assert_eq!(tracks[1].m4_columns().expect("m4_columns failed"), &[]);
     assert_eq!(tracks[2].m4_columns().expect("m4_columns failed"), &[]);
     assert!(tracks[2].stats().is_some());
-    assert_eq!(tracks[3].digital_edges().expect("digital_edges failed"), &[]);
+    assert_eq!(tracks[3].digital_edges().expect("digital_edges failed"), &[] as &[f32]);
     assert_eq!(tracks[3].header().digital_init_level, 1);
     assert_eq!(tracks[4].state_ribbons().expect("state_ribbons failed"), &[]);
-    assert_eq!(tracks[5].spectrum_bins().expect("spectrum_bins failed"), &[]);
+    assert_eq!(tracks[5].spectrum_bins().expect("spectrum_bins failed"), &[] as &[f32]);
 }
 
 #[test]

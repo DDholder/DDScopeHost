@@ -726,6 +726,28 @@ impl TransportRegistry {
         Self::default()
     }
 
+    /// Creates a [`TransportRegistry`] pre-populated with all 6 Phase 1 built-in transport
+    /// factories (`Sim`, `Serial`, `Udp`, `TcpClient`, `TcpServer`, `RawFileReplay`).
+    pub fn with_builtin_transports() -> Self {
+        let mut reg = Self::new();
+        reg.register(TransportKind::Sim, super::sim::create_sim_transport);
+        reg.register(TransportKind::Serial, super::serial::create_serial_transport);
+        reg.register(TransportKind::Udp, super::net::create_udp_transport);
+        reg.register(
+            TransportKind::TcpClient,
+            super::net::create_tcp_client_transport,
+        );
+        reg.register(
+            TransportKind::TcpServer,
+            super::net::create_tcp_server_transport,
+        );
+        reg.register(
+            TransportKind::RawFileReplay,
+            super::replay::create_replay_transport,
+        );
+        reg
+    }
+
     /// Registers or replaces the factory function for `kind`.
     pub fn register(&mut self, kind: TransportKind, factory: TransportFactoryFn) {
         self.factories.insert(kind, factory);
@@ -916,5 +938,31 @@ mod tests {
 
         let missing = registry.create(TransportKind::CanFd, "{}");
         assert!(matches!(missing, Err(CoreError::Unsupported(_))));
+    }
+
+    #[test]
+    fn transport_registry_with_builtin_transports_registers_all_phase1_kinds() {
+        let registry = TransportRegistry::with_builtin_transports();
+        for kind in [
+            TransportKind::Sim,
+            TransportKind::Serial,
+            TransportKind::Udp,
+            TransportKind::TcpClient,
+            TransportKind::TcpServer,
+            TransportKind::RawFileReplay,
+        ] {
+            assert!(
+                registry.contains(kind),
+                "missing builtin factory for {kind:?}"
+            );
+        }
+        assert!(!registry.contains(TransportKind::UsbBulk));
+        assert!(!registry.contains(TransportKind::DebugProbeRtt));
+        assert!(!registry.contains(TransportKind::CanFd));
+
+        let sim = registry
+            .create(TransportKind::Sim, r#"{"channel_count":2,"sample_rate_hz":1000}"#)
+            .expect("builtin Sim factory should construct transport");
+        assert_eq!(sim.capabilities().kind, TransportKind::Sim);
     }
 }
