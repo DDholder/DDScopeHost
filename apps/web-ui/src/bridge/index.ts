@@ -1,4 +1,9 @@
-import { commands, type EngineStatusDto } from "./bindings";
+import { commands, events, type EngineStatusDto } from "./bindings";
+import { DDSF_VERSION_V1 } from "./ddsf-spec";
+
+export * from "./bindings";
+export * from "./ddsf-spec";
+export { commands, events };
 
 export type HostRuntimeMode = "tauri" | "browser-mock";
 
@@ -37,6 +42,7 @@ export async function fetchEngineStatus(): Promise<RuntimeStatus> {
       core_name: "ddscope-core (browser mock)",
       core_version: "0.1.0",
       bridge_ready: false,
+      ddsf_version: DDSF_VERSION_V1,
     },
     webgpuAvailable,
   };

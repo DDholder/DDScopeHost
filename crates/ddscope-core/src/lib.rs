@@ -12,6 +12,8 @@ pub mod transport;
 pub mod types;
 pub mod workspace;
 
+pub use scope::ddsf;
+
 use serde::{Deserialize, Serialize};
 
 /// Build and capability metadata for `ddscope-core`.

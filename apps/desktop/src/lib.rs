@@ -5,11 +5,28 @@ pub mod data_bridge;
 
 use std::path::{Path, PathBuf};
 use specta_typescript::Typescript;
-use tauri_specta::{collect_commands, Builder};
+use tauri_specta::{collect_commands, collect_events, Builder};
 
 /// Builds the `tauri-specta` command and event router.
 pub fn create_specta_builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![commands::get_engine_info])
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            commands::get_engine_info,
+            commands::list_serial_ports,
+            commands::create_source,
+            commands::start_source,
+            commands::stop_source,
+            commands::remove_source,
+            commands::seek_replay_source,
+            commands::set_raw_recorder,
+            commands::get_channel_tree,
+            commands::upsert_scope_viewport,
+            commands::remove_scope_viewport,
+            commands::rearm_scope,
+            commands::update_sync_group,
+            commands::send_downlink,
+        ])
+        .events(collect_events![commands::WorkspaceTelemetryEvent])
 }
 
 /// Exports TypeScript bindings to `path`.

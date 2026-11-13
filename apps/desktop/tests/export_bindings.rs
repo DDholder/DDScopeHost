@@ -6,5 +6,28 @@ fn export_specta_bindings() {
     let generated =
         std::fs::read_to_string(&out_path).expect("generated bindings.ts should be readable");
     assert!(!generated.trim().is_empty());
-    assert!(generated.contains("getEngineInfo"));
+
+    let expected_symbols = [
+        "getEngineInfo",
+        "listSerialPorts",
+        "createSource",
+        "startSource",
+        "stopSource",
+        "removeSource",
+        "seekReplaySource",
+        "setRawRecorder",
+        "getChannelTree",
+        "upsertScopeViewport",
+        "removeScopeViewport",
+        "rearmScope",
+        "updateSyncGroup",
+        "sendDownlink",
+        "workspaceTelemetryEvent",
+    ];
+    for sym in expected_symbols {
+        assert!(
+            generated.contains(sym),
+            "expected bindings.ts to contain `{sym}`"
+        );
+    }
 }
