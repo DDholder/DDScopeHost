@@ -18,6 +18,18 @@ crossbeam-channel = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
 parking_lot = { workspace = true }
+memchr = { workspace = true }
+socket2 = { workspace = true }
+hex = { workspace = true }
+fastrand = { workspace = true }
+crc32fast = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+winreg = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

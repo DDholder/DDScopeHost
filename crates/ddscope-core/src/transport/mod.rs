@@ -1,12 +1,24 @@
 //! Multi-source transport layer, slab buffer pool, async scheduler, and coalescing downlink queue.
 
 pub mod buffer_pool;
+pub mod recorder;
+pub mod replay;
 pub mod scheduler;
 pub mod tx_queue;
 
 pub use buffer_pool::{
     BufferPoolConfig, BufferPoolStats, PacketBufferPool, DEFAULT_MAX_RETAINED_SLABS,
     DEFAULT_PREALLOC_SLABS, DEFAULT_SLAB_BYTES, OS_PAGE_BYTES,
+};
+pub use recorder::{
+    DdrawHeader, DdrawReader, DdrawRecord, RawByteRecorder, RawRecordFormat, RawRecorderConfig,
+    RecorderStats, DDRAW_FILE_HEADER_BYTES, DDRAW_MAGIC, DDRAW_RECORD_HEADER_BYTES,
+    DDRAW_VERSION, DEFAULT_RECORDER_CHANNEL_CAPACITY, DEFAULT_RECORDER_WRITER_BUFFER_BYTES,
+};
+pub use replay::{
+    create_replay_transport, RawFileReplayConfig, RawFileReplayTransport, ReadOnlyMmap,
+    ReplayControlHandle, DEFAULT_NOMINAL_BYTE_RATE, DEFAULT_REPLAY_CHUNK_BYTES,
+    MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED,
 };
 pub use scheduler::{
     host_monotonic_ns, new_shared_raw_tap, MonotonicClock, RawByteTap, RawTapDirection,
