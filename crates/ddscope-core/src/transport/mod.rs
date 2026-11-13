@@ -1,7 +1,9 @@
 //! Multi-source transport layer, slab buffer pool, async scheduler, and coalescing downlink queue.
 
 pub mod buffer_pool;
+pub mod net;
 pub mod scheduler;
+pub mod serial;
 pub mod sim;
 pub mod tx_queue;
 
@@ -9,11 +11,26 @@ pub use buffer_pool::{
     BufferPoolConfig, BufferPoolStats, PacketBufferPool, DEFAULT_MAX_RETAINED_SLABS,
     DEFAULT_PREALLOC_SLABS, DEFAULT_SLAB_BYTES, OS_PAGE_BYTES,
 };
+pub use net::{
+    configure_os_udp_socket, create_tcp_client_transport, create_tcp_server_transport,
+    create_udp_transport, ConnectedTcpStream, DuplexTcpNetwork, OsTcpAcceptor, OsTcpConnector,
+    OsUdpBackend, TcpClientConfig, TcpClientTransport, TcpListenerHandle, TcpServerConfig,
+    TcpServerTransport, TcpStreamAcceptor, TcpStreamConnector, UdpConfig, UdpSocketBackend,
+    UdpSocketHandle, UdpTransport, ValidatedUdpConfig, VirtualUdpBindingInfo, VirtualUdpHub,
+    VirtualUdpPeer, DEFAULT_TCP_RECONNECT_DELAY_MS, DEFAULT_UDP_MAX_DATAGRAM_BYTES,
+    DEFAULT_UDP_RECV_BUFFER_BYTES,
+};
 pub use scheduler::{
     host_monotonic_ns, new_shared_raw_tap, MonotonicClock, RawByteTap, RawTapDirection,
     RxBackpressurePolicy, RxPacketEmitter, SharedRawTap, TransportMetrics,
     TransportMetricsSnapshot, TransportRegistry, TransportRuntimeConfig, TransportScheduler,
     DEFAULT_RX_RING_CAPACITY, DEFAULT_TX_HANDOFF_CAPACITY,
+};
+pub use serial::{
+    create_serial_transport, list_serial_ports, parse_usb_vid_pid, OsSerialProvider, SerialConfig,
+    SerialFlowControl, SerialIoProvider, SerialParity, SerialPortInfo, SerialPortStreams,
+    SerialStopBits, SerialTransport, VirtualSerialPair, VirtualSerialPeer,
+    DEFAULT_SERIAL_RECONNECT_DELAY_MS, MAX_SERIAL_BAUD_RATE,
 };
 pub use sim::*;
 pub use tx_queue::{
