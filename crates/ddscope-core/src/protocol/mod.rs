@@ -1,5 +1,30 @@
 //! Bidirectional protocol codec contracts and Phase 2 ACK transaction hooks.
 
+pub mod downlink;
+pub mod firewater;
+pub mod fixed_binary;
+pub mod justfloat;
+pub mod registry;
+
+pub use downlink::{encode_downlink_default, encode_hex_string, BasicDownlinkEncoder};
+pub use firewater::{
+    default_sim_state_labels, parse_ascii_f32, parse_ascii_f64, FireWaterColumnKind,
+    FireWaterColumnSpec, FireWaterConfig, FireWaterCsvCodec, FireWaterStats,
+};
+pub use fixed_binary::{
+    compute_checksum, encode_sim_preset_frame, sim_ctrl_state_labels, sim_preset_flags,
+    BinaryCodecStats, ChecksumKind, ChecksumScope, FixedFieldSpec, FixedSchemaBinaryCodec,
+    FixedSchemaBinaryConfig, SimPresetCodec, SimPresetConfig, SIM_PRESET_MAGIC,
+    SIM_PRESET_TAIL,
+};
+pub use justfloat::{
+    JustFloatCodec, JustFloatConfig, JustFloatStats, NonFinitePolicy, JUSTFLOAT_TAIL_MAGIC,
+};
+pub use registry::{
+    create_fire_water_codec, create_fixed_schema_binary_codec, create_just_float_codec,
+    create_sim_preset_codec, ProtocolRegistry,
+};
+
 use std::sync::Arc;
 
 use bytes::BytesMut;
