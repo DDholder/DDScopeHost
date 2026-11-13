@@ -2,6 +2,7 @@
 
 pub mod buffer_pool;
 pub mod scheduler;
+pub mod sim;
 pub mod tx_queue;
 
 pub use buffer_pool::{
@@ -14,6 +15,7 @@ pub use scheduler::{
     TransportMetricsSnapshot, TransportRegistry, TransportRuntimeConfig, TransportScheduler,
     DEFAULT_RX_RING_CAPACITY, DEFAULT_TX_HANDOFF_CAPACITY,
 };
+pub use sim::*;
 pub use tx_queue::{
     SharedTxQueue, TxCoalescingQueue, TxEnqueueReceipt, TxQueueStats, TxStreamConsumer,
     DEFAULT_TX_QUEUE_CAPACITY,
