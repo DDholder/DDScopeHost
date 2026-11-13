@@ -21,6 +21,11 @@
    - **MSO 混合信号实时虚拟示波器**：独立视口触发锁存、`SyncGroup` 时间轴联动、模拟波形 + 数字逻辑时序带 + 状态机跳变色带 + FFT 频谱帧同屏对齐
    - `Dockview` 多视口停靠 + 24/48 列磁吸自适应网格画布、React Flow 算子连线图、双向控件绑定与事务回显规范
    - 工程资产体系（`.ddscope.json` / `.ddproto.yaml` / `.ddcap`）与 Phase 1 ~ Phase 4 实施路线图
+4. **[04-phase1-design-and-plan.md](./04-phase1-design-and-plan.md) — Phase 1 (MVP) 需求拆解、详细设计方案与开发实施计划**
+   - Phase 1 MVP 范围界定（In-Scope vs. Deferred 前向兼容预留）、功能需求矩阵（FR）与性能基线指标（NFR）
+   - 系统分层结构图、`ddscope-core` 核心类与 Trait 框架图、无锁并发流水线时序图、独立触发状态机与 WebGPU MSO 分层渲染框架图
+   - `DDSF v1` 64 字节对齐二进制内存布局规范、三级混合时钟/二阶软件 PLL、64 叉 M4 金字塔与 `Chunk Pinning` 实现细则
+   - **契约先行双端解耦策略**、M0 ~ M5 六阶段划分、**四轨串并联开发主流程图（含关键路径标注）**与 WBS 依赖关系详表
 
 ---
 
