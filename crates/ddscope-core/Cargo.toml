@@ -18,3 +18,20 @@ crossbeam-channel = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
 parking_lot = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "storage_append"
+harness = false
+
+[[bench]]
+name = "m4_pyramid"
+harness = false
+
+[[bench]]
+name = "ddsf_pack"
+harness = false
+
+

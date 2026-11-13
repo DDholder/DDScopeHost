@@ -9,9 +9,10 @@ pub mod schema;
 
 pub use batch::{DecodedBatch, DecodedColumnBuf, InboundAckEvent};
 pub use chunk::{
-    AlignedBuffer, AlignedVec, BitVecChunk, CacheLineBlock, ChunkHandle, ChunkStorageRef,
-    DataChunk, EventDataChunk, FrameDataChunk, M4Bucket, MmapChunkLocator, NativeScalarColumn,
-    ScalarDataChunk, TimestampColumn, CACHE_LINE_BYTES, CHUNK_LEN, M4_BRANCH_FACTOR,
+    AlignedBuffer, AlignedVec, BitVecChunk, CacheLineBlock, ChunkHandle, ChunkM4Levels,
+    ChunkStorageRef, DataChunk, EventDataChunk, FrameDataChunk, M4Bucket, MmapChunkLocator,
+    NativeScalarColumn, ScalarDataChunk, TimestampColumn, CACHE_LINE_BYTES, CHUNK_LEN,
+    M4_BRANCH_FACTOR,
 };
 pub use error::{CoreError, CoreResult};
 pub use ids::{ChannelId, ChannelPath, ScopeId, SourceId, SyncGroupId, TimestampNs};
@@ -80,11 +81,10 @@ mod tests {
 
         let mut vals = AlignedVec::with_capacity(4);
         vals.extend_from_slice(&[10_i16, 20, 30]);
-        let chunk = Arc::new(DataChunk::Scalar(ScalarDataChunk {
-            timestamps: ts,
-            values: NativeScalarColumn::I16(vals),
-            calibration: LinearScale::identity(),
-        }));
+        let chunk = Arc::new(DataChunk::Scalar(
+            ScalarDataChunk::new(ts, NativeScalarColumn::I16(vals), LinearScale::identity())
+                .expect("valid scalar chunk"),
+        ));
         assert_eq!(chunk.sample_count(), 3);
         assert_eq!(chunk.time_range_ns(), Some((1_000_000, 1_000_200)));
 

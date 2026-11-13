@@ -1,6 +1,24 @@
 //! Per-scope independent trigger state machine, synchronization group, and DDSF v1 wire contract.
 
+pub mod controller;
 pub mod ddsf;
+pub mod sync;
+
+pub use controller::{
+    calculate_subsample_offset, HysteresisBandState, ScopeController, ScopeControllerConfig,
+    ScopeStepOutcome, ScopeViewportWindow, TriggerEngine, TriggerHit,
+};
+pub use ddsf::{
+    align_up_64, align_up_8, DdsfAnalogPoint, DdsfBlockKind, DdsfFrameHeader, DdsfFramePacker,
+    DdsfM4Column, DdsfScopeIter, DdsfScopePacketHeader, DdsfScopePacketView, DdsfSnapshotEntry,
+    DdsfSnapshotKind, DdsfStateRibbon, DdsfTrackBlockHeader, DdsfTrackBlockView, DdsfTrackIter,
+    DdsfTrackStats, DdsfZeroCopyReader, ScopePacketView, ScopeViewportPayload, TrackBlockView,
+    TrackPayload, TrackPayloadSlice, DDSF_FLAG_PINNED_ACTIVE, DDSF_FLAG_QUOTA_WARNING,
+    DDSF_HEADER_BYTES, DDSF_MAGIC, DDSF_SCOPE_HEADER_BYTES, DDSF_SNAPSHOT_ENTRY_BYTES,
+    DDSF_TRACK_FLAG_CLIPPED, DDSF_TRACK_FLAG_HAS_STATS, DDSF_TRACK_HEADER_BYTES,
+    DDSF_TRACK_STATS_BYTES, DDSF_VERSION_V1,
+};
+pub use sync::{SyncGroupCoordinator, SyncGroupState};
 
 use serde::{Deserialize, Serialize};
 
