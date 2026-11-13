@@ -1,4 +1,23 @@
-//! Multi-source transport layer and coalescing downlink queue contracts.
+//! Multi-source transport layer, slab buffer pool, async scheduler, and coalescing downlink queue.
+
+pub mod buffer_pool;
+pub mod scheduler;
+pub mod tx_queue;
+
+pub use buffer_pool::{
+    BufferPoolConfig, BufferPoolStats, PacketBufferPool, DEFAULT_MAX_RETAINED_SLABS,
+    DEFAULT_PREALLOC_SLABS, DEFAULT_SLAB_BYTES, OS_PAGE_BYTES,
+};
+pub use scheduler::{
+    host_monotonic_ns, new_shared_raw_tap, MonotonicClock, RawByteTap, RawTapDirection,
+    RxBackpressurePolicy, RxPacketEmitter, SharedRawTap, TransportMetrics,
+    TransportMetricsSnapshot, TransportRegistry, TransportRuntimeConfig, TransportScheduler,
+    DEFAULT_RX_RING_CAPACITY, DEFAULT_TX_HANDOFF_CAPACITY,
+};
+pub use tx_queue::{
+    SharedTxQueue, TxCoalescingQueue, TxEnqueueReceipt, TxQueueStats, TxStreamConsumer,
+    DEFAULT_TX_QUEUE_CAPACITY,
+};
 
 use std::sync::Arc;
 
@@ -55,6 +74,26 @@ impl OutboundFrame {
             coalesce_key: Some(key.into()),
             transaction_id: None,
         }
+    }
+
+    /// Creates a frame with an explicit priority whose unsent payload can be coalesced by key.
+    pub fn coalesced_with_priority(
+        payload: impl Into<Bytes>,
+        key: impl Into<String>,
+        priority: TxPriority,
+    ) -> Self {
+        Self {
+            payload: payload.into(),
+            priority,
+            coalesce_key: Some(key.into()),
+            transaction_id: None,
+        }
+    }
+
+    /// Attaches a transaction identifier for Phase 2 ACK request-response correlation.
+    pub fn with_transaction_id(mut self, transaction_id: u64) -> Self {
+        self.transaction_id = Some(transaction_id);
+        self
     }
 }
 
