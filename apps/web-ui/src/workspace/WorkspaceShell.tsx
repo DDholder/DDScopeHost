@@ -3,7 +3,6 @@ import type { UiLocale } from "../i18n/index.ts";
 import { formatBytesCompact } from "../scope-engine/time-format.ts";
 import { ChannelTreeSidebar } from "./ChannelTreeSidebar.tsx";
 import { DockviewStage } from "./DockviewStage.tsx";
-import { DownlinkBar } from "./DownlinkBar.tsx";
 import { readJsonFileFromInput, saveJsonFile } from "./file-dialog.ts";
 import { SourceWizardModal } from "./SourceWizardModal.tsx";
 import { useWorkspaceStore } from "./store.ts";
@@ -288,15 +287,12 @@ export function WorkspaceShell() {
             </div>
           </main>
         ) : (
-          <>
-            <div className="ddscope-main-row">
-              <ChannelTreeSidebar />
-              <main className="ddscope-viewport-stage">
-                <DockviewStage />
-              </main>
-            </div>
-            <DownlinkBar />
-          </>
+          <div className="ddscope-main-row">
+            <ChannelTreeSidebar />
+            <main className="ddscope-viewport-stage">
+              <DockviewStage />
+            </main>
+          </div>
         )}
       </div>
 
