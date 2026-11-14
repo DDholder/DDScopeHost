@@ -787,7 +787,9 @@ dependencies = [
 name = "ddscope-desktop"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ddscope-core",
+ "parking_lot",
  "serde",
  "serde_json",
  "specta",
@@ -795,8 +797,14 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-specta",
+ "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "webview2-com",
+ "windows",
+ "windows-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

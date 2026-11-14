@@ -25,6 +25,10 @@ pub fn create_specta_builder() -> Builder<tauri::Wry> {
             commands::rearm_scope,
             commands::update_sync_group,
             commands::send_downlink,
+            commands::attach_data_bridge,
+            commands::detach_data_bridge,
+            commands::get_data_bridge_stats,
+            commands::set_data_bridge_rate,
         ])
         .events(collect_events![commands::WorkspaceTelemetryEvent])
 }
@@ -54,7 +58,18 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(commands::DesktopBridgeState::new_stub())
         .invoke_handler(builder.invoke_handler())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                #[cfg(windows)]
+                {
+                    data_bridge::shm_windows::release_webview2_shm_on_sta(window.label());
+                }
+                #[cfg(not(windows))]
+                let _ = window;
+            }
+        })
         .setup(move |app| {
             builder.mount_events(app);
 

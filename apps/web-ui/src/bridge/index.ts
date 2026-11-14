@@ -5,3 +5,4 @@ export * from "./topic-bus.ts";
 export * from "./mock-ddsf-core.ts";
 export * from "./mock-ddsf.ts";
 export * from "./control-client.ts";
+export * from "./zero-copy-bridge.ts";

@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri_specta::Event;
 
+pub use crate::data_bridge::{
+    DataBridgeAttachDto, DataBridgeModeDto, DataBridgeStatsDto, DdsfSlotReadyDto,
+};
+
 /// Structured command error returned across the Tauri IPC boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ApiErrorDto {

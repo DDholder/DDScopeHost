@@ -22,7 +22,15 @@ fn export_specta_bindings() {
         "rearmScope",
         "updateSyncGroup",
         "sendDownlink",
+        "attachDataBridge",
+        "detachDataBridge",
+        "getDataBridgeStats",
+        "setDataBridgeRate",
         "workspaceTelemetryEvent",
+        "DataBridgeModeDto",
+        "DdsfSlotReadyDto",
+        "DataBridgeAttachDto",
+        "DataBridgeStatsDto",
     ];
     for sym in expected_symbols {
         assert!(

@@ -22,6 +22,7 @@ import {
   type TelemetryListener,
 } from "./mock-ddsf.ts";
 import { globalTopicBus, type HighFreqTopicBus } from "./topic-bus.ts";
+import { ZeroCopyDataBridgeReceiver } from "./zero-copy-bridge.ts";
 
 export type HostRuntimeMode = "tauri" | "browser-mock";
 
@@ -81,12 +82,14 @@ function isStubNotImplementedError(err: unknown): boolean {
 export class BridgeClient {
   readonly topicBus: HighFreqTopicBus;
   readonly mock: MockDdsfController;
+  readonly dataBridge: ZeroCopyDataBridgeReceiver;
   private useMockDataPlane = !isTauriHost();
   private tauriEventUnlisten: (() => void) | null = null;
 
   constructor(bus: HighFreqTopicBus = globalTopicBus) {
     this.topicBus = bus;
     this.mock = new MockDdsfController(bus);
+    this.dataBridge = new ZeroCopyDataBridgeReceiver(bus);
   }
 
   isMockMode(): boolean {
@@ -96,11 +99,40 @@ export class BridgeClient {
   startDataPlane(rateHz = 120): void {
     if (this.useMockDataPlane) {
       this.mock.start(rateHz);
+      return;
+    }
+    void this.startTauriDataPlane(rateHz);
+  }
+
+  private async startTauriDataPlane(rateHz: number): Promise<void> {
+    try {
+      const info = await commands.getEngineInfo();
+      if (!info.bridge_ready) {
+        this.useMockDataPlane = true;
+        this.mock.start(rateHz);
+        return;
+      }
+      await this.dataBridge.attach(null);
+      await this.dataBridge.setRate(rateHz);
+    } catch (err: unknown) {
+      let bridgeReady = true;
+      try {
+        const info = await commands.getEngineInfo();
+        bridgeReady = info.bridge_ready;
+      } catch {
+        bridgeReady = false;
+      }
+      if (isStubNotImplementedError(err) || !bridgeReady) {
+        await this.dataBridge.detach();
+        this.useMockDataPlane = true;
+        this.mock.start(rateHz);
+      }
     }
   }
 
   stopDataPlane(): void {
     this.mock.stop();
+    void this.dataBridge.detach();
     if (this.tauriEventUnlisten) {
       this.tauriEventUnlisten();
       this.tauriEventUnlisten = null;
@@ -109,6 +141,9 @@ export class BridgeClient {
 
   setMockRate(rateHz: number): void {
     this.mock.setRate(rateHz);
+    if (!this.useMockDataPlane && isTauriHost()) {
+      void this.dataBridge.setRate(rateHz);
+    }
   }
 
   subscribeTelemetry(listener: TelemetryListener): () => void {
@@ -152,6 +187,7 @@ export class BridgeClient {
     } catch (err: unknown) {
       if (isStubNotImplementedError(err)) {
         // Pre-M4 Tauri stub detected: automatically fall back to browser mock worker
+        void this.dataBridge.detach();
         this.useMockDataPlane = true;
         this.mock.start(120);
         return mockCall();
