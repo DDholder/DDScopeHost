@@ -6,7 +6,7 @@ type WorkerInboundMessage =
   | { type: "setRate"; rateHz: number }
   | { type: "rpc"; requestId: number; method: string; args: unknown[] };
 
-const core = new MockSimulationCore();
+const core = new MockSimulationCore({ autoStartDefaultSim: false });
 
 let timerId: ReturnType<typeof setInterval> | null = null;
 let targetRateHz = 120;

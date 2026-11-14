@@ -11,8 +11,9 @@ import {
   type TriggerSweepModeDto,
 } from "../bridge/bindings.ts";
 import { bridgeClient } from "../bridge/control-client.ts";
-import type { DdsfScopeView } from "../bridge/ddsf-parser.ts";
-import { TriggerRuntimeStateCode } from "../bridge/ddsf-spec.ts";
+import type { DdsfFrameHeaderView, DdsfScopeView } from "../bridge/ddsf-parser.ts";
+import { DdsfSnapshotKind, TriggerRuntimeStateCode } from "../bridge/ddsf-spec.ts";
+import { MOCK_BASE_HOST_NS } from "../bridge/mock-ddsf-core.ts";
 import { translate, type MessageKey, type UiLocale } from "../i18n/index.ts";
 import type { RenderBackendKind, ScopeRenderBackend } from "./backend.ts";
 import { createScopeRenderBackend } from "./create-backend.ts";
@@ -23,8 +24,14 @@ import {
   type HudHitTarget,
 } from "./hud-overlay.ts";
 import {
+  DEFAULT_Y_AXIS_CONFIG,
+  channelValueToAxis,
+  computeHorizontalPanBounds,
   computeMsoLayout,
-  yToAnalogValue,
+  yToChannelValue,
+  zoomXAxisAtCursor,
+  zoomYAxisAtCursor,
+  type Rect,
   type ScopeTrackRenderConfig,
 } from "./layout.ts";
 import {
@@ -37,6 +44,7 @@ import type {
   ScopeCallbacks,
   ScopeChannelLookup,
   ScopeUiConfig,
+  WheelZoomTarget,
 } from "./types.ts";
 
 export interface ScopeViewportWidgetProps {
@@ -82,18 +90,29 @@ function triggerStateLabel(code: number): {
   }
 }
 
+const CHIP_TRACE_COLORS = [
+  0x38bdf8ff,
+  0x34d399ff,
+  0xf59e0bff,
+  0xfb7185ff,
+  0xa78bfaff,
+  0x22d3eeff,
+  0xf97316ff,
+  0xe879f9ff,
+];
+
 function cursorForHit(hit: HudHitTarget): string {
   switch (hit) {
     case "cursorA":
     case "cursorB":
     case "preTrigger":
+    case "xGutter":
       return "ew-resize";
     case "triggerLevel":
+    case "yGutter":
       return "ns-resize";
     case "plot":
       return "grab";
-    case "yGutter":
-      return "ns-resize";
     default:
       return "default";
   }
@@ -101,6 +120,25 @@ function cursorForHit(hit: HudHitTarget): string {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+function formatConditionSummary(scale: number, offset: number): string {
+  const s = Number.isInteger(scale) ? String(scale) : scale.toFixed(2).replace(/\.?0+$/, "");
+  if (Math.abs(offset) < 1e-6) {
+    return `×${s}`;
+  }
+  const o = Number.isInteger(offset) ? String(offset) : offset.toFixed(1);
+  return offset >= 0 ? `×${s} +${o}` : `×${s} ${o}`;
+}
+
+function findAnalogRectForY(
+  layout: ReturnType<typeof computeMsoLayout>,
+  cssY: number,
+): Rect {
+  const exact = layout.analogSubLanes.find(
+    (l) => cssY >= l.rect.y && cssY <= l.rect.y + l.rect.height,
+  );
+  return exact?.rect ?? layout.analogRegion;
 }
 
 export function ScopeViewportWidget({
@@ -134,6 +172,7 @@ export function ScopeViewportWidget({
   );
   const [backendKind, setBackendKind] = useState<RenderBackendKind>("webgl2");
   const [dropActive, setDropActive] = useState(false);
+  const [editingChannelId, setEditingChannelId] = useState<number | null>(null);
 
   const configRef = useRef(config);
   configRef.current = config;
@@ -147,9 +186,12 @@ export function ScopeViewportWidget({
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
 
-  const pendingScopeRef = useRef<DdsfScopeView | null>(
-    bridgeClient.topicBus.getLatestScopeFrame(config.scopeId)?.scope ?? null,
-  );
+  const initialFrame = bridgeClient.topicBus.getLatestScopeFrame(config.scopeId);
+  const pendingScopeRef = useRef<DdsfScopeView | null>(initialFrame?.scope ?? null);
+  const latestHeaderRef = useRef<DdsfFrameHeaderView | null>(initialFrame?.header ?? null);
+  const pausedHostNowNsRef = useRef<number | null>(null);
+  const chipValueRefs = useRef<Map<number, HTMLSpanElement>>(new Map());
+  const latestSnapValsRef = useRef<Map<number, { kind: number; val: number }>>(new Map());
   const dirtyRef = useRef(true);
   const backendRef = useRef<ScopeRenderBackend | null>(null);
   const backendKindRef = useRef<RenderBackendKind>("webgl2");
@@ -167,18 +209,18 @@ export function ScopeViewportWidget({
     startCssX: number;
     startCssY: number;
     initialPanNs: number;
-    /** Analog channel whose vertical offset follows the drag (null = horizontal only). */
-    yChannelId: number | null;
-    initialYOffset: number;
-    /** Value units per CSS pixel for the dragged analog lane. */
+    /** Whole-axis Y center offset at pointer-down (null when Y-drag is inactive). */
+    yAxisActive: boolean;
+    initialYAxisOffset: number;
+    /** Coordinate axis units per CSS pixel for the dragged analog region/lane. */
     yUnitsPerPx: number;
   }>({
     target: "none",
     startCssX: 0,
     startCssY: 0,
     initialPanNs: 0,
-    yChannelId: null,
-    initialYOffset: 0,
+    yAxisActive: false,
+    initialYAxisOffset: 0,
     yUnitsPerPx: 0,
   });
 
@@ -227,8 +269,9 @@ export function ScopeViewportWidget({
 
   // Subscribe to zero-copy DDSF frames for this scope without triggering React re-renders
   useEffect(() => {
-    const unsub = bridgeClient.topicBus.subscribeScope(config.scopeId, (scopeView) => {
+    const unsub = bridgeClient.topicBus.subscribeScope(config.scopeId, (scopeView, header) => {
       pendingScopeRef.current = scopeView;
+      latestHeaderRef.current = header;
       dirtyRef.current = true;
 
       if (scopeView.triggerState !== perfStatsRef.current.lastTriggerCode) {
@@ -238,6 +281,65 @@ export function ScopeViewportWidget({
     });
     return unsub;
   }, [config.scopeId]);
+
+  const flushChipValues = useCallback(() => {
+    const curLocale = localeRef.current;
+    const vals = latestSnapValsRef.current;
+    chipValueRefs.current.forEach((el, chId) => {
+      const snap = vals.get(chId);
+      if (!snap) return;
+      const ch = channelsRef.current[chId];
+      if (snap.kind === DdsfSnapshotKind.Bool) {
+        el.textContent =
+          snap.val > 0.5
+            ? translate(curLocale, "sidebar.valHigh")
+            : translate(curLocale, "sidebar.valLow");
+        el.className = snap.val > 0.5 ? "scope-ch-live val-high" : "scope-ch-live val-low";
+      } else if (snap.kind === DdsfSnapshotKind.StateEnum) {
+        const code = Math.round(snap.val);
+        const lbl = ch?.state_labels.find((l) => l.code === code)?.name ?? `S${code}`;
+        el.textContent = lbl;
+        el.className = code === 3 ? "scope-ch-live val-fault" : "scope-ch-live val-state";
+      } else {
+        el.textContent = formatMetricValue(snap.val, ch?.unit ?? null);
+        el.className = "scope-ch-live";
+      }
+    });
+  }, []);
+
+  // 15 Hz live value badges on bound channel chips
+  useEffect(() => {
+    for (const tr of configRef.current.tracks) {
+      const snap = bridgeClient.topicBus.getLatestSnapshot(tr.channelId);
+      if (snap) {
+        latestSnapValsRef.current.set(snap.channelNumId, { kind: snap.kind, val: snap.valF64 });
+      }
+    }
+    flushChipValues();
+
+    let lastFlushMs = 0;
+    const unsub = bridgeClient.topicBus.subscribeSnapshots((snapshots) => {
+      for (let i = 0; i < snapshots.length; i += 1) {
+        const s = snapshots[i];
+        latestSnapValsRef.current.set(s.channelNumId, { kind: s.kind, val: s.valF64 });
+      }
+      const now = performance.now();
+      if (now - lastFlushMs < 65) return;
+      lastFlushMs = now;
+      flushChipValues();
+    });
+    return unsub;
+  }, [flushChipValues]);
+
+  useEffect(() => {
+    for (const tr of config.tracks) {
+      const snap = bridgeClient.topicBus.getLatestSnapshot(tr.channelId);
+      if (snap) {
+        latestSnapValsRef.current.set(snap.channelNumId, { kind: snap.kind, val: snap.valF64 });
+      }
+    }
+    flushChipValues();
+  }, [config.tracks, channelsById, locale, flushChipValues]);
 
   // Initialize GPU backend, ResizeObserver, and requestAnimationFrame loop
   useEffect(() => {
@@ -360,7 +462,11 @@ export function ScopeViewportWidget({
         const scopeData = pendingScopeRef.current;
 
         const layout = computeMsoLayout(cssW, cssH, tracks, cfg.analogLayout);
-        const built = geometryRef.current.build(layout, dpr, scopeData, tracks);
+        const axisCfg = {
+          yAxisScale: cfg.yAxisScale ?? DEFAULT_Y_AXIS_CONFIG.yAxisScale,
+          yAxisOffset: cfg.yAxisOffset ?? DEFAULT_Y_AXIS_CONFIG.yAxisOffset,
+        };
+        const built = geometryRef.current.build(layout, dpr, scopeData, tracks, axisCfg);
 
         const physW = Math.round(cssW * dpr);
         const physH = Math.round(cssH * dpr);
@@ -392,6 +498,8 @@ export function ScopeViewportWidget({
             timeSpanNs: cfg.timeSpanNs,
             preTriggerRatio: cfg.preTriggerRatio,
             panOffsetNs: cfg.panOffsetNs,
+            yAxisScale: axisCfg.yAxisScale,
+            yAxisOffset: axisCfg.yAxisOffset,
             trigger: cfg.trigger,
             cursorsEnabled: cfg.cursorsEnabled,
             cursorARatio: cfg.cursorARatio,
@@ -429,7 +537,60 @@ export function ScopeViewportWidget({
     };
   }, [onCanvasWidthChanged]);
 
-  // Attach non-passive wheel listener for smooth cursor-centered zoom
+  const computePanBoundsForConfig = useCallback(
+    (cfg: ScopeUiConfig, targetSpanNs?: number) => {
+      const scopeData = pendingScopeRef.current;
+      const header = latestHeaderRef.current;
+      const hasVisibleTracks = cfg.tracks.some((t) => t.visible);
+      if (!scopeData || !hasVisibleTracks) {
+        return computeHorizontalPanBounds({
+          hasScopeData: false,
+          hasVisibleTracks,
+          triggerState: 0,
+          totalTrackElements: 0,
+          sweepMode: cfg.sweepMode,
+          preTriggerRatio: cfg.preTriggerRatio,
+          paused: cfg.paused,
+          timeSpanNs: cfg.timeSpanNs,
+          targetSpanNs,
+          currentPanNs: cfg.panOffsetNs,
+          winTStartNs: 0,
+          winTSpanNs: cfg.timeSpanNs,
+          hostNowNs: 0,
+          floorWinStartNs: 0,
+        });
+      }
+      let totalTrackElements = 0;
+      for (let i = 0; i < scopeData.tracks.length; i += 1) {
+        totalTrackElements += scopeData.tracks[i].elementCount;
+      }
+      const floorWinStartNs =
+        scopeData.winTStartNs >= MOCK_BASE_HOST_NS - 1_000_000_000 ? MOCK_BASE_HOST_NS : 0;
+      const liveHostNowNs = header?.hostNowNs ?? scopeData.winTStartNs + scopeData.winTSpanNs;
+      const hostNowNs = cfg.paused
+        ? (pausedHostNowNsRef.current ?? scopeData.winTStartNs + scopeData.winTSpanNs)
+        : liveHostNowNs;
+      return computeHorizontalPanBounds({
+        hasScopeData: true,
+        hasVisibleTracks,
+        triggerState: scopeData.triggerState,
+        totalTrackElements,
+        sweepMode: cfg.sweepMode,
+        preTriggerRatio: cfg.preTriggerRatio,
+        paused: cfg.paused,
+        timeSpanNs: cfg.timeSpanNs,
+        targetSpanNs,
+        currentPanNs: cfg.panOffsetNs,
+        winTStartNs: scopeData.winTStartNs,
+        winTSpanNs: scopeData.winTSpanNs,
+        hostNowNs,
+        floorWinStartNs,
+      });
+    },
+    [],
+  );
+
+  // Attach non-passive wheel listener for smooth cursor-centered X & Y coordinate zoom
   useEffect(() => {
     const hudCanvas = hudCanvasRef.current;
     if (!hudCanvas) return;
@@ -447,55 +608,86 @@ export function ScopeViewportWidget({
         cfg.analogLayout,
       );
 
-      if (ev.shiftKey || cssX < layout.plotLeft) {
-        // Vertical Y-scale zoom on active analog channel
-        const factor = ev.deltaY > 0 ? 1.2 : 0.82;
-        const targetId =
-          cfg.activeAnalogChannelId ??
-          cfg.tracks.find((t) => t.lane === "analog" && t.visible)?.channelId ??
-          null;
-        if (targetId === null) return;
-        callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => ({
-          ...prev,
-          tracks: prev.tracks.map((t) =>
-            t.channelId === targetId
-              ? { ...t, yScale: clamp(t.yScale * factor, 0.01, 5000) }
-              : t,
-          ),
-        }));
-        return;
+      const onLeftGutter = cssX < layout.plotLeft;
+      const onBottomGutter = cssY > layout.plotBottom;
+      const wheelMode = cfg.wheelZoomTarget ?? "x";
+
+      const zoomY =
+        onLeftGutter ||
+        ev.shiftKey ||
+        ev.ctrlKey ||
+        ev.metaKey ||
+        ev.altKey ||
+        (!onBottomGutter && (wheelMode === "y" || wheelMode === "xy"));
+
+      const zoomX =
+        !onLeftGutter &&
+        (onBottomGutter ||
+          (!ev.shiftKey && !ev.ctrlKey && !ev.metaKey && (wheelMode === "x" || wheelMode === "xy" || ev.altKey)));
+
+      const yFactor = ev.deltaY > 0 ? 1.2 : 0.82;
+      const xFactor = ev.deltaY > 0 ? 1.25 : 0.8;
+      const targetRect = findAnalogRectForY(layout, cssY);
+      const zeroRatio = cfg.sweepMode === "roll" ? 1.0 : cfg.preTriggerRatio;
+
+      let nextSpanNs = cfg.timeSpanNs;
+      let nextPanNs = cfg.panOffsetNs;
+      let xChanged = false;
+
+      if (zoomX) {
+        const zoomedX = zoomXAxisAtCursor(
+          cssX,
+          layout.plotLeft,
+          layout.plotWidth,
+          cfg.timeSpanNs,
+          cfg.panOffsetNs,
+          zeroRatio,
+          xFactor,
+          (newSpan) => computePanBoundsForConfig(cfg, newSpan),
+        );
+        nextSpanNs = zoomedX.timeSpanNs;
+        nextPanNs = zoomedX.panOffsetNs;
+        xChanged = nextSpanNs !== cfg.timeSpanNs || nextPanNs !== cfg.panOffsetNs;
       }
 
-      const zoomFactor = ev.deltaY > 0 ? 1.25 : 0.8;
-      const oldSpan = cfg.timeSpanNs;
-      const newSpan = Math.round(clamp(oldSpan * zoomFactor, 1_000, 600_000_000_000));
-      if (newSpan === oldSpan) return;
+      if (!zoomY && !xChanged) return;
 
-      const u = clamp((cssX - layout.plotLeft) / Math.max(1, layout.plotWidth), 0, 1);
-      const zeroRatio = cfg.sweepMode === "roll" ? 1.0 : cfg.preTriggerRatio;
-      const newPanOffset =
-        cfg.panOffsetNs + (u - zeroRatio) * (oldSpan - newSpan);
+      callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => {
+        let nextAxis = {
+          yAxisScale: prev.yAxisScale ?? DEFAULT_Y_AXIS_CONFIG.yAxisScale,
+          yAxisOffset: prev.yAxisOffset ?? DEFAULT_Y_AXIS_CONFIG.yAxisOffset,
+        };
+        if (zoomY) {
+          nextAxis = zoomYAxisAtCursor(
+            cssY,
+            targetRect,
+            nextAxis.yAxisScale,
+            nextAxis.yAxisOffset,
+            yFactor,
+          );
+        }
+        return {
+          ...prev,
+          yAxisScale: nextAxis.yAxisScale,
+          yAxisOffset: nextAxis.yAxisOffset,
+          timeSpanNs: zoomX ? nextSpanNs : prev.timeSpanNs,
+          panOffsetNs: zoomX ? nextPanNs : prev.panOffsetNs,
+        };
+      });
 
-      callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => ({
-        ...prev,
-        timeSpanNs: newSpan,
-        panOffsetNs: Math.round(newPanOffset),
-      }));
-
-      if (cfg.syncGroupId !== null) {
+      if (zoomX && xChanged && cfg.syncGroupId !== null) {
         callbacksRef.current.onSyncGroupBroadcast(cfg.syncGroupId, cfg.scopeId, {
-          timeSpanNs: newSpan,
-          panOffsetNs: Math.round(newPanOffset),
+          timeSpanNs: nextSpanNs,
+          panOffsetNs: nextPanNs,
         });
       }
-      if (cssY < 0) return;
     };
 
     hudCanvas.addEventListener("wheel", handleWheel, { passive: false });
     return () => {
       hudCanvas.removeEventListener("wheel", handleWheel);
     };
-  }, []);
+  }, [computePanBoundsForConfig]);
 
   const handlePointerDown = useCallback((ev: React.PointerEvent<HTMLCanvasElement>) => {
     const hudCanvas = hudCanvasRef.current;
@@ -520,29 +712,25 @@ export function ScopeViewportWidget({
       cursorsEnabled: cfg.cursorsEnabled,
       cursorARatio: cfg.cursorARatio,
       cursorBRatio: cfg.cursorBRatio,
+      yAxisScale: cfg.yAxisScale,
+      yAxisOffset: cfg.yAxisOffset,
     });
 
     if (target === "none") return;
 
-    // Resolve which analog lane (if any) should follow vertical drags.
-    let yChannelId: number | null = null;
-    let initialYOffset = 0;
+    // Resolve whole-axis Y-drag metrics across the hovered analog coordinate region/lane.
+    let yAxisActive = false;
+    const initialYAxisOffset = cfg.yAxisOffset ?? DEFAULT_Y_AXIS_CONFIG.yAxisOffset;
+    const curYAxisScale = cfg.yAxisScale ?? DEFAULT_Y_AXIS_CONFIG.yAxisScale;
     let yUnitsPerPx = 0;
     if (target === "plot" || target === "yGutter") {
-      const lanes = layout.analogSubLanes;
       const region = layout.analogRegion;
       const inAnalogRegion = cssY >= region.y && cssY <= region.y + region.height;
-      if (lanes.length > 0 && (inAnalogRegion || target === "yGutter")) {
-        const isOverlay = lanes.every((l) => l.rect === region);
-        const lane = isOverlay
-          ? (lanes.find((l) => l.track.channelId === cfg.activeAnalogChannelId) ?? lanes[0])
-          : (lanes.find((l) => cssY >= l.rect.y && cssY <= l.rect.y + l.rect.height) ??
-            lanes.find((l) => l.track.channelId === cfg.activeAnalogChannelId) ??
-            lanes[0]);
-        yChannelId = lane.track.channelId;
-        initialYOffset = lane.track.yOffset;
-        // 8 vertical divisions span the lane height (see analogValueToY).
-        yUnitsPerPx = (8 * Math.max(1e-6, lane.track.yScale)) / Math.max(1, lane.rect.height);
+      if (layout.analogSubLanes.length > 0 && (inAnalogRegion || target === "yGutter")) {
+        const laneRect = findAnalogRectForY(layout, cssY);
+        yAxisActive = true;
+        // 8 vertical divisions span the analog coordinate axis height.
+        yUnitsPerPx = (8 * Math.max(1e-4, curYAxisScale)) / Math.max(1, laneRect.height);
       }
     }
 
@@ -552,8 +740,8 @@ export function ScopeViewportWidget({
       startCssX: cssX,
       startCssY: cssY,
       initialPanNs: cfg.panOffsetNs,
-      yChannelId,
-      initialYOffset,
+      yAxisActive,
+      initialYAxisOffset,
       yUnitsPerPx,
     };
     dirtyRef.current = true;
@@ -582,6 +770,8 @@ export function ScopeViewportWidget({
         cursorsEnabled: cfg.cursorsEnabled,
         cursorARatio: cfg.cursorARatio,
         cursorBRatio: cfg.cursorBRatio,
+        yAxisScale: cfg.yAxisScale,
+        yAxisOffset: cfg.yAxisOffset,
       });
       if (hoverHandleRef.current !== hit) {
         hoverHandleRef.current = hit;
@@ -634,8 +824,12 @@ export function ScopeViewportWidget({
         layout.analogSubLanes.find((l) => l.track.channelId === trigChId) ??
         layout.analogSubLanes[0];
       if (!lane) return;
+      const axisCfg = {
+        yAxisScale: cfg.yAxisScale ?? DEFAULT_Y_AXIS_CONFIG.yAxisScale,
+        yAxisOffset: cfg.yAxisOffset ?? DEFAULT_Y_AXIS_CONFIG.yAxisOffset,
+      };
       const nextLevel = Number(
-        yToAnalogValue(cssY, lane.rect, lane.track.yScale, lane.track.yOffset).toFixed(2),
+        yToChannelValue(cssY, lane.rect, axisCfg, lane.track.yScale, lane.track.yOffset).toFixed(2),
       );
       callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => ({
         ...prev,
@@ -648,38 +842,50 @@ export function ScopeViewportWidget({
     }
 
     if (dragging.target === "yGutter") {
-      if (dragging.yChannelId === null) return;
+      if (!dragging.yAxisActive) return;
       hudCanvas.style.cursor = "ns-resize";
-      const yChannelId = dragging.yChannelId;
-      const nextYOffset =
-        dragging.initialYOffset + (cssY - dragging.startCssY) * dragging.yUnitsPerPx;
+      const nextYAxisOffset =
+        dragging.initialYAxisOffset + (cssY - dragging.startCssY) * dragging.yUnitsPerPx;
       callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => ({
         ...prev,
-        tracks: prev.tracks.map((t) =>
-          t.channelId === yChannelId ? { ...t, yOffset: nextYOffset } : t,
-        ),
+        yAxisOffset: nextYAxisOffset,
       }));
       return;
     }
 
-    if (dragging.target === "plot") {
-      hudCanvas.style.cursor = "grabbing";
+    if (dragging.target === "xGutter" || dragging.target === "plot") {
+      hudCanvas.style.cursor = dragging.target === "xGutter" ? "ew-resize" : "grabbing";
       const dxPx = cssX - dragging.startCssX;
       const dyPx = cssY - dragging.startCssY;
-      const dNs = -(dxPx / Math.max(1, layout.plotWidth)) * cfg.timeSpanNs;
-      const nextPanNs = Math.round(dragging.initialPanNs + dNs);
-      const yChannelId = dragging.yChannelId;
-      // Dragging down moves the trace down => raise the vertical center value.
-      const nextYOffset = dragging.initialYOffset + dyPx * dragging.yUnitsPerPx;
+
+      const bounds = computePanBoundsForConfig(cfg);
+      let nextPanNs = cfg.panOffsetNs;
+      if (!bounds.canPan) {
+        dragging.startCssX = cssX;
+        dragging.initialPanNs = cfg.panOffsetNs;
+      } else {
+        const dNs = -(dxPx / Math.max(1, layout.plotWidth)) * cfg.timeSpanNs;
+        const rawNextPanNs = Math.round(dragging.initialPanNs + dNs);
+        nextPanNs = Math.round(clamp(rawNextPanNs, bounds.minPanNs, bounds.maxPanNs));
+        if (nextPanNs !== rawNextPanNs) {
+          dragging.startCssX = cssX;
+          dragging.initialPanNs = nextPanNs;
+        }
+      }
+
+      const updateYAxis = dragging.target === "plot" && dragging.yAxisActive;
+      const nextYAxisOffset = updateYAxis
+        ? dragging.initialYAxisOffset + dyPx * dragging.yUnitsPerPx
+        : cfg.yAxisOffset;
+
+      if (nextPanNs === cfg.panOffsetNs && (!updateYAxis || nextYAxisOffset === cfg.yAxisOffset)) {
+        return;
+      }
+
       callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => ({
         ...prev,
         panOffsetNs: nextPanNs,
-        tracks:
-          yChannelId === null
-            ? prev.tracks
-            : prev.tracks.map((t) =>
-                t.channelId === yChannelId ? { ...t, yOffset: nextYOffset } : t,
-              ),
+        ...(updateYAxis ? { yAxisOffset: nextYAxisOffset } : {}),
       }));
       if (cfg.syncGroupId !== null && nextPanNs !== cfg.panOffsetNs) {
         callbacksRef.current.onSyncGroupBroadcast(cfg.syncGroupId, cfg.scopeId, {
@@ -687,7 +893,7 @@ export function ScopeViewportWidget({
         });
       }
     }
-  }, []);
+  }, [computePanBoundsForConfig]);
 
   const handlePointerUp = useCallback((ev: React.PointerEvent<HTMLCanvasElement>) => {
     const hudCanvas = hudCanvasRef.current;
@@ -732,6 +938,43 @@ export function ScopeViewportWidget({
 
   const statusMeta = triggerStateLabel(runtimeTriggerState);
   const analogTracks = config.tracks.filter((t) => t.lane === "analog");
+  const wheelMode = config.wheelZoomTarget ?? "x";
+  const editingTrack =
+    editingChannelId !== null
+      ? config.tracks.find((tr) => tr.channelId === editingChannelId && tr.lane === "analog") ?? null
+      : null;
+
+  const handleAutoFitY = () => {
+    const scopeData = pendingScopeRef.current;
+    let minAxis = Infinity;
+    let maxAxis = -Infinity;
+    for (const tr of analogTracks) {
+      if (!tr.visible) continue;
+      const blk = scopeData?.tracks.find((b) => b.channelId === tr.channelId);
+      if (blk?.stats) {
+        const aMin = channelValueToAxis(blk.stats.min, tr.yScale, tr.yOffset);
+        const aMax = channelValueToAxis(blk.stats.max, tr.yScale, tr.yOffset);
+        minAxis = Math.min(minAxis, aMin, aMax);
+        maxAxis = Math.max(maxAxis, aMin, aMax);
+      } else {
+        const snap = latestSnapValsRef.current.get(tr.channelId);
+        if (snap) {
+          const aVal = channelValueToAxis(snap.val, tr.yScale, tr.yOffset);
+          minAxis = Math.min(minAxis, aVal - 5);
+          maxAxis = Math.max(maxAxis, aVal + 5);
+        }
+      }
+    }
+    if (!Number.isFinite(minAxis) || !Number.isFinite(maxAxis)) return;
+    const span = Math.max(0.5, maxAxis - minAxis);
+    const nextOffset = Number(((minAxis + maxAxis) * 0.5).toFixed(2));
+    const nextScale = Number(clamp(span / 6.2, 0.01, 100_000).toFixed(2));
+    callbacks.onUpdateScope(config.scopeId, (prev) => ({
+      ...prev,
+      yAxisScale: nextScale,
+      yAxisOffset: nextOffset,
+    }));
+  };
 
   return (
     <div
@@ -751,13 +994,14 @@ export function ScopeViewportWidget({
                 key={m.id}
                 type="button"
                 className={`scope-seg-btn ${config.sweepMode === m.id ? "active" : ""}`}
-                onClick={() =>
+                onClick={() => {
+                  pausedHostNowNsRef.current = null;
                   callbacks.onUpdateScope(config.scopeId, (prev) => ({
                     ...prev,
                     sweepMode: m.id,
                     panOffsetNs: 0,
-                  }))
-                }
+                  }));
+                }}
               >
                 {t(m.labelKey)}
               </button>
@@ -777,7 +1021,10 @@ export function ScopeViewportWidget({
               type="button"
               className="scope-btn scope-btn-accent"
               data-testid={`scope-rearm-${config.scopeId}`}
-              onClick={() => callbacks.onRearmScope(config.scopeId)}
+              onClick={() => {
+                pausedHostNowNsRef.current = null;
+                callbacks.onRearmScope(config.scopeId);
+              }}
             >
               {t("scope.rearm")}
             </button>
@@ -786,12 +1033,21 @@ export function ScopeViewportWidget({
           <button
             type="button"
             className={`scope-btn ${config.paused ? "scope-btn-warn" : ""}`}
-            onClick={() =>
+            onClick={() => {
+              const nextPaused = !config.paused;
+              if (nextPaused) {
+                const sd = pendingScopeRef.current;
+                pausedHostNowNsRef.current =
+                  latestHeaderRef.current?.hostNowNs ??
+                  (sd ? sd.winTStartNs + sd.winTSpanNs : null);
+              } else {
+                pausedHostNowNsRef.current = null;
+              }
               callbacks.onUpdateScope(config.scopeId, (prev) => ({
                 ...prev,
-                paused: !prev.paused,
-              }))
-            }
+                paused: nextPaused,
+              }));
+            }}
           >
             {config.paused ? t("scope.resume") : t("scope.pause")}
           </button>
@@ -819,6 +1075,56 @@ export function ScopeViewportWidget({
         </div>
 
         <div className="scope-toolbar-group">
+          <div
+            className="scope-segmented"
+            role="group"
+            title={t("scope.wheelTargetTitle")}
+            aria-label={t("scope.wheelTargetAria")}
+          >
+            {(["x", "y", "xy"] as ReadonlyArray<WheelZoomTarget>).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`scope-seg-btn ${wheelMode === mode ? "active" : ""}`}
+                data-testid={`scope-wheel-${config.scopeId}-${mode}`}
+                onClick={() =>
+                  callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                    ...prev,
+                    wheelZoomTarget: mode,
+                  }))
+                }
+              >
+                {mode.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="scope-btn"
+            title={t("scope.autoYTitle")}
+            data-testid={`scope-auto-y-${config.scopeId}`}
+            onClick={handleAutoFitY}
+          >
+            {t("scope.autoY")}
+          </button>
+
+          {Math.abs(config.yAxisOffset) > 1e-4 && (
+            <button
+              type="button"
+              className="scope-btn"
+              title={t("scope.zeroYTitle")}
+              onClick={() =>
+                callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                  ...prev,
+                  yAxisOffset: 0,
+                }))
+              }
+            >
+              {t("scope.zeroY")}
+            </button>
+          )}
+
           <button
             type="button"
             className={`scope-btn ${config.analogLayout === "stacked" ? "active" : ""}`}
@@ -882,13 +1188,19 @@ export function ScopeViewportWidget({
             value={String(config.timeSpanNs)}
             onChange={(ev) => {
               const nextSpan = Number(ev.target.value);
+              const bounds = computePanBoundsForConfig(config, nextSpan);
+              const clampedPan = Math.round(
+                clamp(config.panOffsetNs, bounds.minPanNs, bounds.maxPanNs),
+              );
               callbacks.onUpdateScope(config.scopeId, (prev) => ({
                 ...prev,
                 timeSpanNs: nextSpan,
+                panOffsetNs: clampedPan,
               }));
               if (config.syncGroupId !== null) {
                 callbacks.onSyncGroupBroadcast(config.syncGroupId, config.scopeId, {
                   timeSpanNs: nextSpan,
+                  panOffsetNs: clampedPan,
                 });
               }
             }}
@@ -1055,10 +1367,11 @@ export function ScopeViewportWidget({
               trTrack.lane === "analog" &&
               (config.activeAnalogChannelId === trTrack.channelId ||
                 (config.activeAnalogChannelId === null && analogTracks[0]?.channelId === trTrack.channelId));
+            const isEditing = editingChannelId === trTrack.channelId;
             return (
               <div
                 key={trTrack.channelId}
-                className={`scope-ch-chip ${!trTrack.visible ? "muted" : ""} ${isActive ? "active" : ""}`}
+                className={`scope-ch-chip ${!trTrack.visible ? "muted" : ""} ${isActive ? "active" : ""} ${isEditing ? "editing" : ""}`}
                 onClick={() => {
                   if (trTrack.lane === "analog") {
                     callbacks.onUpdateScope(config.scopeId, (prev) => ({
@@ -1073,44 +1386,31 @@ export function ScopeViewportWidget({
                   style={{ backgroundColor: rgbaNumberToCss(trTrack.colorRgba, 1) }}
                 />
                 <span className="scope-ch-name">{label}</span>
+                <span
+                  className="scope-ch-live"
+                  data-testid={`scope-ch-live-${config.scopeId}-${trTrack.channelId}`}
+                  ref={(el) => {
+                    if (el) chipValueRefs.current.set(trTrack.channelId, el);
+                    else chipValueRefs.current.delete(trTrack.channelId);
+                  }}
+                >
+                  --
+                </span>
                 {trTrack.lane === "analog" && (
-                  <span className="scope-ch-scale">
-                    <button
-                      type="button"
-                      title={t("scope.zoomYIn")}
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                          ...prev,
-                          tracks: prev.tracks.map((tr) =>
-                            tr.channelId === trTrack.channelId
-                              ? { ...tr, yScale: clamp(tr.yScale * 0.75, 0.01, 5000) }
-                              : tr,
-                          ),
-                        }));
-                      }}
-                    >
-                      +
-                    </button>
-                    <span>{trTrack.yScale.toFixed(trTrack.yScale >= 10 ? 0 : 1)}/d</span>
-                    <button
-                      type="button"
-                      title={t("scope.zoomYOut")}
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                          ...prev,
-                          tracks: prev.tracks.map((tr) =>
-                            tr.channelId === trTrack.channelId
-                              ? { ...tr, yScale: clamp(tr.yScale * 1.33, 0.01, 5000) }
-                              : tr,
-                          ),
-                        }));
-                      }}
-                    >
-                      −
-                    </button>
-                  </span>
+                  <button
+                    type="button"
+                    className={`scope-ch-cond-btn ${isEditing ? "active" : ""}`}
+                    title={t("scope.channelCondTitle")}
+                    data-testid={`ch-cond-btn-${config.scopeId}-${trTrack.channelId}`}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      setEditingChannelId((prev) =>
+                        prev === trTrack.channelId ? null : trTrack.channelId,
+                      );
+                    }}
+                  >
+                    {formatConditionSummary(trTrack.yScale, trTrack.yOffset)}
+                  </button>
                 )}
                 <button
                   type="button"
@@ -1134,6 +1434,9 @@ export function ScopeViewportWidget({
                   title={t("scope.unbindTrack")}
                   onClick={(ev) => {
                     ev.stopPropagation();
+                    if (editingChannelId === trTrack.channelId) {
+                      setEditingChannelId(null);
+                    }
                     callbacks.onUpdateScope(config.scopeId, (prev) => ({
                       ...prev,
                       tracks: prev.tracks.filter((tr) => tr.channelId !== trTrack.channelId),
@@ -1149,6 +1452,131 @@ export function ScopeViewportWidget({
             <span className="scope-empty-hint">{t("scope.emptyTracksHint")}</span>
           )}
         </div>
+
+        {/* Per-channel independent Scale & Offset editor bar */}
+        {editingTrack && (
+          <div
+            className="scope-ch-cond-bar"
+            data-testid={`scope-ch-cond-bar-${config.scopeId}-${editingTrack.channelId}`}
+          >
+            <span className="scope-sublabel">
+              {channelsById[editingTrack.channelId]?.full_path ?? `ch${editingTrack.channelId}`} · {t("scope.channelCondLabel")}
+            </span>
+            <label className="scope-inline-num">
+              {t("scope.chScale")}
+              <input
+                type="number"
+                step="0.1"
+                value={editingTrack.yScale}
+                onChange={(ev) => {
+                  const val = Number.parseFloat(ev.target.value);
+                  if (!Number.isFinite(val)) return;
+                  callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                    ...prev,
+                    tracks: prev.tracks.map((tr) =>
+                      tr.channelId === editingTrack.channelId ? { ...tr, yScale: val } : tr,
+                    ),
+                  }));
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() =>
+                callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                  ...prev,
+                  tracks: prev.tracks.map((tr) =>
+                    tr.channelId === editingTrack.channelId
+                      ? { ...tr, yScale: Number((tr.yScale * 0.5).toFixed(4)) }
+                      : tr,
+                  ),
+                }))
+              }
+            >
+              ×0.5
+            </button>
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() =>
+                callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                  ...prev,
+                  tracks: prev.tracks.map((tr) =>
+                    tr.channelId === editingTrack.channelId
+                      ? { ...tr, yScale: Number((tr.yScale * 2).toFixed(4)) }
+                      : tr,
+                  ),
+                }))
+              }
+            >
+              ×2
+            </button>
+
+            <label className="scope-inline-num">
+              {t("scope.chOffset")}
+              <input
+                type="number"
+                step="1"
+                value={editingTrack.yOffset}
+                onChange={(ev) => {
+                  const val = Number.parseFloat(ev.target.value);
+                  if (!Number.isFinite(val)) return;
+                  callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                    ...prev,
+                    tracks: prev.tracks.map((tr) =>
+                      tr.channelId === editingTrack.channelId ? { ...tr, yOffset: val } : tr,
+                    ),
+                  }));
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() =>
+                callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                  ...prev,
+                  tracks: prev.tracks.map((tr) =>
+                    tr.channelId === editingTrack.channelId
+                      ? { ...tr, yScale: 1, yOffset: 0 }
+                      : tr,
+                  ),
+                }))
+              }
+            >
+              {t("scope.chReset")}
+            </button>
+
+            <div className="scope-color-swatches">
+              {CHIP_TRACE_COLORS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  className={`scope-color-swatch ${editingTrack.colorRgba === c ? "active" : ""}`}
+                  style={{ backgroundColor: rgbaNumberToCss(c, 1) }}
+                  aria-label="Trace color"
+                  onClick={() =>
+                    callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                      ...prev,
+                      tracks: prev.tracks.map((tr) =>
+                        tr.channelId === editingTrack.channelId ? { ...tr, colorRgba: c } : tr,
+                      ),
+                    }))
+                  }
+                />
+              ))}
+            </div>
+
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() => setEditingChannelId(null)}
+            >
+              {t("scope.closeCond")}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Stacked GPU + Canvas 2D HUD Viewport Stage */}

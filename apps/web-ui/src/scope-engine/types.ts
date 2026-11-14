@@ -6,11 +6,15 @@ import type {
 } from "../bridge/bindings.ts";
 import type { AnalogLayoutMode } from "./layout.ts";
 
+export type WheelZoomTarget = "x" | "y" | "xy";
+
 export interface ScopeTrackUiBinding {
   channelId: number;
   lane: ScopeLaneKindDto;
   visible: boolean;
+  /** Per-channel vertical gain multiplier (1.0 = identity) on analog tracks. */
   yScale: number;
+  /** Per-channel vertical bias offset in coordinate axis units on analog tracks. */
   yOffset: number;
   colorRgba: number;
 }
@@ -21,6 +25,12 @@ export interface ScopeUiConfig {
   timeSpanNs: number;
   preTriggerRatio: number;
   panOffsetNs: number;
+  /** Coordinate Y-axis scale in axis units per division (8 vertical divisions). */
+  yAxisScale: number;
+  /** Coordinate Y-axis center value in axis units. */
+  yAxisOffset: number;
+  /** Wheel zoom target inside the plot area when no modifier key is held. */
+  wheelZoomTarget?: WheelZoomTarget;
   sweepMode: TriggerSweepModeDto;
   autoTimeoutMs: number;
   trigger: TriggerConditionDto | null;

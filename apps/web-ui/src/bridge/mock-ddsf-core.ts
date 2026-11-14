@@ -97,6 +97,7 @@ interface InternalScopeState {
   latchedSubpixelNs: number;
   pinnedBytes: number;
   lastAutoRefreshNs: number;
+  pausedSimTimeNs: number | null;
 }
 
 interface CoalescedEntry {
@@ -118,7 +119,8 @@ const DEFAULT_STATE_LABELS: StateLabelEntryDto_Serialize[] = [
 ];
 
 const QUOTA_LIMIT_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
-const BASE_HOST_NS = 1_700_000_000_000_000;
+export const MOCK_BASE_HOST_NS = 1_700_000_000_000_000;
+const BASE_HOST_NS = MOCK_BASE_HOST_NS;
 const INITIAL_GLITCH_OFFSET_NS = 200_000_000; // 200 ms after start
 const PERIODIC_GLITCH_INTERVAL_NS = 2_500_000_000; // every 2.5 s
 const FAULT_PULSE_DURATION_NS = 350_000_000; // 350 ms OCP_FAULT ribbon state
@@ -172,11 +174,11 @@ export class MockSimulationCore {
   private coalescedOverwrites = 0;
   private txDrainIntervalMs = 90;
 
-  constructor() {
-    this.seedDefaultSimSource();
+  constructor(options?: { autoStartDefaultSim?: boolean }) {
+    this.seedDefaultSimSource(options?.autoStartDefaultSim ?? true);
   }
 
-  private seedDefaultSimSource(): void {
+  private seedDefaultSimSource(autoStart: boolean): void {
     const channels: InternalChannelDef[] = [
       this.makeChannel("sim0", "ia", "Phase Current Ia", "A", "scalar", "f32", [], "ia", 0),
       this.makeChannel("sim0", "ib", "Phase Current Ib", "A", "scalar", "f32", [], "ib", 1),
@@ -203,7 +205,7 @@ export class MockSimulationCore {
         source_id: "sim0",
         display_name: "FOC Motor Drive Sim (2 MHz)",
         transport_kind: "sim",
-        state: "running",
+        state: autoStart ? "running" : "stopped",
         raw_recording_path: null,
       },
       sampleRateHz: 2_000_000,
@@ -498,6 +500,10 @@ export class MockSimulationCore {
       }
     }
 
+    const pausedSimTimeNs = cfg.paused
+      ? (existing?.pausedSimTimeNs ?? this.simTimeNs)
+      : null;
+
     const nextState: InternalScopeState = {
       scopeId: cfg.scope_id,
       title: cfg.title ?? `Scope ${cfg.scope_id}`,
@@ -517,6 +523,7 @@ export class MockSimulationCore {
       latchedSubpixelNs,
       pinnedBytes,
       lastAutoRefreshNs: existing?.lastAutoRefreshNs ?? this.simTimeNs,
+      pausedSimTimeNs,
     };
 
     this.scopes.set(cfg.scope_id, nextState);
@@ -536,6 +543,8 @@ export class MockSimulationCore {
   rearmScope(scopeId: number): void {
     const scope = this.scopes.get(scopeId);
     if (!scope) return;
+    scope.paused = false;
+    scope.pausedSimTimeNs = null;
     scope.latchedTriggerNs = null;
     scope.latchedSubpixelNs = 0;
     scope.pinnedBytes = 0;
@@ -964,19 +973,38 @@ export class MockSimulationCore {
   private buildScopePacket(scope: InternalScopeState): DdsfScopeBuildInput {
     this.evaluateTrigger(scope);
 
+    const effectiveSimNs = scope.paused
+      ? (scope.pausedSimTimeNs ?? this.simTimeNs)
+      : this.simTimeNs;
+
     let winTStartNs: number;
     if (scope.sweepMode === "roll") {
-      winTStartNs = Math.max(0, this.simTimeNs - scope.timeSpanNs + scope.panOffsetNs);
+      const maxWinStart = Math.max(0, effectiveSimNs - scope.timeSpanNs);
+      winTStartNs = Math.round(
+        clamp(effectiveSimNs - scope.timeSpanNs + scope.panOffsetNs, 0, maxWinStart),
+      );
     } else if (scope.latchedTriggerNs !== null) {
-      winTStartNs = Math.max(
+      const baseStart = Math.max(
         0,
-        Math.round(scope.latchedTriggerNs - scope.preTriggerRatio * scope.timeSpanNs + scope.panOffsetNs),
+        Math.round(scope.latchedTriggerNs - scope.preTriggerRatio * scope.timeSpanNs),
+      );
+      const maxWinStart = Math.max(baseStart, effectiveSimNs - scope.timeSpanNs);
+      winTStartNs = Math.round(
+        clamp(
+          scope.latchedTriggerNs - scope.preTriggerRatio * scope.timeSpanNs + scope.panOffsetNs,
+          0,
+          maxWinStart,
+        ),
       );
     } else {
-      const anchor = scope.lastTriggerNs || this.simTimeNs;
-      winTStartNs = Math.max(
+      const anchor = scope.lastTriggerNs || effectiveSimNs;
+      const baseStart = Math.max(
         0,
-        Math.round(anchor - scope.preTriggerRatio * scope.timeSpanNs + scope.panOffsetNs),
+        Math.round(anchor - scope.preTriggerRatio * scope.timeSpanNs),
+      );
+      const maxWinStart = Math.max(baseStart, effectiveSimNs - scope.timeSpanNs);
+      winTStartNs = Math.round(
+        clamp(anchor - scope.preTriggerRatio * scope.timeSpanNs + scope.panOffsetNs, 0, maxWinStart),
       );
     }
 

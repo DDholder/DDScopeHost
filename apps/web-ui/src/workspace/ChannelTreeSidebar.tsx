@@ -11,6 +11,7 @@ import {
   formatBytesCompact,
   formatSampleRate,
 } from "../scope-engine/time-format.ts";
+import { WidgetToolbox, type WidgetType } from "../widgets/index.ts";
 import { useWorkspaceStore } from "./store.ts";
 import { useI18n } from "./use-i18n.ts";
 
@@ -60,6 +61,10 @@ export function ChannelTreeSidebar() {
   const toggleRawRecorder = useWorkspaceStore((s) => s.toggleRawRecorder);
   const seekReplay = useWorkspaceStore((s) => s.seekReplay);
   const bindChannelToScope = useWorkspaceStore((s) => s.bindChannelToScope);
+  const activeCanvasId = useWorkspaceStore((s) => s.activeCanvasId);
+  const canvasOrder = useWorkspaceStore((s) => s.canvasOrder);
+  const addCanvas = useWorkspaceStore((s) => s.addCanvas);
+  const addWidgetToCanvas = useWorkspaceStore((s) => s.addWidgetToCanvas);
 
   const [filter, setFilter] = useState("");
   const valueRefs = useRef<Map<number, HTMLSpanElement>>(new Map());
@@ -69,35 +74,53 @@ export function ChannelTreeSidebar() {
   localeRef.current = locale;
   const latestValsRef = useRef<Map<number, { kind: number; val: number }>>(new Map());
 
+  const flushDom = () => {
+    const curLocale = localeRef.current;
+    const latestVals = latestValsRef.current;
+    valueRefs.current.forEach((el, chId) => {
+      const entry = latestVals.get(chId);
+      if (!entry) return;
+      const ch = channelsRef.current[chId];
+      if (entry.kind === DdsfSnapshotKind.Bool) {
+        el.textContent =
+          entry.val > 0.5
+            ? translate(curLocale, "sidebar.valHigh")
+            : translate(curLocale, "sidebar.valLow");
+        el.className = entry.val > 0.5 ? "ch-live-val val-high" : "ch-live-val val-low";
+      } else if (entry.kind === DdsfSnapshotKind.StateEnum) {
+        const code = Math.round(entry.val);
+        const lbl = ch?.state_labels.find((l) => l.code === code)?.name ?? `S${code}`;
+        el.textContent = lbl;
+        el.className = code === 3 ? "ch-live-val val-fault" : "ch-live-val val-state";
+      } else {
+        const unit = ch?.unit ? ` ${ch.unit}` : "";
+        el.textContent = `${entry.val.toFixed(2)}${unit}`;
+        el.className = "ch-live-val";
+      }
+    });
+  };
+
+  // Seed initial snapshots whenever channel map changes
+  useEffect(() => {
+    const latestVals = latestValsRef.current;
+    let seeded = false;
+    for (const chIdStr of Object.keys(channelsById)) {
+      const chId = Number(chIdStr);
+      const snap = bridgeClient.topicBus.getLatestSnapshot(chId);
+      if (snap) {
+        latestVals.set(chId, { kind: snap.kind, val: snap.valF64 });
+        seeded = true;
+      }
+    }
+    if (seeded) {
+      flushDom();
+    }
+  }, [channelsById]);
+
   // 15Hz DOM-ref update for live channel snapshot values without React re-renders
   useEffect(() => {
     let lastFlushMs = 0;
     const latestVals = latestValsRef.current;
-
-    const flushDom = () => {
-      const curLocale = localeRef.current;
-      valueRefs.current.forEach((el, chId) => {
-        const entry = latestVals.get(chId);
-        if (!entry) return;
-        const ch = channelsRef.current[chId];
-        if (entry.kind === DdsfSnapshotKind.Bool) {
-          el.textContent =
-            entry.val > 0.5
-              ? translate(curLocale, "sidebar.valHigh")
-              : translate(curLocale, "sidebar.valLow");
-          el.className = entry.val > 0.5 ? "ch-live-val val-high" : "ch-live-val val-low";
-        } else if (entry.kind === DdsfSnapshotKind.StateEnum) {
-          const code = Math.round(entry.val);
-          const lbl = ch?.state_labels.find((l) => l.code === code)?.name ?? `S${code}`;
-          el.textContent = lbl;
-          el.className = code === 3 ? "ch-live-val val-fault" : "ch-live-val val-state";
-        } else {
-          const unit = ch?.unit ? ` ${ch.unit}` : "";
-          el.textContent = `${entry.val.toFixed(2)}${unit}`;
-          el.className = "ch-live-val";
-        }
-      });
-    };
 
     const unsub = bridgeClient.topicBus.subscribeSnapshots((snapshots) => {
       for (let i = 0; i < snapshots.length; i += 1) {
@@ -112,6 +135,14 @@ export function ChannelTreeSidebar() {
 
     return unsub;
   }, []);
+
+  const handleQuickAddWidget = (widgetType: WidgetType) => {
+    const targetId =
+      activeCanvasId !== null && canvasOrder.includes(activeCanvasId)
+        ? activeCanvasId
+        : (canvasOrder[0] ?? addCanvas());
+    addWidgetToCanvas(targetId, widgetType);
+  };
 
   useEffect(() => {
     const latestVals = latestValsRef.current;
@@ -195,6 +226,8 @@ export function ChannelTreeSidebar() {
           </button>
         </div>
       </div>
+
+      <WidgetToolbox locale={locale} onQuickAddWidget={handleQuickAddWidget} />
 
       <div className="sidebar-search">
         <input

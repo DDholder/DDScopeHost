@@ -61,9 +61,18 @@ pub fn run() {
     }
 
     let tokio_handle = tauri::async_runtime::block_on(async { tokio::runtime::Handle::current() });
-    let bridge_state =
-        runtime::build_live_desktop_state(tokio_handle, runtime::DesktopRuntimeConfig::from_env())
-            .expect("failed to initialize DDScopeHost live CoreWorkspace");
+    let auto_start_default = std::env::var("DDSCOPE_AUTO_START_DEFAULT_SOURCE")
+        .map(|raw| {
+            let trimmed = raw.trim();
+            trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false);
+    let bridge_state = runtime::build_live_desktop_state_with_auto_start(
+        tokio_handle,
+        runtime::DesktopRuntimeConfig::from_env(),
+        auto_start_default,
+    )
+    .expect("failed to initialize DDScopeHost live CoreWorkspace");
 
     let setup_state = bridge_state.clone();
     tauri::Builder::default()

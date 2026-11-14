@@ -20,15 +20,27 @@ import {
 } from "../bridge/index.ts";
 import {
   detectInitialLocale,
+  getDefaultCanvasTitle,
   getDefaultScopeTitle,
   persistLocale,
+  translate,
+  translateDefaultCanvasTitle,
   translateDefaultScopeTitle,
+  type MessageKey,
   type UiLocale,
 } from "../i18n/index.ts";
 import type {
   ScopeTrackUiBinding,
   ScopeUiConfig,
 } from "../scope-engine/types.ts";
+import {
+  clampGridRect,
+  defaultSizeForWidgetType,
+  findFreeGridSlot,
+  type DashboardCanvasConfig,
+  type DashboardWidgetItem,
+  type WidgetType,
+} from "../widgets/types.ts";
 
 const TRACE_COLORS = [
   0x38bdf8ff, // sky
@@ -73,6 +85,12 @@ export interface WorkspaceStoreState {
   nextScopeId: number;
   canvasWidthsByScope: Record<number, number>;
 
+  canvases: Record<number, DashboardCanvasConfig>;
+  canvasOrder: number[];
+  activeCanvasId: number | null;
+  nextCanvasId: number;
+  nextWidgetSeq: number;
+
   locale: UiLocale;
   mockRateHz: 60 | 120;
   sidebarCollapsed: boolean;
@@ -95,7 +113,7 @@ export interface WorkspaceStoreState {
   toggleRawRecorder: (sourceId: string, enabled: boolean) => Promise<void>;
   seekReplay: (req: SeekReplayRequestDto_Deserialize) => Promise<void>;
 
-  addScope: (title?: string) => number;
+  addScope: (title?: string, options?: { dockInStage?: boolean }) => number;
   removeScope: (scopeId: number) => void;
   updateScope: (scopeId: number, updater: (prev: ScopeUiConfig) => ScopeUiConfig) => void;
   setScopeCanvasWidth: (scopeId: number, widthPx: number) => void;
@@ -112,6 +130,25 @@ export interface WorkspaceStoreState {
       cursorBRatio?: number;
     },
   ) => void;
+
+  addCanvas: (title?: string) => number;
+  removeCanvas: (canvasId: number) => void;
+  setCanvasOrder: (order: number[]) => void;
+  setActiveCanvasId: (canvasId: number | null) => void;
+  toggleCanvasLock: (canvasId: number) => void;
+  clearCanvasWidgets: (canvasId: number) => void;
+  addWidgetToCanvas: (
+    canvasId: number,
+    widgetType: WidgetType,
+    opts?: { col?: number; row?: number; channelId?: number },
+  ) => string;
+  updateCanvasWidget: (
+    canvasId: number,
+    widgetId: string,
+    updater: (prev: DashboardWidgetItem) => DashboardWidgetItem,
+  ) => void;
+  removeCanvasWidget: (canvasId: number, widgetId: string) => void;
+  bindChannelToWidget: (canvasId: number, widgetId: string, channelId: number) => void;
 
   sendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
@@ -154,26 +191,11 @@ function defaultLaneForChannel(ch: ChannelNodeDto_Serialize): ScopeLaneKindDto {
   return "analog";
 }
 
-function defaultYScaleAndOffset(ch: ChannelNodeDto_Serialize): {
+function defaultYScaleAndOffset(_ch: ChannelNodeDto_Serialize): {
   yScale: number;
   yOffset: number;
 } {
-  if (
-    ch.local_path === "v_bus" ||
-    (ch.source_id === "sim0" && ch.local_path === "ch3")
-  ) {
-    return { yScale: 25, yOffset: 50 };
-  }
-  if (
-    ch.local_path === "ia" ||
-    ch.local_path === "ib" ||
-    ch.local_path === "ic" ||
-    (ch.source_id === "sim0" &&
-      (ch.local_path === "ch0" || ch.local_path === "ch1" || ch.local_path === "ch2"))
-  ) {
-    return { yScale: 5, yOffset: 0 };
-  }
-  return { yScale: 2.5, yOffset: 0 };
+  return { yScale: 1, yOffset: 0 };
 }
 
 function buildDefaultScopeConfigs(
@@ -211,6 +233,9 @@ function buildDefaultScopeConfigs(
       cursorARatio: 0.28,
       cursorBRatio: 0.68,
       activeAnalogChannelId: null,
+      yAxisScale: 15,
+      yAxisOffset: 0,
+      wheelZoomTarget: "x",
     };
     const scope2Empty: ScopeUiConfig = {
       scopeId: 2,
@@ -229,6 +254,9 @@ function buildDefaultScopeConfigs(
       cursorARatio: 0.25,
       cursorBRatio: 0.55,
       activeAnalogChannelId: null,
+      yAxisScale: 25,
+      yAxisOffset: 50,
+      wheelZoomTarget: "x",
     };
     return { 1: scope1Empty, 2: scope2Empty };
   }
@@ -275,7 +303,8 @@ function buildDefaultScopeConfigs(
       channelId: chIa.channel_id,
       lane: "analog",
       visible: true,
-      ...defaultYScaleAndOffset(chIa),
+      yScale: 1,
+      yOffset: 0,
       colorRgba: 0x38bdf8ff,
     });
   }
@@ -284,7 +313,8 @@ function buildDefaultScopeConfigs(
       channelId: chIb.channel_id,
       lane: "analog",
       visible: true,
-      ...defaultYScaleAndOffset(chIb),
+      yScale: 1,
+      yOffset: 0,
       colorRgba: 0x34d399ff,
     });
   }
@@ -293,7 +323,8 @@ function buildDefaultScopeConfigs(
       channelId: chVbus.channel_id,
       lane: "analog",
       visible: true,
-      ...defaultYScaleAndOffset(chVbus),
+      yScale: 0.5,
+      yOffset: 0,
       colorRgba: 0xf59e0bff,
     });
   }
@@ -363,6 +394,9 @@ function buildDefaultScopeConfigs(
     cursorARatio: 0.28,
     cursorBRatio: 0.68,
     activeAnalogChannelId: chIa?.channel_id ?? null,
+    yAxisScale: 15,
+    yAxisOffset: 0,
+    wheelZoomTarget: "x",
   };
 
   const scope2TriggerCh = chVbus ?? chIa;
@@ -372,7 +406,8 @@ function buildDefaultScopeConfigs(
       channelId: scope2TriggerCh.channel_id,
       lane: "analog",
       visible: true,
-      ...defaultYScaleAndOffset(scope2TriggerCh),
+      yScale: 1,
+      yOffset: 0,
       colorRgba: 0xf59e0bff,
     });
   }
@@ -422,9 +457,169 @@ function buildDefaultScopeConfigs(
     cursorARatio: 0.25,
     cursorBRatio: 0.55,
     activeAnalogChannelId: scope2TriggerCh?.channel_id ?? null,
+    yAxisScale: 25,
+    yAxisOffset: 50,
+    wheelZoomTarget: "x",
   };
 
   return { 1: scope1, 2: scope2 };
+}
+
+function buildDefaultDashboardCanvas(
+  channelsById: Record<number, ChannelNodeDto_Serialize>,
+  locale: UiLocale,
+): { canvas: DashboardCanvasConfig; nextWidgetSeq: number } {
+  const allChannels = Object.values(channelsById);
+  const byPath = new Map<string, ChannelNodeDto_Serialize>();
+  for (const c of allChannels) {
+    byPath.set(c.full_path, c);
+  }
+  const findFirst = (...paths: string[]): ChannelNodeDto_Serialize | undefined => {
+    for (const p of paths) {
+      const found = byPath.get(p);
+      if (found) return found;
+    }
+    return undefined;
+  };
+
+  const chIa =
+    findFirst("sim0/ia", "sim0/ch0") ??
+    allChannels.find((c) => c.modality === "scalar");
+  const chIb =
+    findFirst("sim0/ib", "sim0/ch1") ??
+    allChannels.find(
+      (c) => c.modality === "scalar" && c.channel_id !== chIa?.channel_id,
+    );
+  const chVbus =
+    findFirst("sim0/v_bus", "sim0/ch3") ??
+    allChannels.find(
+      (c) =>
+        c.modality === "scalar" &&
+        c.channel_id !== chIa?.channel_id &&
+        c.channel_id !== chIb?.channel_id,
+    );
+  const chPwmA =
+    findFirst("sim0/pwm_a") ??
+    allChannels.find((c) => c.modality === "digital_bool");
+  const chFault =
+    findFirst("sim0/fault_pin") ??
+    allChannels.find(
+      (c) => c.modality === "digital_bool" && c.channel_id !== chPwmA?.channel_id,
+    );
+  const chState =
+    findFirst("sim0/ctrl_state") ??
+    allChannels.find((c) => c.modality === "state_machine");
+
+  const primarySourceId = chIa?.source_id ?? chVbus?.source_id ?? allChannels[0]?.source_id ?? "sim0";
+
+  const watchChannels = [chIa, chIb, chVbus, chPwmA, chFault, chState].filter(
+    (c): c is ChannelNodeDto_Serialize => Boolean(c),
+  );
+
+  const widgets: DashboardWidgetItem[] = [
+    {
+      id: "w_1",
+      type: "digital_meter",
+      title: chIa ? chIa.full_path : translate(locale, "toolbox.widget.digital_meter.name"),
+      col: 0,
+      row: 0,
+      colSpan: 8,
+      rowSpan: 4,
+      primaryBinding: chIa ? { channelId: chIa.channel_id, scale: 1, offset: 0 } : null,
+      bindings: [],
+      scopeId: null,
+    },
+    {
+      id: "w_2",
+      type: "radial_gauge",
+      title: chVbus ? chVbus.full_path : translate(locale, "toolbox.widget.radial_gauge.name"),
+      col: 8,
+      row: 0,
+      colSpan: 8,
+      rowSpan: 4,
+      primaryBinding: chVbus ? { channelId: chVbus.channel_id, scale: 1, offset: 0 } : null,
+      bindings: [],
+      scopeId: null,
+      gaugeConfig: { min: 0, max: 140, warnHigh: 95 },
+    },
+    {
+      id: "w_3",
+      type: "status_led",
+      title: (chState ?? chFault)?.full_path ?? translate(locale, "toolbox.widget.status_led.name"),
+      col: 16,
+      row: 0,
+      colSpan: 8,
+      rowSpan: 4,
+      primaryBinding:
+        (chState ?? chFault)
+          ? { channelId: (chState ?? chFault)!.channel_id, scale: 1, offset: 0 }
+          : null,
+      bindings: [],
+      scopeId: null,
+    },
+    {
+      id: "w_4",
+      type: "watch_table",
+      title: translate(locale, "toolbox.widget.watch_table.name"),
+      col: 0,
+      row: 4,
+      colSpan: 24,
+      rowSpan: 5,
+      primaryBinding: null,
+      bindings: watchChannels.map((c) => ({ channelId: c.channel_id, scale: 1, offset: 0 })),
+      scopeId: null,
+    },
+    {
+      id: "w_5",
+      type: "param_slider",
+      title: translate(locale, "toolbox.widget.param_slider.name"),
+      col: 0,
+      row: 9,
+      colSpan: 12,
+      rowSpan: 3,
+      primaryBinding: null,
+      bindings: [],
+      scopeId: null,
+      sliderConfig: {
+        sourceId: primarySourceId,
+        key: "kp",
+        min: 0.2,
+        max: 6.0,
+        step: 0.05,
+        value: 1.2,
+      },
+    },
+    {
+      id: "w_6",
+      type: "cmd_button",
+      title: translate(locale, "toolbox.widget.cmd_button.name"),
+      col: 12,
+      row: 9,
+      colSpan: 12,
+      rowSpan: 3,
+      primaryBinding: null,
+      bindings: [],
+      scopeId: null,
+      buttonConfig: {
+        sourceId: primarySourceId,
+        mode: "ascii",
+        command: "SET_MODE=FOC_RUN",
+        kvKey: "kp",
+        kvValue: 1.5,
+        priority: "high",
+      },
+    },
+  ];
+
+  return {
+    canvas: {
+      canvasId: 1,
+      title: getDefaultCanvasTitle(locale, 1),
+      locked: false,
+      widgets,
+    },
+    nextWidgetSeq: 7,
+  };
 }
 
 export function createWorkspaceStore(
@@ -473,6 +668,12 @@ export function createWorkspaceStore(
     nextScopeId: 3,
     canvasWidthsByScope: { 1: 760, 2: 760 },
 
+    canvases: {},
+    canvasOrder: [],
+    activeCanvasId: 1,
+    nextCanvasId: 2,
+    nextWidgetSeq: 1,
+
     locale: detectInitialLocale(),
     mockRateHz: 120,
     sidebarCollapsed: false,
@@ -483,19 +684,31 @@ export function createWorkspaceStore(
       persistLocale(nextLocale);
       const state = get();
       const nextScopes: Record<number, ScopeUiConfig> = {};
-      let changed = false;
+      let changedScopes = false;
       for (const [idStr, sc] of Object.entries(state.scopes)) {
         const nextTitle = translateDefaultScopeTitle(sc.title, nextLocale);
         if (nextTitle !== sc.title) {
-          changed = true;
+          changedScopes = true;
           nextScopes[Number(idStr)] = { ...sc, title: nextTitle };
         } else {
           nextScopes[Number(idStr)] = sc;
         }
       }
+      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
+      let changedCanvases = false;
+      for (const [idStr, cv] of Object.entries(state.canvases)) {
+        const nextTitle = translateDefaultCanvasTitle(cv.title, nextLocale);
+        if (nextTitle !== cv.title) {
+          changedCanvases = true;
+          nextCanvases[Number(idStr)] = { ...cv, title: nextTitle };
+        } else {
+          nextCanvases[Number(idStr)] = cv;
+        }
+      }
       set({
         locale: nextLocale,
-        ...(changed ? { scopes: nextScopes } : {}),
+        ...(changedScopes ? { scopes: nextScopes } : {}),
+        ...(changedCanvases ? { canvases: nextCanvases } : {}),
       });
     },
 
@@ -552,6 +765,8 @@ export function createWorkspaceStore(
           ),
         );
 
+        const defaultCanvas = buildDefaultDashboardCanvas(chMap, get().locale);
+
         set({
           initialized: true,
           initError: null,
@@ -567,6 +782,11 @@ export function createWorkspaceStore(
           scopeOrder: [1, 2],
           focusedScopeId: 1,
           nextScopeId: 3,
+          canvases: { 1: defaultCanvas.canvas },
+          canvasOrder: [1],
+          activeCanvasId: 1,
+          nextCanvasId: 2,
+          nextWidgetSeq: defaultCanvas.nextWidgetSeq,
         });
       } catch (err: unknown) {
         set({
@@ -638,9 +858,10 @@ export function createWorkspaceStore(
       await get().refreshChannelTree();
     },
 
-    addScope: (title) => {
+    addScope: (title, options) => {
       const state = get();
       const scopeId = state.nextScopeId;
+      const dockInStage = options?.dockInStage !== false;
       const allChannels = Object.values(state.channelsById);
       const firstAnalog = allChannels.find((c) => c.modality === "scalar");
 
@@ -681,12 +902,19 @@ export function createWorkspaceStore(
         cursorARatio: 0.28,
         cursorBRatio: 0.68,
         activeAnalogChannelId: firstAnalog?.channel_id ?? null,
+        yAxisScale: 15,
+        yAxisOffset: 0,
+        wheelZoomTarget: "x",
       };
 
       set({
         scopes: { ...state.scopes, [scopeId]: newScope },
-        scopeOrder: [...state.scopeOrder, scopeId],
-        focusedScopeId: scopeId,
+        ...(dockInStage
+          ? {
+              scopeOrder: [...state.scopeOrder, scopeId],
+              focusedScopeId: scopeId,
+            }
+          : {}),
         nextScopeId: scopeId + 1,
       });
 
@@ -889,6 +1117,277 @@ export function createWorkspaceStore(
           cursor_b_ratio: resolvedCursorB,
         })
         .catch(() => {});
+    },
+
+    addCanvas: (title) => {
+      const state = get();
+      const canvasId = state.nextCanvasId;
+      const newCanvas: DashboardCanvasConfig = {
+        canvasId,
+        title: title ?? getDefaultCanvasTitle(state.locale, canvasId),
+        locked: false,
+        widgets: [],
+      };
+      set({
+        canvases: { ...state.canvases, [canvasId]: newCanvas },
+        canvasOrder: [...state.canvasOrder, canvasId],
+        activeCanvasId: canvasId,
+        nextCanvasId: canvasId + 1,
+      });
+      return canvasId;
+    },
+
+    removeCanvas: (canvasId) => {
+      const state = get();
+      const target = state.canvases[canvasId];
+      if (!target) return;
+      for (const w of target.widgets) {
+        if (w.type === "mso_scope" && w.scopeId !== null && !state.scopeOrder.includes(w.scopeId)) {
+          get().removeScope(w.scopeId);
+        }
+      }
+      const nextCanvases = { ...get().canvases };
+      delete nextCanvases[canvasId];
+      const nextOrder = state.canvasOrder.filter((id) => id !== canvasId);
+      const nextActive =
+        state.activeCanvasId === canvasId ? (nextOrder[0] ?? null) : state.activeCanvasId;
+      set({
+        canvases: nextCanvases,
+        canvasOrder: nextOrder,
+        activeCanvasId: nextActive,
+      });
+    },
+
+    setCanvasOrder: (order) => set({ canvasOrder: order }),
+
+    setActiveCanvasId: (canvasId) => set({ activeCanvasId: canvasId }),
+
+    toggleCanvasLock: (canvasId) => {
+      const state = get();
+      const prev = state.canvases[canvasId];
+      if (!prev) return;
+      set({
+        canvases: {
+          ...state.canvases,
+          [canvasId]: { ...prev, locked: !prev.locked },
+        },
+      });
+    },
+
+    clearCanvasWidgets: (canvasId) => {
+      const state = get();
+      const prev = state.canvases[canvasId];
+      if (!prev) return;
+      for (const w of prev.widgets) {
+        if (w.type === "mso_scope" && w.scopeId !== null && !state.scopeOrder.includes(w.scopeId)) {
+          get().removeScope(w.scopeId);
+        }
+      }
+      const latest = get();
+      const latestPrev = latest.canvases[canvasId];
+      if (!latestPrev) return;
+      set({
+        canvases: {
+          ...latest.canvases,
+          [canvasId]: { ...latestPrev, widgets: [] },
+        },
+      });
+    },
+
+    addWidgetToCanvas: (canvasId, widgetType, opts) => {
+      const state = get();
+      const canvas = state.canvases[canvasId];
+      if (!canvas) return "";
+
+      const seq = state.nextWidgetSeq;
+      const widgetId = `w_${seq}`;
+      const size = defaultSizeForWidgetType(widgetType);
+      const slot = findFreeGridSlot(
+        canvas.widgets,
+        size.colSpan,
+        size.rowSpan,
+        opts?.col !== undefined && opts?.row !== undefined
+          ? { col: opts.col, row: opts.row }
+          : undefined,
+      );
+      const clamped = clampGridRect(slot.col, slot.row, size.colSpan, size.rowSpan);
+
+      const ch = opts?.channelId !== undefined ? state.channelsById[opts.channelId] : undefined;
+      const primarySourceId =
+        ch?.source_id ?? state.channelGroups[0]?.source.source_id ?? "sim0";
+
+      let scopeId: number | null = null;
+      if (widgetType === "mso_scope") {
+        scopeId = get().addScope(undefined, { dockInStage: false });
+      }
+
+      const defaultTitle =
+        ch && widgetType !== "watch_table"
+          ? ch.full_path
+          : translate(state.locale, `toolbox.widget.${widgetType}.name` as MessageKey);
+
+      const binding =
+        ch && widgetType !== "watch_table" && widgetType !== "param_slider" && widgetType !== "cmd_button"
+          ? { channelId: ch.channel_id, scale: 1, offset: 0 }
+          : null;
+
+      const item: DashboardWidgetItem = {
+        id: widgetId,
+        type: widgetType,
+        title: defaultTitle,
+        col: clamped.col,
+        row: clamped.row,
+        colSpan: clamped.colSpan,
+        rowSpan: clamped.rowSpan,
+        primaryBinding: widgetType === "mso_scope" ? null : binding,
+        bindings:
+          ch && widgetType === "watch_table"
+            ? [{ channelId: ch.channel_id, scale: 1, offset: 0 }]
+            : [],
+        scopeId,
+        ...(widgetType === "radial_gauge"
+          ? {
+              gaugeConfig:
+                ch?.local_path === "v_bus"
+                  ? { min: 0, max: 140, warnHigh: 95 }
+                  : { min: -25, max: 25, warnHigh: 18 },
+            }
+          : {}),
+        ...(widgetType === "param_slider"
+          ? {
+              sliderConfig: {
+                sourceId: primarySourceId,
+                key: "kp",
+                min: 0.2,
+                max: 6.0,
+                step: 0.05,
+                value: 1.2,
+              },
+            }
+          : {}),
+        ...(widgetType === "cmd_button"
+          ? {
+              buttonConfig: {
+                sourceId: primarySourceId,
+                mode: "ascii",
+                command: "SET_MODE=FOC_RUN",
+                kvKey: "kp",
+                kvValue: 1.5,
+                priority: "high",
+              },
+            }
+          : {}),
+      };
+
+      const latest = get();
+      const latestCanvas = latest.canvases[canvasId];
+      if (!latestCanvas) return widgetId;
+
+      set({
+        canvases: {
+          ...latest.canvases,
+          [canvasId]: {
+            ...latestCanvas,
+            widgets: [...latestCanvas.widgets, item],
+          },
+        },
+        nextWidgetSeq: seq + 1,
+      });
+
+      if (scopeId !== null && opts?.channelId !== undefined) {
+        get().bindChannelToScope(scopeId, opts.channelId);
+      }
+
+      return widgetId;
+    },
+
+    updateCanvasWidget: (canvasId, widgetId, updater) => {
+      const state = get();
+      const canvas = state.canvases[canvasId];
+      if (!canvas) return;
+      let changed = false;
+      const nextWidgets = canvas.widgets.map((w) => {
+        if (w.id !== widgetId) return w;
+        const next = updater(w);
+        if (next !== w) changed = true;
+        return next;
+      });
+      if (!changed) return;
+      set({
+        canvases: {
+          ...state.canvases,
+          [canvasId]: {
+            ...canvas,
+            widgets: nextWidgets,
+          },
+        },
+      });
+    },
+
+    removeCanvasWidget: (canvasId, widgetId) => {
+      const state = get();
+      const canvas = state.canvases[canvasId];
+      if (!canvas) return;
+      const target = canvas.widgets.find((w) => w.id === widgetId);
+      if (!target) return;
+      if (
+        target.type === "mso_scope" &&
+        target.scopeId !== null &&
+        !state.scopeOrder.includes(target.scopeId)
+      ) {
+        get().removeScope(target.scopeId);
+      }
+      const latest = get();
+      const latestCanvas = latest.canvases[canvasId];
+      if (!latestCanvas) return;
+      set({
+        canvases: {
+          ...latest.canvases,
+          [canvasId]: {
+            ...latestCanvas,
+            widgets: latestCanvas.widgets.filter((w) => w.id !== widgetId),
+          },
+        },
+      });
+    },
+
+    bindChannelToWidget: (canvasId, widgetId, channelId) => {
+      const state = get();
+      const canvas = state.canvases[canvasId];
+      const ch = state.channelsById[channelId];
+      if (!canvas || !ch) return;
+
+      get().updateCanvasWidget(canvasId, widgetId, (prev) => {
+        if (prev.type === "watch_table") {
+          if (prev.bindings.some((b) => b.channelId === channelId)) {
+            return prev;
+          }
+          return {
+            ...prev,
+            bindings: [...prev.bindings, { channelId, scale: 1, offset: 0 }],
+          };
+        }
+        if (
+          prev.type === "digital_meter" ||
+          prev.type === "radial_gauge" ||
+          prev.type === "status_led"
+        ) {
+          return {
+            ...prev,
+            title: ch.full_path,
+            primaryBinding: { channelId, scale: 1, offset: 0 },
+            ...(prev.type === "radial_gauge"
+              ? {
+                  gaugeConfig:
+                    ch.local_path === "v_bus"
+                      ? { min: 0, max: 140, warnHigh: 95 }
+                      : prev.gaugeConfig ?? { min: -25, max: 25, warnHigh: 18 },
+                }
+              : {}),
+          };
+        }
+        return prev;
+      });
     },
 
     sendDownlink: async (req, labelSummary, isSliderEvent = false) => {

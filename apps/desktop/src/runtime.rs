@@ -71,6 +71,16 @@ pub fn build_live_desktop_state(
     tokio_handle: tokio::runtime::Handle,
     cfg: DesktopRuntimeConfig,
 ) -> CoreResult<DesktopBridgeState> {
+    build_live_desktop_state_with_auto_start(tokio_handle, cfg, true)
+}
+
+/// Instantiates a live [`CoreWorkspace`] with explicit control over whether the seeded `sim0`
+/// demo source starts acquisition immediately.
+pub fn build_live_desktop_state_with_auto_start(
+    tokio_handle: tokio::runtime::Handle,
+    cfg: DesktopRuntimeConfig,
+    auto_start_default_sim_source: bool,
+) -> CoreResult<DesktopBridgeState> {
     let ws = Arc::new(CoreWorkspace::with_quota_bytes(tokio_handle, cfg.quota_bytes));
 
     if cfg.seed_default_sim_source {
@@ -96,7 +106,7 @@ pub fn build_live_desktop_state(
             }),
         )
         .with_display_name("Simulated FOC Motor (2 MHz)")
-        .with_auto_start(true);
+        .with_auto_start(auto_start_default_sim_source);
 
         ws.create_source(sim_source_cfg)?;
     }

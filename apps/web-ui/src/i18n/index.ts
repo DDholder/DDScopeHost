@@ -61,11 +61,64 @@ export const EN_MESSAGES = {
   "stage.emptyDesc":
     "Create a new independent MSO oscilloscope viewport or drag channels from the sidebar.",
   "stage.addScope": "+ Add MSO Scope",
+  "stage.addCanvas": "+ Add Canvas",
   "stage.unavailable": "Scope #{id} is unavailable.",
+  "stage.canvasUnavailable": "Canvas #{id} is unavailable.",
   "stage.splitStacked": "Split Stacked",
   "stage.splitSideBySide": "Split Side-by-Side",
   "stage.hint":
-    "Drag tabs to split/dock · Scroll on waveform to zoom · Drag channel from tree to bind",
+    "Drag tabs to split/dock · Scroll on axes/plot to zoom at cursor · Drag widgets & channels from sidebar",
+
+  // Widget Toolbox & Dashboard Canvas
+  "toolbox.title": "Widget Toolbox",
+  "toolbox.hint": "Drag onto Canvas or click +",
+  "toolbox.addBtnTitle": "Add widget to active canvas",
+  "toolbox.widget.mso_scope.name": "MSO Oscilloscope",
+  "toolbox.widget.mso_scope.desc": "Multi-domain GPU waveform plot",
+  "toolbox.widget.digital_meter.name": "Digital Meter",
+  "toolbox.widget.digital_meter.desc": "Live value, peak & sparkline",
+  "toolbox.widget.radial_gauge.name": "Radial Gauge",
+  "toolbox.widget.radial_gauge.desc": "Arc dial with alarm threshold",
+  "toolbox.widget.status_led.name": "Status LED",
+  "toolbox.widget.status_led.desc": "Digital & FSM state indicator",
+  "toolbox.widget.watch_table.name": "Watch Table",
+  "toolbox.widget.watch_table.desc": "Multi-channel live table & scaling",
+  "toolbox.widget.param_slider.name": "Param Slider",
+  "toolbox.widget.param_slider.desc": "Coalesced TX slider control",
+  "toolbox.widget.cmd_button.name": "Command Button",
+  "toolbox.widget.cmd_button.desc": "ASCII / HEX / KV TX trigger",
+
+  "canvas.designMode": "✎ Edit Layout",
+  "canvas.lockedMode": "🔒 Locked",
+  "canvas.clearAll": "Clear",
+  "canvas.dropHint":
+    "Drop widgets from Toolbox · Drag channels onto any widget card or empty grid",
+  "canvas.emptyTitle": "Empty Control Canvas",
+  "canvas.emptyDesc":
+    "Drag any widget from the Widget Toolbox on the left, or drop a channel directly onto the grid.",
+  "widget.unbound": "Drop a channel here",
+  "widget.configToggle": "Config",
+  "widget.remove": "Remove widget",
+  "widget.raw": "Raw",
+  "widget.min": "Min",
+  "widget.max": "Max",
+  "widget.resetPeaks": "Reset",
+  "widget.rangeMin": "Min",
+  "widget.rangeMax": "Max",
+  "widget.warnHigh": "Warn",
+  "widget.watch.ch": "Channel",
+  "widget.watch.raw": "Raw",
+  "widget.watch.scale": "Scale",
+  "widget.watch.offset": "Offset",
+  "widget.watch.scaled": "Live Value",
+  "widget.watch.empty":
+    "Drag channels from the Channel Tree into this table to monitor live values",
+  "widget.slider.source": "Source",
+  "widget.slider.key": "Key",
+  "widget.btn.send": "Send",
+  "widget.btn.sent": "Sent",
+  "widget.btn.mode": "Mode",
+  "widget.btn.cmd": "Payload",
 
   // Scope Viewport Widget & HUD
   "scope.sweepModeAria": "Sweep Mode",
@@ -84,6 +137,18 @@ export const EN_MESSAGES = {
   "scope.resume": "Resume",
   "scope.zeroPan": "Zero Pan",
   "scope.zeroPanTitle": "Reset Pan Offset",
+  "scope.wheelTargetTitle": "Mouse wheel zoom axis target (X / Y / XY)",
+  "scope.wheelTargetAria": "Wheel zoom target",
+  "scope.autoY": "Auto Y",
+  "scope.autoYTitle": "Auto-fit vertical coordinate axis to visible signals",
+  "scope.zeroY": "Zero Y",
+  "scope.zeroYTitle": "Reset vertical coordinate axis center to 0",
+  "scope.channelCondTitle": "Configure per-channel scale & offset",
+  "scope.channelCondLabel": "Channel Scale & Offset",
+  "scope.chScale": "Scale",
+  "scope.chOffset": "Offset",
+  "scope.chReset": "Reset 1×/+0",
+  "scope.closeCond": "Done",
   "scope.overlay": "Overlay",
   "scope.stacked": "Stacked",
   "scope.cursors": "Cursors A/B",
@@ -252,10 +317,61 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "stage.emptyTitle": "当前无活动 MSO 示波器面板",
   "stage.emptyDesc": "点击下方按钮新建独立 MSO 示波器视口，或从左侧通道树拖拽通道。",
   "stage.addScope": "+ 新建示波器",
+  "stage.addCanvas": "+ 新建测控画布",
   "stage.unavailable": "示波器 #{id} 不可用。",
+  "stage.canvasUnavailable": "测控画布 #{id} 不可用。",
   "stage.splitStacked": "上下分屏",
   "stage.splitSideBySide": "左右分屏",
-  "stage.hint": "拖拽标签可分屏停靠 · 波形区滚轮缩放 · 从左侧拖入通道即可绑定",
+  "stage.hint": "拖拽标签分屏 · 坐标轴/波形区滚轮围绕鼠标位置缩放 · 支持从控件箱拖放控件",
+
+  // Widget Toolbox & Dashboard Canvas
+  "toolbox.title": "控件箱",
+  "toolbox.hint": "拖拽至右侧画布或点击 + 添加",
+  "toolbox.addBtnTitle": "添加控件到当前测控画布",
+  "toolbox.widget.mso_scope.name": "MSO 波形示波器",
+  "toolbox.widget.mso_scope.desc": "多域 GPU 波形视图",
+  "toolbox.widget.digital_meter.name": "数字读数表",
+  "toolbox.widget.digital_meter.desc": "实时数值、峰谷极值与趋势线",
+  "toolbox.widget.radial_gauge.name": "圆弧仪表盘",
+  "toolbox.widget.radial_gauge.desc": "带量程与告警阈值的圆弧表",
+  "toolbox.widget.status_led.name": "状态指示灯",
+  "toolbox.widget.status_led.desc": "数字逻辑电平与状态机指示灯",
+  "toolbox.widget.watch_table.name": "多通道监视表",
+  "toolbox.widget.watch_table.desc": "实时值刷新与独立缩放偏置",
+  "toolbox.widget.param_slider.name": "参数调节滑块",
+  "toolbox.widget.param_slider.desc": "VOFA+ 风格并发平滑下行滑块",
+  "toolbox.widget.cmd_button.name": "指令触发按钮",
+  "toolbox.widget.cmd_button.desc": "一键发送 ASCII / HEX / KV",
+
+  "canvas.designMode": "✎ 编辑布局",
+  "canvas.lockedMode": "🔒 已锁定",
+  "canvas.clearAll": "清空画布",
+  "canvas.dropHint":
+    "可从左侧控件箱拖入任意控件放置于网格 · 将通道拖入控件或空白区即可绑定",
+  "canvas.emptyTitle": "当前画布暂无控件",
+  "canvas.emptyDesc": "请从左侧「控件箱」拖拽控件到此画布，或直接拖入通道生成实时仪表。",
+  "widget.unbound": "请将左侧通道拖入此处",
+  "widget.configToggle": "配置",
+  "widget.remove": "移除控件",
+  "widget.raw": "原始值",
+  "widget.min": "最小",
+  "widget.max": "最大",
+  "widget.resetPeaks": "清零峰谷",
+  "widget.rangeMin": "下限",
+  "widget.rangeMax": "上限",
+  "widget.warnHigh": "告警",
+  "widget.watch.ch": "通道",
+  "widget.watch.raw": "原始值",
+  "widget.watch.scale": "缩放",
+  "widget.watch.offset": "偏置",
+  "widget.watch.scaled": "实时值",
+  "widget.watch.empty": "从左侧通道树拖拽多个通道到此表格以实时刷新数值",
+  "widget.slider.source": "数据源",
+  "widget.slider.key": "参数名",
+  "widget.btn.send": "发送指令",
+  "widget.btn.sent": "已发送",
+  "widget.btn.mode": "格式",
+  "widget.btn.cmd": "指令内容",
 
   // Scope Viewport Widget & HUD
   "scope.sweepModeAria": "扫描触发模式",
@@ -274,6 +390,18 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "scope.resume": "恢复",
   "scope.zeroPan": "平移归零",
   "scope.zeroPanTitle": "重置水平平移偏移",
+  "scope.wheelTargetTitle": "波形区鼠标滚轮缩放坐标目标 (X / Y / XY)",
+  "scope.wheelTargetAria": "滚轮缩放轴",
+  "scope.autoY": "Y 自适应",
+  "scope.autoYTitle": "按当前可见波形自动适配纵坐标轴量程",
+  "scope.zeroY": "Y 归零",
+  "scope.zeroYTitle": "重置纵坐标轴中心偏移为 0",
+  "scope.channelCondTitle": "独立配置当前通道的缩放倍率与偏置",
+  "scope.channelCondLabel": "通道独立缩放与偏置",
+  "scope.chScale": "缩放",
+  "scope.chOffset": "偏置",
+  "scope.chReset": "复位 1×/+0",
+  "scope.closeCond": "完成",
   "scope.overlay": "叠加视图",
   "scope.stacked": "分栏视图",
   "scope.cursors": "测量光标 A/B",
@@ -481,6 +609,22 @@ export function translateDefaultScopeTitle(title: string, targetLocale: UiLocale
   const zhMatch = /^MSO 示波器 (\d+)$/.exec(title);
   if (zhMatch) {
     return getDefaultScopeTitle("generic", targetLocale, Number(zhMatch[1]));
+  }
+  return title;
+}
+
+export function getDefaultCanvasTitle(locale: UiLocale, canvasId = 1): string {
+  return locale === "zh-CN" ? `测控仪表画布 ${canvasId}` : `Instrument Canvas ${canvasId}`;
+}
+
+export function translateDefaultCanvasTitle(title: string, targetLocale: UiLocale): string {
+  const enMatch = /^Instrument Canvas (\d+)$/.exec(title);
+  if (enMatch) {
+    return getDefaultCanvasTitle(targetLocale, Number(enMatch[1]));
+  }
+  const zhMatch = /^测控仪表画布 (\d+)$/.exec(title);
+  if (zhMatch) {
+    return getDefaultCanvasTitle(targetLocale, Number(zhMatch[1]));
   }
   return title;
 }

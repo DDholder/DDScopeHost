@@ -11,10 +11,12 @@ import { translate, type UiLocale } from "../i18n/index.ts";
 import type { RenderBackendKind } from "./backend.ts";
 import type { RibbonLabelPlacement } from "./geometry.ts";
 import {
-  analogValueToY,
+  DEFAULT_Y_AXIS_CONFIG,
+  channelValueToY,
   type MsoLayout,
   type Rect,
   type ScopeTrackRenderConfig,
+  type ScopeYAxisConfig,
 } from "./layout.ts";
 import {
   formatFrequencyHz,
@@ -30,6 +32,8 @@ export interface ScopeHudState {
   timeSpanNs: number;
   preTriggerRatio: number;
   panOffsetNs: number;
+  yAxisScale?: number;
+  yAxisOffset?: number;
   trigger: TriggerConditionDto | null;
   cursorsEnabled: boolean;
   cursorARatio: number;
@@ -53,6 +57,7 @@ export type HudHitTarget =
   | "preTrigger"
   | "plot"
   | "yGutter"
+  | "xGutter"
   | "none";
 
 function clamp(v: number, min: number, max: number): number {
@@ -114,12 +119,23 @@ export function hitTestHudHandle(
   layout: MsoLayout,
   state: Pick<
     ScopeHudState,
-    "sweepMode" | "preTriggerRatio" | "trigger" | "cursorsEnabled" | "cursorARatio" | "cursorBRatio"
+    | "sweepMode"
+    | "preTriggerRatio"
+    | "trigger"
+    | "cursorsEnabled"
+    | "cursorARatio"
+    | "cursorBRatio"
+    | "yAxisScale"
+    | "yAxisOffset"
   >,
 ): HudHitTarget {
   const insideVertical = cssY >= layout.plotTop - 10 && cssY <= layout.plotBottom + 4;
   const insidePlotX = cssX >= layout.plotLeft && cssX <= layout.plotRight;
   const insidePlotY = cssY >= layout.plotTop && cssY <= layout.plotBottom;
+  const axis: ScopeYAxisConfig = {
+    yAxisScale: state.yAxisScale ?? DEFAULT_Y_AXIS_CONFIG.yAxisScale,
+    yAxisOffset: state.yAxisOffset ?? DEFAULT_Y_AXIS_CONFIG.yAxisOffset,
+  };
 
   if (state.cursorsEnabled && insideVertical) {
     const xA = layout.plotLeft + state.cursorARatio * layout.plotWidth;
@@ -144,9 +160,10 @@ export function hitTestHudHandle(
     if (state.trigger && state.trigger.kind === "edge") {
       const targetLane = findAnalogLaneRect(layout, state.trigger.channel_id);
       if (targetLane) {
-        const yTrig = analogValueToY(
+        const yTrig = channelValueToY(
           state.trigger.level ?? 0,
           targetLane.rect,
+          axis,
           targetLane.track.yScale,
           targetLane.track.yOffset,
         );
@@ -165,6 +182,10 @@ export function hitTestHudHandle(
 
   if (cssX < layout.plotLeft && insidePlotY) {
     return "yGutter";
+  }
+
+  if (cssY > layout.plotBottom && insidePlotX) {
+    return "xGutter";
   }
 
   if (insidePlotX && insidePlotY) {
@@ -214,11 +235,15 @@ export function renderScopeHud(
 
   // 1. Top telemetry & timebase header
   const locale: UiLocale = state.locale ?? "en";
+  const axis: ScopeYAxisConfig = {
+    yAxisScale: state.yAxisScale ?? DEFAULT_Y_AXIS_CONFIG.yAxisScale,
+    yAxisOffset: state.yAxisOffset ?? DEFAULT_Y_AXIS_CONFIG.yAxisOffset,
+  };
   ctx.font = '600 11px "JetBrains Mono", "Fira Code", ui-monospace, monospace';
   ctx.textBaseline = "middle";
   const topMidY = plotTop * 0.5;
 
-  const tbText = `${formatTimePerDiv(state.timeSpanNs)} · ${translate(locale, "hud.span")} ${formatTimeNs(state.timeSpanNs)}`;
+  const tbText = `${formatTimePerDiv(state.timeSpanNs)} · Y ${formatMetricValue(axis.yAxisScale, null)}/div · ${translate(locale, "hud.span")} ${formatTimeNs(state.timeSpanNs)}`;
   ctx.fillStyle = "#cbd5e1";
   ctx.textAlign = "left";
   ctx.fillText(tbText, plotLeft, topMidY);
@@ -244,7 +269,7 @@ export function renderScopeHud(
     ctx.fillText(label, gx, xLabelY);
   }
 
-  // 3. Y-Axis Rulers & Gutter Lane Labels
+  // 3. Whole-Axis Y Rulers & Per-Channel Baseline Markers
   ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
   if (layout.analogSubLanes.length > 0) {
     const uniqueLanes = new Map<Rect, ScopeTrackRenderConfig[]>();
@@ -259,28 +284,30 @@ export function renderScopeHud(
     }
 
     uniqueLanes.forEach((tracksInLane, rect) => {
-      const primary =
-        tracksInLane.find((t) => t.channelId === state.activeAnalogChannelId) ??
-        tracksInLane[0];
-      const topVal = primary.yOffset + 4 * primary.yScale;
-      const midVal = primary.yOffset;
-      const botVal = primary.yOffset - 4 * primary.yScale;
+      const topVal = axis.yAxisOffset + 4 * axis.yAxisScale;
+      const p2Val = axis.yAxisOffset + 2 * axis.yAxisScale;
+      const midVal = axis.yAxisOffset;
+      const m2Val = axis.yAxisOffset - 2 * axis.yAxisScale;
+      const botVal = axis.yAxisOffset - 4 * axis.yAxisScale;
 
       ctx.textAlign = "right";
-      ctx.fillStyle = rgbaNumberToCss(primary.colorRgba, 0.95);
-      ctx.fillText(formatMetricValue(topVal, null), plotLeft - 6, rect.y + 8);
-      ctx.fillText(formatMetricValue(midVal, null), plotLeft - 6, rect.y + rect.height * 0.5);
-      ctx.fillText(formatMetricValue(botVal, null), plotLeft - 6, rect.y + rect.height - 8);
+      ctx.fillStyle = "#cbd5e1";
+      ctx.fillText(formatMetricValue(topVal, null), plotLeft - 7, rect.y + 8);
+      ctx.fillText(formatMetricValue(midVal, null), plotLeft - 7, rect.y + rect.height * 0.5);
+      ctx.fillText(formatMetricValue(botVal, null), plotLeft - 7, rect.y + rect.height - 8);
+      if (rect.height >= 120) {
+        ctx.fillStyle = "#64748b";
+        ctx.fillText(formatMetricValue(p2Val, null), plotLeft - 7, rect.y + rect.height * 0.25);
+        ctx.fillText(formatMetricValue(m2Val, null), plotLeft - 7, rect.y + rect.height * 0.75);
+      }
 
-      // Zero-reference ticks for overlaid channels
-      if (tracksInLane.length > 1) {
-        for (let k = 0; k < tracksInLane.length; k += 1) {
-          const ch = tracksInLane[k];
-          const yCenter = analogValueToY(ch.yOffset, rect, ch.yScale, ch.yOffset);
-          if (yCenter >= rect.y + 4 && yCenter <= rect.y + rect.height - 4) {
-            ctx.fillStyle = rgbaNumberToCss(ch.colorRgba, 0.95);
-            ctx.fillRect(plotLeft - 4, yCenter - 1, 4, 2);
-          }
+      // Per-channel physical-zero baseline markers on the left axis border
+      for (let k = 0; k < tracksInLane.length; k += 1) {
+        const ch = tracksInLane[k];
+        const yZero = channelValueToY(0, rect, axis, ch.yScale, ch.yOffset);
+        if (yZero >= rect.y + 2 && yZero <= rect.y + rect.height - 2) {
+          ctx.fillStyle = rgbaNumberToCss(ch.colorRgba, 0.95);
+          ctx.fillRect(plotLeft - 5, yZero - 1.5, 5, 3);
         }
       }
     });
@@ -350,15 +377,17 @@ export function renderScopeHud(
       if (targetLane) {
         const level = state.trigger.level ?? 0;
         const hys = Math.max(0, state.trigger.hysteresis ?? 0);
-        const yTrig = analogValueToY(
+        const yTrig = channelValueToY(
           level,
           targetLane.rect,
+          axis,
           targetLane.track.yScale,
           targetLane.track.yOffset,
         );
-        const yHys = analogValueToY(
+        const yHys = channelValueToY(
           level - hys,
           targetLane.rect,
+          axis,
           targetLane.track.yScale,
           targetLane.track.yOffset,
         );
@@ -468,7 +497,13 @@ export function renderScopeHud(
       yB = evaluateTrackValueAtNorm(blk, state.cursorBRatio);
       if (yA !== null) {
         const pyA = clamp(
-          analogValueToY(yA, activeLane.rect, activeLane.track.yScale, activeLane.track.yOffset),
+          channelValueToY(
+            yA,
+            activeLane.rect,
+            axis,
+            activeLane.track.yScale,
+            activeLane.track.yOffset,
+          ),
           activeLane.rect.y,
           activeLane.rect.y + activeLane.rect.height,
         );
@@ -479,7 +514,13 @@ export function renderScopeHud(
       }
       if (yB !== null) {
         const pyB = clamp(
-          analogValueToY(yB, activeLane.rect, activeLane.track.yScale, activeLane.track.yOffset),
+          channelValueToY(
+            yB,
+            activeLane.rect,
+            axis,
+            activeLane.track.yScale,
+            activeLane.track.yOffset,
+          ),
           activeLane.rect.y,
           activeLane.rect.y + activeLane.rect.height,
         );

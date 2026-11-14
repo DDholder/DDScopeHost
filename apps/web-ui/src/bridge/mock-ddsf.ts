@@ -163,7 +163,7 @@ export class MockDdsfController {
       this.worker = null;
     }
     if (!this.fallbackCore) {
-      this.fallbackCore = new MockSimulationCore();
+      this.fallbackCore = new MockSimulationCore({ autoStartDefaultSim: false });
     }
     if (this.running) {
       this.restartFallbackTimer();
@@ -244,7 +244,7 @@ export class MockDdsfController {
     }
 
     if (!this.fallbackCore) {
-      this.fallbackCore = new MockSimulationCore();
+      this.fallbackCore = new MockSimulationCore({ autoStartDefaultSim: false });
     }
     try {
       const target = this.fallbackCore as unknown as Record<

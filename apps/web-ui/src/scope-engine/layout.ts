@@ -155,6 +155,20 @@ export function computeMsoLayout(
   };
 }
 
+export interface ScopeYAxisConfig {
+  yAxisScale: number;
+  yAxisOffset: number;
+}
+
+export const DEFAULT_Y_AXIS_CONFIG: ScopeYAxisConfig = {
+  yAxisScale: 10,
+  yAxisOffset: 0,
+};
+
+function clampLayoutValue(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
 export function analogValueToY(
   val: number,
   rect: Rect,
@@ -177,4 +191,220 @@ export function yToAnalogValue(
   const halfSpan = safeScale * 4;
   const norm = (yPx - rect.y) / Math.max(1, rect.height);
   return yOffsetCenter + (0.5 - norm) * 2 * halfSpan;
+}
+
+/** Transforms a raw channel physical value into shared Y-axis coordinates: raw * scale + offset. */
+export function channelValueToAxis(
+  rawVal: number,
+  channelScale: number,
+  channelOffset: number,
+): number {
+  const safeScale = Number.isFinite(channelScale) ? channelScale : 1;
+  const safeOffset = Number.isFinite(channelOffset) ? channelOffset : 0;
+  return rawVal * safeScale + safeOffset;
+}
+
+/** Inverse transform from shared Y-axis coordinate value back to raw physical channel units. */
+export function axisValueToChannel(
+  axisVal: number,
+  channelScale: number,
+  channelOffset: number,
+): number {
+  const rawScale = Number.isFinite(channelScale) ? channelScale : 1;
+  const safeScale =
+    Math.abs(rawScale) < 1e-6 ? (rawScale < 0 ? -1e-6 : 1e-6) : rawScale;
+  const safeOffset = Number.isFinite(channelOffset) ? channelOffset : 0;
+  return (axisVal - safeOffset) / safeScale;
+}
+
+/** Maps a raw channel sample onto canvas CSS Y using per-channel scale/offset + whole-axis viewport scale/offset. */
+export function channelValueToY(
+  rawVal: number,
+  rect: Rect,
+  axis: ScopeYAxisConfig,
+  channelScale: number,
+  channelOffset: number,
+): number {
+  const axisVal = channelValueToAxis(rawVal, channelScale, channelOffset);
+  return analogValueToY(axisVal, rect, axis.yAxisScale, axis.yAxisOffset);
+}
+
+/** Maps a canvas CSS Y pixel back into raw channel physical units via whole-axis + per-channel inverse transforms. */
+export function yToChannelValue(
+  yPx: number,
+  rect: Rect,
+  axis: ScopeYAxisConfig,
+  channelScale: number,
+  channelOffset: number,
+): number {
+  const axisVal = yToAnalogValue(yPx, rect, axis.yAxisScale, axis.yAxisOffset);
+  return axisValueToChannel(axisVal, channelScale, channelOffset);
+}
+
+/** Zooms the entire Y coordinate axis anchored at cursor pixel `yPx` so the axis coordinate under cursor stays stationary. */
+export function zoomYAxisAtCursor(
+  yPx: number,
+  rect: Rect,
+  oldYAxisScale: number,
+  oldYAxisOffset: number,
+  zoomFactor: number,
+): ScopeYAxisConfig {
+  const safeOldScale = clampLayoutValue(
+    Number.isFinite(oldYAxisScale) ? oldYAxisScale : DEFAULT_Y_AXIS_CONFIG.yAxisScale,
+    1e-4,
+    1e6,
+  );
+  const safeOldOffset = Number.isFinite(oldYAxisOffset) ? oldYAxisOffset : 0;
+  const v = clampLayoutValue((yPx - rect.y) / Math.max(1, rect.height), 0, 1);
+  const axisAtCursor = safeOldOffset + (0.5 - v) * 8 * safeOldScale;
+  const newYAxisScale = clampLayoutValue(safeOldScale * zoomFactor, 1e-4, 1e6);
+  const newYAxisOffset = axisAtCursor - (0.5 - v) * 8 * newYAxisScale;
+  return {
+    yAxisScale: newYAxisScale,
+    yAxisOffset: newYAxisOffset,
+  };
+}
+
+export interface HorizontalPanBounds {
+  canPan: boolean;
+  minPanNs: number;
+  maxPanNs: number;
+}
+
+export interface ComputeHorizontalPanBoundsInput {
+  hasScopeData: boolean;
+  hasVisibleTracks: boolean;
+  triggerState: number;
+  totalTrackElements: number;
+  sweepMode: "roll" | "auto" | "normal" | "single";
+  preTriggerRatio?: number;
+  paused: boolean;
+  timeSpanNs: number;
+  targetSpanNs?: number;
+  currentPanNs: number;
+  winTStartNs: number;
+  winTSpanNs: number;
+  hostNowNs: number;
+  floorWinStartNs: number;
+}
+
+/**
+ * Computes valid horizontal pan limits `[minPanNs, maxPanNs]` beyond which the
+ * underlying waveform window cannot move, preventing phantom X-axis label drift.
+ */
+export function computeHorizontalPanBounds(
+  input: ComputeHorizontalPanBoundsInput,
+): HorizontalPanBounds {
+  const {
+    hasScopeData,
+    hasVisibleTracks,
+    triggerState,
+    totalTrackElements,
+    sweepMode,
+    preTriggerRatio = 0.25,
+    paused,
+    timeSpanNs,
+    targetSpanNs = timeSpanNs,
+    currentPanNs,
+    winTStartNs,
+    winTSpanNs,
+    hostNowNs,
+    floorWinStartNs,
+  } = input;
+
+  // TriggerRuntimeStateCode.Armed === 1
+  if (
+    !hasScopeData ||
+    !hasVisibleTracks ||
+    winTSpanNs <= 0 ||
+    (triggerState === 1 && totalTrackElements === 0)
+  ) {
+    return {
+      canPan: false,
+      minPanNs: currentPanNs,
+      maxPanNs: currentPanNs,
+    };
+  }
+
+  const curWinEndNs = winTStartNs + winTSpanNs;
+
+  if (sweepMode === "roll" && !paused) {
+    const safeHostNow = Math.max(floorWinStartNs, hostNowNs);
+    const availableHistoryNs = Math.max(0, safeHostNow - floorWinStartNs);
+    if (availableHistoryNs <= targetSpanNs) {
+      return {
+        canPan: false,
+        minPanNs: 0,
+        maxPanNs: 0,
+      };
+    }
+    const minPanNs = Math.min(0, Math.round(targetSpanNs - availableHistoryNs));
+    const maxPanNs = 0;
+    return {
+      canPan: minPanNs < maxPanNs,
+      minPanNs,
+      maxPanNs,
+    };
+  }
+
+  // Static/latched/triggered/paused modes: span delta from current to targetSpanNs uses zeroRatio
+  const zeroRatio = sweepMode === "roll" ? 1.0 : clampLayoutValue(preTriggerRatio, 0.05, 0.95);
+  const spanShrinkNs = winTSpanNs - targetSpanNs;
+  const availLeftNs = Math.max(0, winTStartNs - floorWinStartNs);
+  const rawMinPan = Math.round(currentPanNs - availLeftNs - spanShrinkNs * zeroRatio);
+
+  const ceilEndNs = Math.max(curWinEndNs, hostNowNs);
+  const availRightNs = Math.max(0, ceilEndNs - curWinEndNs);
+  const rawMaxPan =
+    sweepMode === "roll" && paused
+      ? Math.min(0, Math.round(currentPanNs + availRightNs))
+      : Math.round(currentPanNs + availRightNs + spanShrinkNs * (1 - zeroRatio));
+
+  if (rawMaxPan < rawMinPan) {
+    const locked = sweepMode === "roll" ? 0 : currentPanNs;
+    return {
+      canPan: false,
+      minPanNs: locked,
+      maxPanNs: locked,
+    };
+  }
+
+  return {
+    canPan: rawMinPan < rawMaxPan,
+    minPanNs: rawMinPan,
+    maxPanNs: rawMaxPan,
+  };
+}
+
+/** Zooms horizontal X timebase anchored at cursor pixel `xPx`, clamping pan when boundaries stop the waveform. */
+export function zoomXAxisAtCursor(
+  xPx: number,
+  plotLeft: number,
+  plotWidth: number,
+  oldSpanNs: number,
+  oldPanNs: number,
+  zeroRatio: number,
+  zoomFactor: number,
+  clampBounds?: (newSpanNs: number) => HorizontalPanBounds,
+): { timeSpanNs: number; panOffsetNs: number } {
+  const newSpanNs = Math.round(clampLayoutValue(oldSpanNs * zoomFactor, 1_000, 600_000_000_000));
+  if (newSpanNs === oldSpanNs) {
+    return { timeSpanNs: oldSpanNs, panOffsetNs: oldPanNs };
+  }
+  const u = clampLayoutValue((xPx - plotLeft) / Math.max(1, plotWidth), 0, 1);
+  const rawNewPanNs = Math.round(oldPanNs + (u - zeroRatio) * (oldSpanNs - newSpanNs));
+
+  if (clampBounds) {
+    const bounds = clampBounds(newSpanNs);
+    const clampedPanNs = Math.round(clampLayoutValue(rawNewPanNs, bounds.minPanNs, bounds.maxPanNs));
+    return {
+      timeSpanNs: newSpanNs,
+      panOffsetNs: clampedPanNs,
+    };
+  }
+
+  return {
+    timeSpanNs: newSpanNs,
+    panOffsetNs: rawNewPanNs,
+  };
 }

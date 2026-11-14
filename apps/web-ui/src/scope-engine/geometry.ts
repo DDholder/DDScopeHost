@@ -8,9 +8,11 @@ import type {
 } from "../bridge/ddsf-parser.ts";
 import {
   analogValueToY,
+  channelValueToY,
   type MsoLayout,
   type Rect,
   type ScopeTrackRenderConfig,
+  type ScopeYAxisConfig,
 } from "./layout.ts";
 import { rgbaNumberToFloat4 } from "./time-format.ts";
 
@@ -219,6 +221,7 @@ export class ScopeGeometryBuilder {
     dpr: number,
     scopeData: DdsfScopeView | null,
     trackConfigs: ReadonlyArray<ScopeTrackRenderConfig>,
+    axisConfig?: ScopeYAxisConfig,
   ): BuiltScopeGeometry {
     this.floatCursor = 0;
     const ribbonLabels: RibbonLabelPlacement[] = [];
@@ -254,6 +257,7 @@ export class ScopeGeometryBuilder {
             lane.track,
             subpixelShiftNorm,
             dpr,
+            axisConfig,
           );
         } else if (block.payload.kind === DdsfBlockKind.AnalogRawXY) {
           sawRaw = true;
@@ -264,6 +268,7 @@ export class ScopeGeometryBuilder {
             lane.track,
             subpixelShiftNorm,
             dpr,
+            axisConfig,
           );
         }
       }
@@ -393,6 +398,7 @@ export class ScopeGeometryBuilder {
     cfg: ScopeTrackRenderConfig,
     subpixelShiftNorm: number,
     dpr: number,
+    axisConfig?: ScopeYAxisConfig,
   ): void {
     if (count <= 0) return;
     const [r, g, b, a] = rgbaNumberToFloat4(cfg.colorRgba);
@@ -400,6 +406,11 @@ export class ScopeGeometryBuilder {
     const plotWidthPx = rect.width * dpr;
     const colHalfW = Math.max(0.75 * dpr, (plotWidthPx / Math.max(1, count)) * 0.55);
     const aaHalfW = 1.05 * dpr;
+
+    const toYPx = (v: number): number =>
+      (axisConfig
+        ? channelValueToY(v, rect, axisConfig, cfg.yScale, cfg.yOffset)
+        : analogValueToY(v, rect, cfg.yScale, cfg.yOffset)) * dpr;
 
     let prevXPx = 0;
     let prevLastYPx = 0;
@@ -413,10 +424,10 @@ export class ScopeGeometryBuilder {
       const vLast = columns[base + 4];
 
       const xPx = plotLeftPx + xNorm * plotWidthPx;
-      const yFirst = analogValueToY(vFirst, rect, cfg.yScale, cfg.yOffset) * dpr;
-      const yMin = analogValueToY(vMin, rect, cfg.yScale, cfg.yOffset) * dpr;
-      const yMax = analogValueToY(vMax, rect, cfg.yScale, cfg.yOffset) * dpr;
-      const yLast = analogValueToY(vLast, rect, cfg.yScale, cfg.yOffset) * dpr;
+      const yFirst = toYPx(vFirst);
+      const yMin = toYPx(vMin);
+      const yMax = toYPx(vMax);
+      const yLast = toYPx(vLast);
 
       const topY = Math.min(yMin, yMax) - 0.7 * dpr;
       const botY = Math.max(yMin, yMax) + 0.7 * dpr;
@@ -441,6 +452,7 @@ export class ScopeGeometryBuilder {
     cfg: ScopeTrackRenderConfig,
     subpixelShiftNorm: number,
     dpr: number,
+    axisConfig?: ScopeYAxisConfig,
   ): void {
     if (count <= 0) return;
     const [r, g, b, a] = rgbaNumberToFloat4(cfg.colorRgba);
@@ -450,6 +462,11 @@ export class ScopeGeometryBuilder {
     const showDots = count <= 96;
     const dotHalf = 2.6 * dpr;
 
+    const toYPx = (v: number): number =>
+      (axisConfig
+        ? channelValueToY(v, rect, axisConfig, cfg.yScale, cfg.yOffset)
+        : analogValueToY(v, rect, cfg.yScale, cfg.yOffset)) * dpr;
+
     let prevX = 0;
     let prevY = 0;
 
@@ -457,7 +474,7 @@ export class ScopeGeometryBuilder {
       const xNorm = points[i * 2] + subpixelShiftNorm;
       const yVal = points[i * 2 + 1];
       const xPx = plotLeftPx + xNorm * plotWidthPx;
-      const yPx = analogValueToY(yVal, rect, cfg.yScale, cfg.yOffset) * dpr;
+      const yPx = toYPx(yVal);
 
       if (i > 0) {
         this.pushAaSegment(prevX, prevY, xPx, yPx, halfThick, r, g, b, a);

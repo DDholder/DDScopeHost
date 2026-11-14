@@ -1,0 +1,160 @@
+export const DASHBOARD_GRID_COLS = 24;
+
+export const WIDGET_TYPES = [
+  "mso_scope",
+  "digital_meter",
+  "radial_gauge",
+  "status_led",
+  "watch_table",
+  "param_slider",
+  "cmd_button",
+] as const;
+
+export type WidgetType = (typeof WIDGET_TYPES)[number];
+
+export interface WidgetChannelBinding {
+  channelId: number;
+  scale: number;
+  offset: number;
+}
+
+export interface WidgetGaugeConfig {
+  min: number;
+  max: number;
+  warnHigh: number;
+}
+
+export interface WidgetSliderConfig {
+  sourceId: string;
+  key: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+}
+
+export interface WidgetButtonConfig {
+  sourceId: string;
+  mode: "ascii" | "hex" | "kv";
+  command: string;
+  kvKey: string;
+  kvValue: number;
+  priority: "normal" | "high";
+}
+
+export interface DashboardWidgetItem {
+  id: string;
+  type: WidgetType;
+  title: string;
+  col: number;
+  row: number;
+  colSpan: number;
+  rowSpan: number;
+  primaryBinding: WidgetChannelBinding | null;
+  bindings: WidgetChannelBinding[];
+  scopeId: number | null;
+  gaugeConfig?: WidgetGaugeConfig;
+  sliderConfig?: WidgetSliderConfig;
+  buttonConfig?: WidgetButtonConfig;
+}
+
+export interface DashboardCanvasConfig {
+  canvasId: number;
+  title: string;
+  locked: boolean;
+  widgets: DashboardWidgetItem[];
+}
+
+export interface WidgetCatalogEntry {
+  type: WidgetType;
+  badge: string;
+  defaultColSpan: number;
+  defaultRowSpan: number;
+}
+
+export const WIDGET_CATALOG: ReadonlyArray<WidgetCatalogEntry> = [
+  { type: "mso_scope", badge: "MSO", defaultColSpan: 24, defaultRowSpan: 8 },
+  { type: "digital_meter", badge: "NUM", defaultColSpan: 8, defaultRowSpan: 4 },
+  { type: "radial_gauge", badge: "ARC", defaultColSpan: 8, defaultRowSpan: 5 },
+  { type: "status_led", badge: "LED", defaultColSpan: 8, defaultRowSpan: 4 },
+  { type: "watch_table", badge: "TBL", defaultColSpan: 16, defaultRowSpan: 5 },
+  { type: "param_slider", badge: "SLD", defaultColSpan: 12, defaultRowSpan: 3 },
+  { type: "cmd_button", badge: "CMD", defaultColSpan: 8, defaultRowSpan: 3 },
+];
+
+export function defaultSizeForWidgetType(type: WidgetType): {
+  colSpan: number;
+  rowSpan: number;
+} {
+  const found = WIDGET_CATALOG.find((e) => e.type === type);
+  return found
+    ? { colSpan: found.defaultColSpan, rowSpan: found.defaultRowSpan }
+    : { colSpan: 8, rowSpan: 4 };
+}
+
+export function clampGridRect(
+  col: number,
+  row: number,
+  colSpan: number,
+  rowSpan: number,
+  gridCols = DASHBOARD_GRID_COLS,
+): { col: number; row: number; colSpan: number; rowSpan: number } {
+  const safeColSpan = Math.max(4, Math.min(gridCols, Math.round(colSpan)));
+  const safeRowSpan = Math.max(2, Math.min(24, Math.round(rowSpan)));
+  const safeCol = Math.max(0, Math.min(gridCols - safeColSpan, Math.round(col)));
+  const safeRow = Math.max(0, Math.round(row));
+  return {
+    col: safeCol,
+    row: safeRow,
+    colSpan: safeColSpan,
+    rowSpan: safeRowSpan,
+  };
+}
+
+export interface GridBox {
+  col: number;
+  row: number;
+  colSpan: number;
+  rowSpan: number;
+}
+
+export function widgetsOverlap(a: GridBox, b: GridBox): boolean {
+  return (
+    a.col < b.col + b.colSpan &&
+    a.col + a.colSpan > b.col &&
+    a.row < b.row + b.rowSpan &&
+    a.row + a.rowSpan > b.row
+  );
+}
+
+export function findFreeGridSlot(
+  existing: ReadonlyArray<GridBox>,
+  colSpan: number,
+  rowSpan: number,
+  preferred?: { col: number; row: number },
+  gridCols = DASHBOARD_GRID_COLS,
+): { col: number; row: number } {
+  if (preferred) {
+    const clamped = clampGridRect(preferred.col, preferred.row, colSpan, rowSpan, gridCols);
+    return { col: clamped.col, row: clamped.row };
+  }
+
+  let maxRow = 0;
+  for (let i = 0; i < existing.length; i += 1) {
+    maxRow = Math.max(maxRow, existing[i].row + existing[i].rowSpan);
+  }
+
+  const safeW = Math.max(4, Math.min(gridCols, Math.round(colSpan)));
+  const safeH = Math.max(2, Math.round(rowSpan));
+
+  for (let r = 0; r <= maxRow + safeH; r += 1) {
+    for (let c = 0; c <= gridCols - safeW; c += 2) {
+      const candidate: GridBox = { col: c, row: r, colSpan: safeW, rowSpan: safeH };
+      if (!existing.some((item) => widgetsOverlap(candidate, item))) {
+        return { col: c, row: r };
+      }
+    }
+  }
+
+  return { col: 0, row: maxRow };
+}
