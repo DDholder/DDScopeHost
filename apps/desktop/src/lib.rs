@@ -2,9 +2,12 @@
 
 pub mod commands;
 pub mod data_bridge;
+pub mod runtime;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use specta_typescript::Typescript;
+use tauri::Manager;
 use tauri_specta::{collect_commands, collect_events, Builder};
 
 /// Builds the `tauri-specta` command and event router.
@@ -57,28 +60,44 @@ pub fn run() {
         }
     }
 
+    let tokio_handle = tauri::async_runtime::block_on(async { tokio::runtime::Handle::current() });
+    let bridge_state =
+        runtime::build_live_desktop_state(tokio_handle, runtime::DesktopRuntimeConfig::from_env())
+            .expect("failed to initialize DDScopeHost live CoreWorkspace");
+
+    let setup_state = bridge_state.clone();
     tauri::Builder::default()
-        .manage(commands::DesktopBridgeState::new_stub())
+        .manage(bridge_state)
         .invoke_handler(builder.invoke_handler())
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
+                if window.label() == "main" {
+                    if let Some(ctrl) = window.try_state::<Arc<runtime::DesktopRuntimeController>>() {
+                        ctrl.shutdown_blocking();
+                    }
+                }
                 #[cfg(windows)]
                 {
                     data_bridge::shm_windows::release_webview2_shm_on_sta(window.label());
                 }
-                #[cfg(not(windows))]
-                let _ = window;
             }
         })
         .setup(move |app| {
             builder.mount_events(app);
+            let rt_ctrl = runtime::DesktopRuntimeController::spawn(
+                app.handle().clone(),
+                setup_state.clone(),
+            );
+            app.manage(rt_ctrl.clone());
 
             #[cfg(debug_assertions)]
             if let Ok(raw_ms) = std::env::var("DDSCOPE_SMOKE_EXIT_MS") {
                 if let Ok(ms) = raw_ms.parse::<u64>() {
                     let handle = app.handle().clone();
+                    let smoke_ctrl = Arc::clone(&rt_ctrl);
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(ms));
+                        smoke_ctrl.shutdown_blocking();
                         handle.exit(0);
                     });
                 }

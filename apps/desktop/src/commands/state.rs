@@ -31,8 +31,9 @@ pub enum ControlPlaneBackend {
 }
 
 /// Tauri managed state housing both the control-plane engine handle and [`ZeroCopyDataBridge`].
+#[derive(Clone)]
 pub struct DesktopBridgeState {
-    backend: RwLock<ControlPlaneBackend>,
+    backend: Arc<RwLock<ControlPlaneBackend>>,
     data_bridge: Arc<ZeroCopyDataBridge>,
 }
 
@@ -55,7 +56,7 @@ impl DesktopBridgeState {
     /// Creates a pre-M4 stub state (`ControlPlaneBackend::Stub`) with an empty [`ZeroCopyDataBridge`].
     pub fn new_stub() -> Self {
         Self {
-            backend: RwLock::new(ControlPlaneBackend::Stub),
+            backend: Arc::new(RwLock::new(ControlPlaneBackend::Stub)),
             data_bridge: Arc::new(ZeroCopyDataBridge::new()),
         }
     }
@@ -63,7 +64,7 @@ impl DesktopBridgeState {
     /// Creates a state directly bound to a live [`CoreWorkspace`].
     pub fn with_workspace(workspace: Arc<CoreWorkspace>) -> Self {
         Self {
-            backend: RwLock::new(ControlPlaneBackend::Live(workspace)),
+            backend: Arc::new(RwLock::new(ControlPlaneBackend::Live(workspace))),
             data_bridge: Arc::new(ZeroCopyDataBridge::new()),
         }
     }

@@ -1500,6 +1500,33 @@ impl CoreWorkspace {
         Ok(summary)
     }
 
+    /// Register an already-constructed [`SourceSession`] sharing this workspace's [`ChannelHub`].
+    ///
+    /// Intended for custom/virtual transport bindings or deterministic host tests wiring
+    /// [`SourceSession::from_components`] directly onto [`Self::hub`].
+    pub fn register_source_session(&self, session: SourceSession) -> CoreResult<SourceSummary> {
+        if !Arc::ptr_eq(session.hub(), &self.hub) {
+            return Err(CoreError::InvalidConfig(
+                "SourceSession must share CoreWorkspace::hub()".into(),
+            ));
+        }
+        let source_id = session.source_id().clone();
+        let summary = session.summary();
+        let entry = Arc::new(Mutex::new(session));
+
+        let mut sources = self.sources.write();
+        if sources.contains_key(&source_id) {
+            drop(sources);
+            if let Ok(orphan) = Arc::try_unwrap(entry) {
+                let mut orphan_sess = orphan.into_inner();
+                let _ = orphan_sess.stop_blocking(&self.tokio_handle);
+            }
+            return Err(CoreError::SourceAlreadyExists(source_id));
+        }
+        sources.insert(source_id, entry);
+        Ok(summary)
+    }
+
     fn get_source_arc(&self, source_id: &SourceId) -> CoreResult<Arc<Mutex<SourceSession>>> {
         self.sources
             .read()

@@ -91,26 +91,24 @@ export function WorkspaceShell() {
             </span>
           </span>
 
-          {runtimeStatus?.mode === "browser-mock" && (
-            <div className="topbar-rate-switch" role="group" aria-label="Mock Tick Rate">
-              <button
-                type="button"
-                className={`scope-seg-btn ${mockRateHz === 60 ? "active" : ""}`}
-                data-testid="rate-60-btn"
-                onClick={() => setMockRateHz(60)}
-              >
-                60Hz
-              </button>
-              <button
-                type="button"
-                className={`scope-seg-btn ${mockRateHz === 120 ? "active" : ""}`}
-                data-testid="rate-120-btn"
-                onClick={() => setMockRateHz(120)}
-              >
-                120Hz
-              </button>
-            </div>
-          )}
+          <div className="topbar-rate-switch" role="group" aria-label="Mock Tick Rate">
+            <button
+              type="button"
+              className={`scope-seg-btn ${mockRateHz === 60 ? "active" : ""}`}
+              data-testid="rate-60-btn"
+              onClick={() => setMockRateHz(60)}
+            >
+              60Hz
+            </button>
+            <button
+              type="button"
+              className={`scope-seg-btn ${mockRateHz === 120 ? "active" : ""}`}
+              data-testid="rate-120-btn"
+              onClick={() => setMockRateHz(120)}
+            >
+              120Hz
+            </button>
+          </div>
 
           <button
             type="button"

@@ -63,6 +63,13 @@ export class MockDdsfController {
   private lastTelemetryEmitMs = 0;
   private rateHz = 120;
   private running = false;
+  private latestDownlinkStats: MockDownlinkStats = {
+    pendingQueueDepth: 0,
+    totalDispatched: 0,
+    coalescedOverwrites: 0,
+    motorKp: 1.0,
+    motorFreqHz: 50,
+  };
 
   constructor(bus: HighFreqTopicBus = globalTopicBus) {
     this.bus = bus;
@@ -136,6 +143,13 @@ export class MockDdsfController {
     }
   }
 
+  getDownlinkStats(): MockDownlinkStats {
+    if (this.fallbackCore) {
+      return this.fallbackCore.getDownlinkStats();
+    }
+    return { ...this.latestDownlinkStats };
+  }
+
   subscribeTelemetry(listener: TelemetryListener): () => void {
     this.telemetryListeners.add(listener);
     return () => {
@@ -199,6 +213,7 @@ export class MockDdsfController {
     telemetry: WorkspaceTelemetryEvent,
     downlinkStats: MockDownlinkStats,
   ): void {
+    this.latestDownlinkStats = { ...downlinkStats };
     this.bus.ingestFrame(frameBuffer);
 
     const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();

@@ -238,6 +238,8 @@ struct SimControlInner {
     injected_glitches: AtomicU64,
     forced_ctrl_state: AtomicU8,
     current_ctrl_state: AtomicU8,
+    kp_gain_bits: AtomicU32,
+    signal_freq_hz_bits: AtomicU64,
     pool_stats: Mutex<BufferPoolStats>,
 }
 
@@ -258,6 +260,8 @@ impl SimControlHandle {
                 injected_glitches: AtomicU64::new(0),
                 forced_ctrl_state: AtomicU8::new(STATE_UNFORCED),
                 current_ctrl_state: AtomicU8::new(CTRL_STATE_IDLE),
+                kp_gain_bits: AtomicU32::new(1.0_f32.to_bits()),
+                signal_freq_hz_bits: AtomicU64::new(0.0_f64.to_bits()),
                 pool_stats: Mutex::new(BufferPoolStats::default()),
             }),
         }
@@ -326,6 +330,56 @@ impl SimControlHandle {
     #[inline]
     pub fn ctrl_state(&self) -> u8 {
         self.inner.current_ctrl_state.load(Ordering::Acquire)
+    }
+
+    /// Sets the closed-loop amplitude multiplier `kp` (`0.05..=10.0`).
+    pub fn set_kp_gain(&self, gain: f32) -> CoreResult<()> {
+        if !gain.is_finite() || !(0.05..=10.0).contains(&gain) {
+            return Err(CoreError::InvalidConfig(format!(
+                "kp gain must be finite and in 0.05..=10.0, got {gain}"
+            )));
+        }
+        self.inner
+            .kp_gain_bits
+            .store(gain.to_bits(), Ordering::Release);
+        Ok(())
+    }
+
+    /// Returns the active amplitude multiplier `kp`.
+    #[inline]
+    pub fn kp_gain(&self) -> f32 {
+        f32::from_bits(self.inner.kp_gain_bits.load(Ordering::Acquire))
+    }
+
+    /// Sets the explicit synthetic waveform frequency override in Hz (`0.1..=500_000.0`).
+    pub fn set_signal_freq_hz(&self, freq_hz: f64) -> CoreResult<()> {
+        if !freq_hz.is_finite() || !(0.1..=500_000.0).contains(&freq_hz) {
+            return Err(CoreError::InvalidConfig(format!(
+                "signal_freq_hz must be finite and in 0.1..=500_000.0, got {freq_hz}"
+            )));
+        }
+        self.inner
+            .signal_freq_hz_bits
+            .store(freq_hz.to_bits(), Ordering::Release);
+        Ok(())
+    }
+
+    /// Clears the explicit frequency override, restoring default sample-rate-coupled frequency.
+    pub fn clear_signal_freq_hz(&self) {
+        self.inner
+            .signal_freq_hz_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
+    }
+
+    /// Returns the active waveform frequency override in Hz, if set.
+    #[inline]
+    pub fn signal_freq_hz(&self) -> Option<f64> {
+        let hz = f64::from_bits(self.inner.signal_freq_hz_bits.load(Ordering::Acquire));
+        if hz > 0.0 {
+            Some(hz)
+        } else {
+            None
+        }
     }
 
     /// Returns the latest [`BufferPoolStats`] snapshot recorded by the IO task.
@@ -606,7 +660,10 @@ impl SampleSynthesizer {
         let idx = self.sample_idx;
         self.sample_idx = idx.wrapping_add(1);
 
-        let f_sig = (sample_rate_hz / 200.0).max(50.0);
+        let f_sig = match self.control.signal_freq_hz() {
+            Some(override_hz) => override_hz.min(sample_rate_hz * 0.45),
+            None => (sample_rate_hz / 200.0).max(50.0),
+        };
         let phase_inc = f_sig / sample_rate_hz;
         let p = self.phase_turns as f32;
         self.phase_turns += phase_inc;
@@ -661,13 +718,18 @@ impl SampleSynthesizer {
 
         let a = self.config.analog_channels as usize;
         let noise_amp = self.config.noise_amplitude;
+        let kp_gain = self.control.kp_gain();
+        let apply_kp = (kp_gain - 1.0).abs() > f32::EPSILON;
 
         for ch in 0..a {
             let noise = self.rng.next_bipolar_f32();
-            let mut val = match self.waveform_for(ch) {
+            let waveform_kind = self.waveform_for(ch);
+            let is_dc_bus_glitch_ch =
+                matches!(waveform_kind, SimWaveformKind::Motor3PhasePreset) && ch == self.glitch_channel;
+            let base_wave = match waveform_kind {
                 SimWaveformKind::Motor3PhasePreset => {
                     if ch == self.glitch_channel {
-                        24.0 + noise_amp * noise
+                        24.0
                     } else if ch < 3 {
                         let phase_shift = match ch {
                             0 => p,
@@ -677,24 +739,25 @@ impl SampleSynthesizer {
                         10.0 * fast_sin_turns(phase_shift)
                             + 1.2 * fast_sin_turns(phase_shift * 5.0)
                             + 0.6 * fast_sin_turns(phase_shift * 7.0)
-                            + noise_amp * noise
                     } else {
-                        5.0 * fast_sin_turns(p + (ch as f32) * 0.125) + noise_amp * noise
+                        5.0 * fast_sin_turns(p + (ch as f32) * 0.125)
                     }
                 }
-                SimWaveformKind::Sine => {
-                    10.0 * fast_sin_turns(p + (ch as f32) * 0.125) + noise_amp * noise
-                }
-                SimWaveformKind::Square => {
-                    5.0 * square_turns(p + (ch as f32) * 0.125) + noise_amp * noise
-                }
-                SimWaveformKind::Triangle => {
-                    5.0 * triangle_turns(p + (ch as f32) * 0.125) + noise_amp * noise
-                }
+                SimWaveformKind::Sine => 10.0 * fast_sin_turns(p + (ch as f32) * 0.125),
+                SimWaveformKind::Square => 5.0 * square_turns(p + (ch as f32) * 0.125),
+                SimWaveformKind::Triangle => 5.0 * triangle_turns(p + (ch as f32) * 0.125),
                 SimWaveformKind::WhiteNoise => {
                     let amp = if noise_amp > 0.0 { noise_amp } else { 1.0 };
-                    amp * noise
+                    let scaled = if apply_kp { amp * kp_gain } else { amp };
+                    scaled * noise
                 }
+            };
+            let mut val = if matches!(waveform_kind, SimWaveformKind::WhiteNoise) {
+                base_wave
+            } else if apply_kp && !is_dc_bus_glitch_ch {
+                base_wave * kp_gain + noise_amp * noise
+            } else {
+                base_wave + noise_amp * noise
             };
 
             if glitch_active && ch == self.glitch_channel {
@@ -900,6 +963,32 @@ fn handle_tx_frame(frame: OutboundFrame, control: &SimControlHandle) {
                     }
                 }
                 Err(_) => warn!(cmd, "invalid RATE value command"),
+            }
+        } else if let Some(rest) = upper.strip_prefix("KP=") {
+            match rest.trim().parse::<f32>() {
+                Ok(gain) => {
+                    if let Err(err) = control.set_kp_gain(gain) {
+                        warn!(cmd, %err, "rejected KP command");
+                    }
+                }
+                Err(_) => warn!(cmd, "invalid KP value command"),
+            }
+        } else if let Some(rest) = upper
+            .strip_prefix("FREQ_HZ=")
+            .or_else(|| upper.strip_prefix("FREQ="))
+        {
+            let arg = rest.trim();
+            if matches!(arg, "AUTO" | "DEFAULT") {
+                control.clear_signal_freq_hz();
+            } else {
+                match arg.parse::<f64>() {
+                    Ok(hz) => {
+                        if let Err(err) = control.set_signal_freq_hz(hz) {
+                            warn!(cmd, %err, "rejected FREQ command");
+                        }
+                    }
+                    Err(_) => warn!(cmd, "invalid FREQ value command"),
+                }
             }
         } else if let Some(rest) = upper.strip_prefix("STATE=") {
             let arg = rest.trim();
@@ -1206,5 +1295,47 @@ mod tests {
         assert_eq!(frame3[3] & SIM_FLAG_FAULT_PIN, 0);
         let ch3_prev = f32::from_le_bytes(frame3[20..24].try_into().unwrap());
         assert!((ch3_prev - 24.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn tx_kp_and_freq_hz_modulate_synthesis_without_shifting_ch3_bus() {
+        let cfg = SimConfig {
+            sample_rate_hz: 100_000.0,
+            analog_channels: 4,
+            enable_glitch: false,
+            wire_format: SimWireFormat::SimPreset,
+            noise_amplitude: 0.0,
+            ..Default::default()
+        };
+        let control = SimControlHandle::new(cfg.sample_rate_hz);
+        let frame_kp = OutboundFrame::fire_and_forget(
+            bytes::Bytes::from_static(b"kp=2.0\n"),
+            crate::transport::TxPriority::Normal,
+        );
+        let frame_freq = OutboundFrame::fire_and_forget(
+            bytes::Bytes::from_static(b"freq_hz=250\n"),
+            crate::transport::TxPriority::Normal,
+        );
+        handle_tx_frame(frame_kp, &control);
+        handle_tx_frame(frame_freq, &control);
+        assert!((control.kp_gain() - 2.0).abs() < 1e-6);
+        assert_eq!(control.signal_freq_hz(), Some(250.0));
+
+        let mut synth = SampleSynthesizer::new(cfg, control);
+        let mut max_abs_ch0: f32 = 0.0;
+        let mut max_dev_ch3: f32 = 0.0;
+        for _ in 0..400 {
+            let _ = synth.synthesize_sample(100_000.0);
+            max_abs_ch0 = max_abs_ch0.max(synth.channels_buf[0].abs());
+            max_dev_ch3 = max_dev_ch3.max((synth.channels_buf[3] - 24.0).abs());
+        }
+        assert!(
+            max_abs_ch0 > 18.0,
+            "expected kp=2.0 to boost ch0 amplitude above 18.0, got {max_abs_ch0}"
+        );
+        assert!(
+            max_dev_ch3 < 1e-5,
+            "expected ch3 24V DC bus to remain unaffected by kp_gain, max_dev={max_dev_ch3}"
+        );
     }
 }

@@ -22,7 +22,51 @@ import {
   type TelemetryListener,
 } from "./mock-ddsf.ts";
 import { globalTopicBus, type HighFreqTopicBus } from "./topic-bus.ts";
-import { ZeroCopyDataBridgeReceiver } from "./zero-copy-bridge.ts";
+import {
+  ZeroCopyDataBridgeReceiver,
+  type ZeroCopyBridgeHostAdapter,
+} from "./zero-copy-bridge.ts";
+
+export interface ControlPlaneCommands {
+  getEngineInfo(): Promise<EngineStatusDto>;
+  listSerialPorts(): Promise<SerialPortInfoDto_Serialize[]>;
+  createSource(
+    config: CreateSourceRequestDto_Deserialize,
+  ): Promise<SourceSummaryDto_Serialize>;
+  startSource(sourceId: string): Promise<SourceSummaryDto_Serialize>;
+  stopSource(sourceId: string): Promise<SourceSummaryDto_Serialize>;
+  removeSource(sourceId: string): Promise<null>;
+  seekReplaySource(req: SeekReplayRequestDto_Deserialize): Promise<null>;
+  setRawRecorder(
+    req: RawRecorderRequestDto_Deserialize,
+  ): Promise<SourceSummaryDto_Serialize>;
+  getChannelTree(): Promise<ChannelTreeSnapshotDto_Serialize>;
+  upsertScopeViewport(
+    config: ScopeViewportConfigDto_Deserialize,
+  ): Promise<ScopeViewportSummaryDto_Serialize>;
+  removeScopeViewport(scopeId: number): Promise<null>;
+  rearmScope(scopeId: number): Promise<null>;
+  updateSyncGroup(update: SyncGroupUpdateDto_Deserialize): Promise<null>;
+  sendDownlink(req: SendDownlinkRequestDto_Deserialize): Promise<DownlinkReceiptDto>;
+}
+
+export interface ControlPlaneHostAdapter {
+  isTauriHost(): boolean;
+  commands: ControlPlaneCommands;
+  listenTelemetry(
+    handler: (payload: WorkspaceTelemetryEvent) => void,
+  ): Promise<() => void>;
+  zeroCopyHostAdapter?: ZeroCopyBridgeHostAdapter;
+}
+
+export function createDefaultControlPlaneHostAdapter(): ControlPlaneHostAdapter {
+  return {
+    isTauriHost,
+    commands,
+    listenTelemetry: (handler) =>
+      events.workspaceTelemetryEvent.listen((ev) => handler(ev.payload)),
+  };
+}
 
 export type HostRuntimeMode = "tauri" | "browser-mock";
 
@@ -43,11 +87,16 @@ export function isTauriHost(): boolean {
  * Fetches core engine build metadata via `tauri-specta` in desktop mode,
  * or falls back to mock metadata for standalone browser development.
  */
-export async function fetchEngineStatus(): Promise<RuntimeStatus> {
+export async function fetchEngineStatus(
+  host: Pick<ControlPlaneHostAdapter, "isTauriHost" | "commands"> = {
+    isTauriHost,
+    commands,
+  },
+): Promise<RuntimeStatus> {
   const webgpuAvailable = typeof navigator !== "undefined" && "gpu" in navigator;
 
-  if (isTauriHost()) {
-    const engine = await commands.getEngineInfo();
+  if (host.isTauriHost()) {
+    const engine = await host.commands.getEngineInfo();
     return {
       mode: "tauri",
       engine,
@@ -75,6 +124,13 @@ function isStubNotImplementedError(err: unknown): boolean {
   return msg.includes("NOT_IMPLEMENTED") || msg.includes("not yet wired");
 }
 
+interface PendingCoalescedEntry {
+  req: SendDownlinkRequestDto_Deserialize;
+  resolve: (receipt: DownlinkReceiptDto) => void;
+  reject: (err: unknown) => void;
+  scheduled: boolean;
+}
+
 /**
  * Unified control-plane and data-plane facade routing between `tauri-specta`
  * and `MockDdsfController` seamlessly.
@@ -83,47 +139,94 @@ export class BridgeClient {
   readonly topicBus: HighFreqTopicBus;
   readonly mock: MockDdsfController;
   readonly dataBridge: ZeroCopyDataBridgeReceiver;
-  private useMockDataPlane = !isTauriHost();
+  private readonly host: ControlPlaneHostAdapter;
+  private useMockDataPlane: boolean;
   private tauriEventUnlisten: (() => void) | null = null;
+  private tauriListenPromise: Promise<void> | null = null;
+  private readonly telemetryListeners = new Set<TelemetryListener>();
+  private lastTelemetryEvt: WorkspaceTelemetryEvent | null = null;
+  private startPromise: Promise<void> | null = null;
 
-  constructor(bus: HighFreqTopicBus = globalTopicBus) {
+  private readonly pendingCoalesced = new Map<string, PendingCoalescedEntry>();
+  private readonly inFlightCoalesced = new Set<string>();
+  private inFlightDirectCount = 0;
+  private liveStats: MockDownlinkStats = {
+    pendingQueueDepth: 0,
+    totalDispatched: 0,
+    coalescedOverwrites: 0,
+    motorKp: 1.0,
+    motorFreqHz: 50,
+  };
+
+  constructor(
+    bus: HighFreqTopicBus = globalTopicBus,
+    host: ControlPlaneHostAdapter = createDefaultControlPlaneHostAdapter(),
+  ) {
     this.topicBus = bus;
+    this.host = host;
+    this.useMockDataPlane = !host.isTauriHost();
     this.mock = new MockDdsfController(bus);
-    this.dataBridge = new ZeroCopyDataBridgeReceiver(bus);
+    this.dataBridge = new ZeroCopyDataBridgeReceiver(
+      bus,
+      host.zeroCopyHostAdapter,
+    );
   }
 
   isMockMode(): boolean {
     return this.useMockDataPlane;
   }
 
-  startDataPlane(rateHz = 120): void {
-    if (this.useMockDataPlane) {
-      this.mock.start(rateHz);
-      return;
+  getDownlinkStats(): MockDownlinkStats {
+    if (this.useMockDataPlane || !this.host.isTauriHost()) {
+      return this.mock.getDownlinkStats();
     }
-    void this.startTauriDataPlane(rateHz);
+    return { ...this.liveStats };
+  }
+
+  startDataPlane(rateHz = 120): Promise<void> {
+    if (!this.host.isTauriHost()) {
+      this.useMockDataPlane = true;
+      this.mock.start(rateHz);
+      return Promise.resolve();
+    }
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+    const run = this.startTauriDataPlane(rateHz).finally(() => {
+      if (this.startPromise === run) {
+        this.startPromise = null;
+      }
+    });
+    this.startPromise = run;
+    return run;
   }
 
   private async startTauriDataPlane(rateHz: number): Promise<void> {
     try {
-      const info = await commands.getEngineInfo();
+      const info = await this.host.commands.getEngineInfo();
       if (!info.bridge_ready) {
+        await this.dataBridge.detach();
+        this.detachTauriTelemetry();
         this.useMockDataPlane = true;
         this.mock.start(rateHz);
         return;
       }
+      this.useMockDataPlane = false;
+      this.mock.stop();
       await this.dataBridge.attach(null);
       await this.dataBridge.setRate(rateHz);
+      this.ensureTauriTelemetryListener();
     } catch (err: unknown) {
       let bridgeReady = true;
       try {
-        const info = await commands.getEngineInfo();
+        const info = await this.host.commands.getEngineInfo();
         bridgeReady = info.bridge_ready;
       } catch {
         bridgeReady = false;
       }
       if (isStubNotImplementedError(err) || !bridgeReady) {
         await this.dataBridge.detach();
+        this.detachTauriTelemetry();
         this.useMockDataPlane = true;
         this.mock.start(rateHz);
       }
@@ -133,45 +236,84 @@ export class BridgeClient {
   stopDataPlane(): void {
     this.mock.stop();
     void this.dataBridge.detach();
+    this.detachTauriTelemetry();
+  }
+
+  setMockRate(rateHz: number): void {
+    if (!this.useMockDataPlane && this.host.isTauriHost()) {
+      void this.dataBridge.setRate(rateHz);
+      return;
+    }
+    this.mock.setRate(rateHz);
+  }
+
+  private detachTauriTelemetry(): void {
     if (this.tauriEventUnlisten) {
       this.tauriEventUnlisten();
       this.tauriEventUnlisten = null;
     }
+    this.tauriListenPromise = null;
   }
 
-  setMockRate(rateHz: number): void {
-    this.mock.setRate(rateHz);
-    if (!this.useMockDataPlane && isTauriHost()) {
-      void this.dataBridge.setRate(rateHz);
+  private ensureTauriTelemetryListener(): void {
+    if (
+      !this.host.isTauriHost() ||
+      this.useMockDataPlane ||
+      this.telemetryListeners.size === 0 ||
+      this.tauriEventUnlisten ||
+      this.tauriListenPromise
+    ) {
+      return;
+    }
+    const listenPromise = this.host
+      .listenTelemetry((payload) => {
+        this.lastTelemetryEvt = payload;
+        if (!this.useMockDataPlane) {
+          const stats = this.getDownlinkStats();
+          for (const listener of this.telemetryListeners) {
+            listener(payload, stats);
+          }
+        }
+      })
+      .then((unlisten) => {
+        if (this.telemetryListeners.size === 0 || this.useMockDataPlane) {
+          unlisten();
+          return;
+        }
+        this.tauriEventUnlisten = unlisten;
+      })
+      .catch(() => {
+        // Ignore event listener failures in headless mock contexts
+      })
+      .finally(() => {
+        if (this.tauriListenPromise === listenPromise) {
+          this.tauriListenPromise = null;
+        }
+      });
+    this.tauriListenPromise = listenPromise;
+  }
+
+  private emitCachedLiveStats(): void {
+    if (this.useMockDataPlane || !this.lastTelemetryEvt) {
+      return;
+    }
+    const stats = this.getDownlinkStats();
+    for (const listener of this.telemetryListeners) {
+      listener(this.lastTelemetryEvt, stats);
     }
   }
 
   subscribeTelemetry(listener: TelemetryListener): () => void {
+    this.telemetryListeners.add(listener);
     const unsubMock = this.mock.subscribeTelemetry(listener);
-
-    if (isTauriHost() && !this.tauriEventUnlisten) {
-      events.workspaceTelemetryEvent
-        .listen((ev) => {
-          if (!this.useMockDataPlane) {
-            listener(ev.payload, {
-              pendingQueueDepth: 0,
-              totalDispatched: 0,
-              coalescedOverwrites: 0,
-              motorKp: 1,
-              motorFreqHz: 50,
-            });
-          }
-        })
-        .then((unlisten) => {
-          this.tauriEventUnlisten = unlisten;
-        })
-        .catch(() => {
-          // Ignore event listener failures in headless mock contexts
-        });
-    }
+    this.ensureTauriTelemetryListener();
 
     return () => {
       unsubMock();
+      this.telemetryListeners.delete(listener);
+      if (this.telemetryListeners.size === 0) {
+        this.detachTauriTelemetry();
+      }
     };
   }
 
@@ -179,7 +321,7 @@ export class BridgeClient {
     tauriCall: () => Promise<T>,
     mockCall: () => Promise<T>,
   ): Promise<T> {
-    if (this.useMockDataPlane || !isTauriHost()) {
+    if (this.useMockDataPlane || !this.host.isTauriHost()) {
       return mockCall();
     }
     try {
@@ -188,6 +330,7 @@ export class BridgeClient {
       if (isStubNotImplementedError(err)) {
         // Pre-M4 Tauri stub detected: automatically fall back to browser mock worker
         void this.dataBridge.detach();
+        this.detachTauriTelemetry();
         this.useMockDataPlane = true;
         this.mock.start(120);
         return mockCall();
@@ -198,7 +341,7 @@ export class BridgeClient {
 
   listSerialPorts(): Promise<SerialPortInfoDto_Serialize[]> {
     return this.withTauriOrMock(
-      () => commands.listSerialPorts(),
+      () => this.host.commands.listSerialPorts(),
       () => this.mock.listSerialPorts(),
     );
   }
@@ -207,35 +350,35 @@ export class BridgeClient {
     config: CreateSourceRequestDto_Deserialize,
   ): Promise<SourceSummaryDto_Serialize> {
     return this.withTauriOrMock(
-      () => commands.createSource(config),
+      () => this.host.commands.createSource(config),
       () => this.mock.createSource(config),
     );
   }
 
   startSource(sourceId: string): Promise<SourceSummaryDto_Serialize> {
     return this.withTauriOrMock(
-      () => commands.startSource(sourceId),
+      () => this.host.commands.startSource(sourceId),
       () => this.mock.startSource(sourceId),
     );
   }
 
   stopSource(sourceId: string): Promise<SourceSummaryDto_Serialize> {
     return this.withTauriOrMock(
-      () => commands.stopSource(sourceId),
+      () => this.host.commands.stopSource(sourceId),
       () => this.mock.stopSource(sourceId),
     );
   }
 
   removeSource(sourceId: string): Promise<null> {
     return this.withTauriOrMock(
-      () => commands.removeSource(sourceId),
+      () => this.host.commands.removeSource(sourceId),
       () => this.mock.removeSource(sourceId),
     );
   }
 
   seekReplaySource(req: SeekReplayRequestDto_Deserialize): Promise<null> {
     return this.withTauriOrMock(
-      () => commands.seekReplaySource(req),
+      () => this.host.commands.seekReplaySource(req),
       () => this.mock.seekReplaySource(req),
     );
   }
@@ -244,62 +387,234 @@ export class BridgeClient {
     req: RawRecorderRequestDto_Deserialize,
   ): Promise<SourceSummaryDto_Serialize> {
     return this.withTauriOrMock(
-      () => commands.setRawRecorder(req),
+      () => this.host.commands.setRawRecorder(req),
       () => this.mock.setRawRecorder(req),
     );
   }
 
-  async getChannelTree(): Promise<ChannelTreeSnapshotDto_Serialize> {
-    if (!this.useMockDataPlane && isTauriHost()) {
-      const snap = await commands.getChannelTree();
-      if (snap.sources.length > 0) {
-        return snap;
-      }
-      // If Tauri stub returned empty tree before M4 wiring, also probe createSource fallback check
-      return this.mock.getChannelTree();
-    }
-    return this.mock.getChannelTree();
+  getChannelTree(): Promise<ChannelTreeSnapshotDto_Serialize> {
+    return this.withTauriOrMock(
+      () => this.host.commands.getChannelTree(),
+      () => this.mock.getChannelTree(),
+    );
   }
 
   upsertScopeViewport(
     config: ScopeViewportConfigDto_Deserialize,
   ): Promise<ScopeViewportSummaryDto_Serialize> {
     return this.withTauriOrMock(
-      () => commands.upsertScopeViewport(config),
+      () => this.host.commands.upsertScopeViewport(config),
       () => this.mock.upsertScopeViewport(config),
     );
   }
 
   removeScopeViewport(scopeId: number): Promise<null> {
     return this.withTauriOrMock(
-      () => commands.removeScopeViewport(scopeId),
+      () => this.host.commands.removeScopeViewport(scopeId),
       () => this.mock.removeScopeViewport(scopeId),
     );
   }
 
   rearmScope(scopeId: number): Promise<null> {
     return this.withTauriOrMock(
-      () => commands.rearmScope(scopeId),
+      () => this.host.commands.rearmScope(scopeId),
       () => this.mock.rearmScope(scopeId),
     );
   }
 
   updateSyncGroup(update: SyncGroupUpdateDto_Deserialize): Promise<null> {
     return this.withTauriOrMock(
-      () => commands.updateSyncGroup(update),
+      () => this.host.commands.updateSyncGroup(update),
       () => this.mock.updateSyncGroup(update),
     );
   }
 
-  sendDownlink(req: SendDownlinkRequestDto_Deserialize): Promise<DownlinkReceiptDto> {
-    return this.withTauriOrMock(
-      () => commands.sendDownlink(req),
-      () => this.mock.sendDownlink(req),
+  private refreshPendingQueueDepth(): void {
+    this.liveStats.pendingQueueDepth =
+      this.pendingCoalesced.size +
+      this.inFlightCoalesced.size +
+      this.inFlightDirectCount;
+  }
+
+  private trackLiveDownlinkParams(req: SendDownlinkRequestDto_Deserialize): void {
+    if (
+      req.payload.kind === "key_value" &&
+      typeof req.payload.value === "number" &&
+      Number.isFinite(req.payload.value)
+    ) {
+      if (req.payload.key === "kp") {
+        this.liveStats.motorKp = req.payload.value;
+      } else if (req.payload.key === "freq_hz") {
+        this.liveStats.motorFreqHz = req.payload.value;
+      }
+      return;
+    }
+
+    if (req.payload.kind === "ascii_text") {
+      const txt = req.payload.text.trim();
+      const lower = txt.toLowerCase();
+      if (lower.startsWith("kp=")) {
+        const parsed = Number.parseFloat(txt.slice(3));
+        if (Number.isFinite(parsed)) {
+          this.liveStats.motorKp = parsed;
+        }
+      } else if (lower.startsWith("freq_hz=")) {
+        const parsed = Number.parseFloat(txt.slice(8));
+        if (Number.isFinite(parsed)) {
+          this.liveStats.motorFreqHz = parsed;
+        }
+      } else if (lower.startsWith("freq=")) {
+        const parsed = Number.parseFloat(txt.slice(5));
+        if (Number.isFinite(parsed)) {
+          this.liveStats.motorFreqHz = parsed;
+        }
+      }
+    }
+  }
+
+  private flushCoalescedKey(compositeKey: string): void {
+    if (this.inFlightCoalesced.has(compositeKey)) {
+      return;
+    }
+    const entry = this.pendingCoalesced.get(compositeKey);
+    if (!entry) {
+      return;
+    }
+    this.pendingCoalesced.delete(compositeKey);
+    this.inFlightCoalesced.add(compositeKey);
+    this.refreshPendingQueueDepth();
+    this.emitCachedLiveStats();
+
+    void this.withTauriOrMock(
+      () => this.host.commands.sendDownlink(entry.req),
+      () => this.mock.sendDownlink(entry.req),
+    )
+      .then((receipt) => {
+        if (!this.useMockDataPlane && this.host.isTauriHost()) {
+          if (receipt.coalesced_existing) {
+            this.liveStats.coalescedOverwrites += 1;
+          } else {
+            this.liveStats.totalDispatched += 1;
+          }
+        }
+        entry.resolve(receipt);
+      })
+      .catch((err) => {
+        entry.reject(err);
+      })
+      .finally(() => {
+        this.inFlightCoalesced.delete(compositeKey);
+        if (this.pendingCoalesced.has(compositeKey)) {
+          queueMicrotask(() => this.flushCoalescedKey(compositeKey));
+        }
+        this.refreshPendingQueueDepth();
+        this.emitCachedLiveStats();
+      });
+  }
+
+  async sendDownlink(
+    req: SendDownlinkRequestDto_Deserialize,
+  ): Promise<DownlinkReceiptDto> {
+    if (this.useMockDataPlane || !this.host.isTauriHost()) {
+      return this.mock.sendDownlink(req);
+    }
+
+    this.trackLiveDownlinkParams(req);
+    const coalesceKey = req.coalesce_key?.trim() ?? "";
+    if (!coalesceKey) {
+      this.inFlightDirectCount += 1;
+      this.refreshPendingQueueDepth();
+      this.emitCachedLiveStats();
+      try {
+        const receipt = await this.withTauriOrMock(
+          () => this.host.commands.sendDownlink(req),
+          () => this.mock.sendDownlink(req),
+        );
+        if (!this.useMockDataPlane && this.host.isTauriHost()) {
+          if (receipt.coalesced_existing) {
+            this.liveStats.coalescedOverwrites += 1;
+          } else {
+            this.liveStats.totalDispatched += 1;
+          }
+        }
+        return receipt;
+      } finally {
+        this.inFlightDirectCount = Math.max(0, this.inFlightDirectCount - 1);
+        this.refreshPendingQueueDepth();
+        this.emitCachedLiveStats();
+      }
+    }
+
+    const compositeKey = `${req.source_id}::${coalesceKey}`;
+    return new Promise<DownlinkReceiptDto>((resolve, reject) => {
+      const existing = this.pendingCoalesced.get(compositeKey);
+      if (existing) {
+        this.liveStats.coalescedOverwrites += 1;
+        existing.resolve({
+          accepted: true,
+          coalesced_existing: true,
+          result_kind: "sent_fire_and_forget",
+        });
+        existing.req = req;
+        existing.resolve = resolve;
+        existing.reject = reject;
+        this.refreshPendingQueueDepth();
+        this.emitCachedLiveStats();
+        return;
+      }
+
+      const entry: PendingCoalescedEntry = {
+        req,
+        resolve,
+        reject,
+        scheduled: true,
+      };
+      this.pendingCoalesced.set(compositeKey, entry);
+      this.refreshPendingQueueDepth();
+      this.emitCachedLiveStats();
+      queueMicrotask(() => this.flushCoalescedKey(compositeKey));
+    });
+  }
+
+  async injectGlitch(simSourceIds?: string[]): Promise<void> {
+    if (this.useMockDataPlane || !this.host.isTauriHost()) {
+      await this.mock.injectGlitch();
+      return;
+    }
+
+    let targets = simSourceIds?.filter((id) => id.trim().length > 0) ?? [];
+    if (targets.length === 0) {
+      const tree = await this.getChannelTree();
+      targets = tree.sources
+        .filter(
+          (g) => g.source.transport_kind === "sim" && g.source.state === "running",
+        )
+        .map((g) => g.source.source_id);
+      if (targets.length === 0) {
+        targets = tree.sources
+          .filter((g) => g.source.transport_kind === "sim")
+          .map((g) => g.source.source_id);
+      }
+    }
+
+    await Promise.all(
+      targets.map((sourceId) =>
+        this.sendDownlink({
+          source_id: sourceId,
+          priority: "high",
+          coalesce_key: null,
+          payload: {
+            kind: "ascii_text",
+            text: "GLITCH",
+            append_newline: true,
+          },
+        }),
+      ),
     );
   }
 
-  injectMockGlitch(): Promise<number> {
-    return this.mock.injectGlitch();
+  injectMockGlitch(): Promise<void> {
+    return this.injectGlitch();
   }
 }
 

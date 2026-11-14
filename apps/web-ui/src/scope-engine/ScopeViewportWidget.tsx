@@ -743,12 +743,17 @@ export function ScopeViewportWidget({
               type="button"
               className="scope-btn"
               title={t("scope.zeroPanTitle")}
-              onClick={() =>
+              onClick={() => {
                 callbacks.onUpdateScope(config.scopeId, (prev) => ({
                   ...prev,
                   panOffsetNs: 0,
-                }))
-              }
+                }));
+                if (config.syncGroupId !== null) {
+                  callbacks.onSyncGroupBroadcast(config.syncGroupId, config.scopeId, {
+                    panOffsetNs: 0,
+                  });
+                }
+              }}
             >
               {t("scope.zeroPan")}
             </button>
@@ -774,12 +779,20 @@ export function ScopeViewportWidget({
             type="button"
             className={`scope-btn ${config.cursorsEnabled ? "active" : ""}`}
             data-testid={`scope-cursors-${config.scopeId}`}
-            onClick={() =>
+            onClick={() => {
+              const nextEnabled = !config.cursorsEnabled;
               callbacks.onUpdateScope(config.scopeId, (prev) => ({
                 ...prev,
-                cursorsEnabled: !prev.cursorsEnabled,
-              }))
-            }
+                cursorsEnabled: nextEnabled,
+              }));
+              if (config.syncGroupId !== null) {
+                callbacks.onSyncGroupBroadcast(config.syncGroupId, config.scopeId, {
+                  cursorsEnabled: nextEnabled,
+                  cursorARatio: config.cursorARatio,
+                  cursorBRatio: config.cursorBRatio,
+                });
+              }
+            }}
           >
             {t("scope.cursors")}
           </button>
@@ -822,19 +835,26 @@ export function ScopeViewportWidget({
               }
             }}
           >
-            {[
-              10_000,
-              50_000,
-              200_000,
-              1_000_000,
-              5_000_000,
-              10_000_000,
-              20_000_000,
-              50_000_000,
-              200_000_000,
-              1_000_000_000,
-              5_000_000_000,
-            ].map((span) => (
+            {Array.from(
+              new Set([
+                1_000,
+                2_000,
+                10_000,
+                50_000,
+                200_000,
+                1_000_000,
+                5_000_000,
+                10_000_000,
+                20_000_000,
+                50_000_000,
+                200_000_000,
+                1_000_000_000,
+                5_000_000_000,
+                config.timeSpanNs,
+              ]),
+            )
+              .sort((a, b) => a - b)
+              .map((span) => (
               <option key={span} value={String(span)}>
                 {t("scope.spanPrefix")}: {formatTimeNs(span)}
               </option>
@@ -863,7 +883,11 @@ export function ScopeViewportWidget({
                       : {
                           kind: "edge",
                           channel_id: chId,
-                          level: ch?.local_path === "v_bus" ? 85 : 0,
+                          level:
+                            ch?.local_path === "v_bus" ||
+                            (ch?.source_id === "sim0" && ch?.local_path === "ch3")
+                              ? 85
+                              : 0,
                           hysteresis: 1.0,
                           slope: "rising",
                         },

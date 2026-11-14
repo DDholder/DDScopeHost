@@ -43,6 +43,7 @@ export interface ScopeCallbacks {
     patch: {
       timeSpanNs?: number;
       panOffsetNs?: number;
+      cursorsEnabled?: boolean;
       cursorARatio?: number;
       cursorBRatio?: number;
     },

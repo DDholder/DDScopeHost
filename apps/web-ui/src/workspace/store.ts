@@ -1,4 +1,4 @@
-import { create } from "zustand";
+import { create, type StoreApi, type UseBoundStore } from "zustand";
 import type {
   ChannelNodeDto_Serialize,
   CreateSourceRequestDto_Deserialize,
@@ -11,6 +11,7 @@ import type {
   SourceTelemetryDto,
 } from "../bridge/bindings.ts";
 import {
+  BridgeClient,
   bridgeClient,
   fetchEngineStatus,
   type DataPlaneMetrics,
@@ -106,6 +107,7 @@ export interface WorkspaceStoreState {
     patch: {
       timeSpanNs?: number;
       panOffsetNs?: number;
+      cursorsEnabled?: boolean;
       cursorARatio?: number;
       cursorBRatio?: number;
     },
@@ -156,10 +158,19 @@ function defaultYScaleAndOffset(ch: ChannelNodeDto_Serialize): {
   yScale: number;
   yOffset: number;
 } {
-  if (ch.local_path === "v_bus") {
+  if (
+    ch.local_path === "v_bus" ||
+    (ch.source_id === "sim0" && ch.local_path === "ch3")
+  ) {
     return { yScale: 25, yOffset: 50 };
   }
-  if (ch.local_path === "ia" || ch.local_path === "ib" || ch.local_path === "ic") {
+  if (
+    ch.local_path === "ia" ||
+    ch.local_path === "ib" ||
+    ch.local_path === "ic" ||
+    (ch.source_id === "sim0" &&
+      (ch.local_path === "ch0" || ch.local_path === "ch1" || ch.local_path === "ch2"))
+  ) {
     return { yScale: 5, yOffset: 0 };
   }
   return { yScale: 2.5, yOffset: 0 };
@@ -169,18 +180,163 @@ function buildDefaultScopeConfigs(
   channelsById: Record<number, ChannelNodeDto_Serialize>,
   locale: UiLocale,
 ): Record<number, ScopeUiConfig> {
+  const allChannels = Object.values(channelsById);
   const byPath = new Map<string, ChannelNodeDto_Serialize>();
-  Object.values(channelsById).forEach((c) => {
+  for (const c of allChannels) {
     byPath.set(c.full_path, c);
-  });
+  }
+  const findFirst = (...paths: string[]): ChannelNodeDto_Serialize | undefined => {
+    for (const p of paths) {
+      const found = byPath.get(p);
+      if (found) return found;
+    }
+    return undefined;
+  };
 
-  const chIa = byPath.get("sim0/ia")?.channel_id ?? 101;
-  const chIb = byPath.get("sim0/ib")?.channel_id ?? 102;
-  const chVbus = byPath.get("sim0/v_bus")?.channel_id ?? 104;
-  const chPwmA = byPath.get("sim0/pwm_a")?.channel_id ?? 105;
-  const chPwmB = byPath.get("sim0/pwm_b")?.channel_id ?? 106;
-  const chFault = byPath.get("sim0/fault_pin")?.channel_id ?? 107;
-  const chState = byPath.get("sim0/ctrl_state")?.channel_id ?? 108;
+  if (allChannels.length === 0) {
+    const scope1Empty: ScopeUiConfig = {
+      scopeId: 1,
+      title: getDefaultScopeTitle("scope1", locale),
+      timeSpanNs: 20_000_000,
+      preTriggerRatio: 0.25,
+      panOffsetNs: 0,
+      sweepMode: "roll",
+      autoTimeoutMs: 120,
+      trigger: null,
+      tracks: [],
+      syncGroupId: null,
+      paused: false,
+      analogLayout: "overlay",
+      cursorsEnabled: false,
+      cursorARatio: 0.28,
+      cursorBRatio: 0.68,
+      activeAnalogChannelId: null,
+    };
+    const scope2Empty: ScopeUiConfig = {
+      scopeId: 2,
+      title: getDefaultScopeTitle("scope2", locale),
+      timeSpanNs: 10_000_000,
+      preTriggerRatio: 0.25,
+      panOffsetNs: 0,
+      sweepMode: "single",
+      autoTimeoutMs: 120,
+      trigger: null,
+      tracks: [],
+      syncGroupId: null,
+      paused: false,
+      analogLayout: "overlay",
+      cursorsEnabled: false,
+      cursorARatio: 0.25,
+      cursorBRatio: 0.55,
+      activeAnalogChannelId: null,
+    };
+    return { 1: scope1Empty, 2: scope2Empty };
+  }
+
+  const chIa =
+    findFirst("sim0/ia", "sim0/ch0") ??
+    allChannels.find((c) => c.modality === "scalar");
+  const chIb =
+    findFirst("sim0/ib", "sim0/ch1") ??
+    allChannels.find(
+      (c) => c.modality === "scalar" && c.channel_id !== chIa?.channel_id,
+    );
+  const chVbus =
+    findFirst("sim0/v_bus", "sim0/ch3") ??
+    allChannels.find(
+      (c) =>
+        c.modality === "scalar" &&
+        c.channel_id !== chIa?.channel_id &&
+        c.channel_id !== chIb?.channel_id,
+    );
+  const chPwmA =
+    findFirst("sim0/pwm_a") ??
+    allChannels.find((c) => c.modality === "digital_bool");
+  const chPwmB =
+    findFirst("sim0/pwm_b") ??
+    allChannels.find(
+      (c) => c.modality === "digital_bool" && c.channel_id !== chPwmA?.channel_id,
+    );
+  const chFault =
+    findFirst("sim0/fault_pin") ??
+    allChannels.find(
+      (c) =>
+        c.modality === "digital_bool" &&
+        c.channel_id !== chPwmA?.channel_id &&
+        c.channel_id !== chPwmB?.channel_id,
+    );
+  const chState =
+    findFirst("sim0/ctrl_state") ??
+    allChannels.find((c) => c.modality === "state_machine");
+
+  const scope1Tracks: ScopeTrackUiBinding[] = [];
+  if (chIa) {
+    scope1Tracks.push({
+      channelId: chIa.channel_id,
+      lane: "analog",
+      visible: true,
+      ...defaultYScaleAndOffset(chIa),
+      colorRgba: 0x38bdf8ff,
+    });
+  }
+  if (chIb) {
+    scope1Tracks.push({
+      channelId: chIb.channel_id,
+      lane: "analog",
+      visible: true,
+      ...defaultYScaleAndOffset(chIb),
+      colorRgba: 0x34d399ff,
+    });
+  }
+  if (chVbus) {
+    scope1Tracks.push({
+      channelId: chVbus.channel_id,
+      lane: "analog",
+      visible: true,
+      ...defaultYScaleAndOffset(chVbus),
+      colorRgba: 0xf59e0bff,
+    });
+  }
+  if (chPwmA) {
+    scope1Tracks.push({
+      channelId: chPwmA.channel_id,
+      lane: "digital",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0x22d3eeff,
+    });
+  }
+  if (chPwmB) {
+    scope1Tracks.push({
+      channelId: chPwmB.channel_id,
+      lane: "digital",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0xa78bfaff,
+    });
+  }
+  if (chFault) {
+    scope1Tracks.push({
+      channelId: chFault.channel_id,
+      lane: "digital",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0xfb7185ff,
+    });
+  }
+  if (chState) {
+    scope1Tracks.push({
+      channelId: chState.channel_id,
+      lane: "state_ribbon",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0x10b981ff,
+    });
+  }
 
   const scope1: ScopeUiConfig = {
     scopeId: 1,
@@ -190,30 +346,56 @@ function buildDefaultScopeConfigs(
     panOffsetNs: 0,
     sweepMode: "roll",
     autoTimeoutMs: 120,
-    trigger: {
-      kind: "edge",
-      channel_id: chIa,
-      level: 0,
-      hysteresis: 0.5,
-      slope: "rising",
-    },
-    tracks: [
-      { channelId: chIa, lane: "analog", visible: true, yScale: 5, yOffset: 0, colorRgba: 0x38bdf8ff },
-      { channelId: chIb, lane: "analog", visible: true, yScale: 5, yOffset: 0, colorRgba: 0x34d399ff },
-      { channelId: chVbus, lane: "analog", visible: true, yScale: 25, yOffset: 50, colorRgba: 0xf59e0bff },
-      { channelId: chPwmA, lane: "digital", visible: true, yScale: 1, yOffset: 0, colorRgba: 0x22d3eeff },
-      { channelId: chPwmB, lane: "digital", visible: true, yScale: 1, yOffset: 0, colorRgba: 0xa78bfaff },
-      { channelId: chFault, lane: "digital", visible: true, yScale: 1, yOffset: 0, colorRgba: 0xfb7185ff },
-      { channelId: chState, lane: "state_ribbon", visible: true, yScale: 1, yOffset: 0, colorRgba: 0x10b981ff },
-    ],
+    trigger: chIa
+      ? {
+          kind: "edge",
+          channel_id: chIa.channel_id,
+          level: 0,
+          hysteresis: 0.5,
+          slope: "rising",
+        }
+      : null,
+    tracks: scope1Tracks,
     syncGroupId: null,
     paused: false,
     analogLayout: "overlay",
     cursorsEnabled: false,
     cursorARatio: 0.28,
     cursorBRatio: 0.68,
-    activeAnalogChannelId: chIa,
+    activeAnalogChannelId: chIa?.channel_id ?? null,
   };
+
+  const scope2TriggerCh = chVbus ?? chIa;
+  const scope2Tracks: ScopeTrackUiBinding[] = [];
+  if (scope2TriggerCh) {
+    scope2Tracks.push({
+      channelId: scope2TriggerCh.channel_id,
+      lane: "analog",
+      visible: true,
+      ...defaultYScaleAndOffset(scope2TriggerCh),
+      colorRgba: 0xf59e0bff,
+    });
+  }
+  if (chFault) {
+    scope2Tracks.push({
+      channelId: chFault.channel_id,
+      lane: "digital",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0xfb7185ff,
+    });
+  }
+  if (chState) {
+    scope2Tracks.push({
+      channelId: chState.channel_id,
+      lane: "state_ribbon",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0x10b981ff,
+    });
+  }
 
   const scope2: ScopeUiConfig = {
     scopeId: 2,
@@ -223,148 +405,185 @@ function buildDefaultScopeConfigs(
     panOffsetNs: 0,
     sweepMode: "single",
     autoTimeoutMs: 120,
-    trigger: {
-      kind: "edge",
-      channel_id: chVbus,
-      level: 85,
-      hysteresis: 2.0,
-      slope: "rising",
-    },
-    tracks: [
-      { channelId: chVbus, lane: "analog", visible: true, yScale: 25, yOffset: 50, colorRgba: 0xf59e0bff },
-      { channelId: chFault, lane: "digital", visible: true, yScale: 1, yOffset: 0, colorRgba: 0xfb7185ff },
-      { channelId: chState, lane: "state_ribbon", visible: true, yScale: 1, yOffset: 0, colorRgba: 0x10b981ff },
-    ],
+    trigger: scope2TriggerCh
+      ? {
+          kind: "edge",
+          channel_id: scope2TriggerCh.channel_id,
+          level: chVbus ? 85 : 0,
+          hysteresis: 2.0,
+          slope: "rising",
+        }
+      : null,
+    tracks: scope2Tracks,
     syncGroupId: null,
     paused: false,
     analogLayout: "overlay",
     cursorsEnabled: false,
     cursorARatio: 0.25,
     cursorBRatio: 0.55,
-    activeAnalogChannelId: chVbus,
+    activeAnalogChannelId: scope2TriggerCh?.channel_id ?? null,
   };
 
   return { 1: scope1, 2: scope2 };
 }
 
-let nextTxLogId = 1;
-let telemetryUnsub: (() => void) | null = null;
-let metricsUnsub: (() => void) | null = null;
+export function createWorkspaceStore(
+  client: BridgeClient = bridgeClient,
+  fetchStatus: () => Promise<RuntimeStatus> = fetchEngineStatus,
+): UseBoundStore<StoreApi<WorkspaceStoreState>> {
+  let nextTxLogId = 1;
+  let telemetryUnsub: (() => void) | null = null;
+  let metricsUnsub: (() => void) | null = null;
 
-export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
-  initialized: false,
-  initError: null,
-  runtimeStatus: null,
-  channelGroups: [],
-  channelsById: {},
-  telemetryBySource: {},
-  quota: {
-    usedBytes: 0,
-    limitBytes: 2 * 1024 * 1024 * 1024,
-    pinnedBytes: 0,
-  },
-  dataPlaneMetrics: {
-    ddsfFps: 0,
-    bytesPerSec: 0,
-    frameSeq: 0,
-    scopeCount: 0,
-    snapshotCount: 0,
-    quotaWarning: false,
-    pinnedActive: false,
-    parseErrors: 0,
-  },
-  downlinkStats: {
-    pendingQueueDepth: 0,
-    totalDispatched: 0,
-    coalescedOverwrites: 0,
-    motorKp: 1,
-    motorFreqHz: 50,
-  },
-  sliderEventCount: 0,
-  txLog: [],
+  return create<WorkspaceStoreState>((set, get) => ({
+    initialized: false,
+    initError: null,
+    runtimeStatus: null,
+    channelGroups: [],
+    channelsById: {},
+    telemetryBySource: {},
+    quota: {
+      usedBytes: 0,
+      limitBytes: 2 * 1024 * 1024 * 1024,
+      pinnedBytes: 0,
+    },
+    dataPlaneMetrics: {
+      ddsfFps: 0,
+      bytesPerSec: 0,
+      frameSeq: 0,
+      scopeCount: 0,
+      snapshotCount: 0,
+      quotaWarning: false,
+      pinnedActive: false,
+      parseErrors: 0,
+    },
+    downlinkStats: {
+      pendingQueueDepth: 0,
+      totalDispatched: 0,
+      coalescedOverwrites: 0,
+      motorKp: 1,
+      motorFreqHz: 50,
+    },
+    sliderEventCount: 0,
+    txLog: [],
 
-  scopes: {},
-  scopeOrder: [],
-  focusedScopeId: 1,
-  nextScopeId: 3,
-  canvasWidthsByScope: { 1: 760, 2: 760 },
+    scopes: {},
+    scopeOrder: [],
+    focusedScopeId: 1,
+    nextScopeId: 3,
+    canvasWidthsByScope: { 1: 760, 2: 760 },
 
-  locale: detectInitialLocale(),
-  mockRateHz: 120,
-  sidebarCollapsed: false,
-  downlinkBarCollapsed: false,
-  sourceWizardOpen: false,
+    locale: detectInitialLocale(),
+    mockRateHz: 120,
+    sidebarCollapsed: false,
+    downlinkBarCollapsed: false,
+    sourceWizardOpen: false,
 
-  setLocale: (nextLocale) => {
-    persistLocale(nextLocale);
-    const state = get();
-    const nextScopes: Record<number, ScopeUiConfig> = {};
-    let changed = false;
-    for (const [idStr, sc] of Object.entries(state.scopes)) {
-      const nextTitle = translateDefaultScopeTitle(sc.title, nextLocale);
-      if (nextTitle !== sc.title) {
-        changed = true;
-        nextScopes[Number(idStr)] = { ...sc, title: nextTitle };
-      } else {
-        nextScopes[Number(idStr)] = sc;
+    setLocale: (nextLocale) => {
+      persistLocale(nextLocale);
+      const state = get();
+      const nextScopes: Record<number, ScopeUiConfig> = {};
+      let changed = false;
+      for (const [idStr, sc] of Object.entries(state.scopes)) {
+        const nextTitle = translateDefaultScopeTitle(sc.title, nextLocale);
+        if (nextTitle !== sc.title) {
+          changed = true;
+          nextScopes[Number(idStr)] = { ...sc, title: nextTitle };
+        } else {
+          nextScopes[Number(idStr)] = sc;
+        }
       }
-    }
-    set({
-      locale: nextLocale,
-      ...(changed ? { scopes: nextScopes } : {}),
-    });
-  },
+      set({
+        locale: nextLocale,
+        ...(changed ? { scopes: nextScopes } : {}),
+      });
+    },
 
-  initWorkspace: async () => {
-    if (get().initialized) return;
-    persistLocale(get().locale);
-    try {
-      const status = await fetchEngineStatus();
-      bridgeClient.startDataPlane(get().mockRateHz);
+    initWorkspace: async () => {
+      if (get().initialized) return;
+      persistLocale(get().locale);
+      try {
+        await client.startDataPlane(get().mockRateHz);
+        const rawStatus = await fetchStatus();
+        const status: RuntimeStatus =
+          rawStatus.mode === "tauri" && client.isMockMode()
+            ? {
+                ...rawStatus,
+                mode: "browser-mock",
+              }
+            : rawStatus;
 
-      if (!telemetryUnsub) {
-        telemetryUnsub = bridgeClient.subscribeTelemetry((telemetry, downlinkStats) => {
-          const telMap: Record<string, SourceTelemetryDto> = {};
-          for (const s of telemetry.sources) {
-            telMap[s.source_id] = s;
-          }
-          set({
-            telemetryBySource: telMap,
-            quota: {
-              usedBytes: telemetry.quota_used_bytes ?? 0,
-              limitBytes: telemetry.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
-              pinnedBytes: telemetry.pinned_bytes ?? 0,
-            },
-            downlinkStats,
+        if (!telemetryUnsub) {
+          telemetryUnsub = client.subscribeTelemetry((telemetry, downlinkStats) => {
+            const telMap: Record<string, SourceTelemetryDto> = {};
+            for (const s of telemetry.sources) {
+              telMap[s.source_id] = s;
+            }
+            set({
+              telemetryBySource: telMap,
+              quota: {
+                usedBytes: telemetry.quota_used_bytes ?? 0,
+                limitBytes: telemetry.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
+                pinnedBytes: telemetry.pinned_bytes ?? 0,
+              },
+              downlinkStats,
+            });
           });
+        }
+
+        if (!metricsUnsub) {
+          metricsUnsub = client.topicBus.subscribeMetrics((metrics) => {
+            set({ dataPlaneMetrics: metrics });
+          });
+        }
+
+        const tree = await client.getChannelTree();
+        const chMap: Record<number, ChannelNodeDto_Serialize> = {};
+        for (const grp of tree.sources) {
+          for (const ch of grp.channels) {
+            chMap[ch.channel_id] = ch;
+          }
+        }
+
+        const defaultScopes = buildDefaultScopeConfigs(chMap, get().locale);
+        await Promise.all(
+          Object.values(defaultScopes).map((sc) =>
+            client.upsertScopeViewport(toViewportDto(sc, 760)),
+          ),
+        );
+
+        set({
+          initialized: true,
+          initError: null,
+          runtimeStatus: status,
+          channelGroups: tree.sources,
+          channelsById: chMap,
+          quota: {
+            usedBytes: tree.quota_used_bytes ?? 0,
+            limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
+            pinnedBytes: tree.pinned_bytes ?? 0,
+          },
+          scopes: defaultScopes,
+          scopeOrder: [1, 2],
+          focusedScopeId: 1,
+          nextScopeId: 3,
+        });
+      } catch (err: unknown) {
+        set({
+          initError: err instanceof Error ? err.message : String(err),
         });
       }
+    },
 
-      if (!metricsUnsub) {
-        metricsUnsub = bridgeClient.topicBus.subscribeMetrics((metrics) => {
-          set({ dataPlaneMetrics: metrics });
-        });
-      }
-
-      const tree = await bridgeClient.getChannelTree();
+    refreshChannelTree: async () => {
+      const tree = await client.getChannelTree();
       const chMap: Record<number, ChannelNodeDto_Serialize> = {};
       for (const grp of tree.sources) {
         for (const ch of grp.channels) {
           chMap[ch.channel_id] = ch;
         }
       }
-
-      const defaultScopes = buildDefaultScopeConfigs(chMap, get().locale);
-      await Promise.all(
-        Object.values(defaultScopes).map((sc) =>
-          bridgeClient.upsertScopeViewport(toViewportDto(sc, 760)),
-        ),
-      );
-
       set({
-        initialized: true,
-        initError: null,
-        runtimeStatus: status,
         channelGroups: tree.sources,
         channelsById: chMap,
         quota: {
@@ -372,320 +591,349 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
           limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
           pinnedBytes: tree.pinned_bytes ?? 0,
         },
-        scopes: defaultScopes,
-        scopeOrder: [1, 2],
-        focusedScopeId: 1,
-        nextScopeId: 3,
       });
-    } catch (err: unknown) {
-      set({
-        initError: err instanceof Error ? err.message : String(err),
+    },
+
+    setMockRateHz: (rate) => {
+      client.setMockRate(rate);
+      set({ mockRateHz: rate });
+    },
+
+    setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
+    setDownlinkBarCollapsed: (collapsed) => set({ downlinkBarCollapsed: collapsed }),
+    setSourceWizardOpen: (open) => set({ sourceWizardOpen: open }),
+    setFocusedScopeId: (scopeId) => set({ focusedScopeId: scopeId }),
+
+    createSource: async (req) => {
+      await client.createSource(req);
+      await get().refreshChannelTree();
+    },
+
+    startSource: async (sourceId) => {
+      await client.startSource(sourceId);
+      await get().refreshChannelTree();
+    },
+
+    stopSource: async (sourceId) => {
+      await client.stopSource(sourceId);
+      await get().refreshChannelTree();
+    },
+
+    removeSource: async (sourceId) => {
+      await client.removeSource(sourceId);
+      await get().refreshChannelTree();
+    },
+
+    toggleRawRecorder: async (sourceId, enabled) => {
+      await client.setRawRecorder({
+        source_id: sourceId,
+        enabled,
+        output_path: null,
       });
-    }
-  },
+      await get().refreshChannelTree();
+    },
 
-  refreshChannelTree: async () => {
-    const tree = await bridgeClient.getChannelTree();
-    const chMap: Record<number, ChannelNodeDto_Serialize> = {};
-    for (const grp of tree.sources) {
-      for (const ch of grp.channels) {
-        chMap[ch.channel_id] = ch;
-      }
-    }
-    set({
-      channelGroups: tree.sources,
-      channelsById: chMap,
-      quota: {
-        usedBytes: tree.quota_used_bytes ?? 0,
-        limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
-        pinnedBytes: tree.pinned_bytes ?? 0,
-      },
-    });
-  },
+    seekReplay: async (req) => {
+      await client.seekReplaySource(req);
+      await get().refreshChannelTree();
+    },
 
-  setMockRateHz: (rate) => {
-    bridgeClient.setMockRate(rate);
-    set({ mockRateHz: rate });
-  },
+    addScope: (title) => {
+      const state = get();
+      const scopeId = state.nextScopeId;
+      const allChannels = Object.values(state.channelsById);
+      const firstAnalog = allChannels.find((c) => c.modality === "scalar");
 
-  setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
-  setDownlinkBarCollapsed: (collapsed) => set({ downlinkBarCollapsed: collapsed }),
-  setSourceWizardOpen: (open) => set({ sourceWizardOpen: open }),
-  setFocusedScopeId: (scopeId) => set({ focusedScopeId: scopeId }),
+      const tracks: ScopeTrackUiBinding[] = firstAnalog
+        ? [
+            {
+              channelId: firstAnalog.channel_id,
+              lane: "analog",
+              visible: true,
+              ...defaultYScaleAndOffset(firstAnalog),
+              colorRgba: TRACE_COLORS[(scopeId - 1) % TRACE_COLORS.length],
+            },
+          ]
+        : [];
 
-  createSource: async (req) => {
-    await bridgeClient.createSource(req);
-    await get().refreshChannelTree();
-  },
-
-  startSource: async (sourceId) => {
-    await bridgeClient.startSource(sourceId);
-    await get().refreshChannelTree();
-  },
-
-  stopSource: async (sourceId) => {
-    await bridgeClient.stopSource(sourceId);
-    await get().refreshChannelTree();
-  },
-
-  removeSource: async (sourceId) => {
-    await bridgeClient.removeSource(sourceId);
-    await get().refreshChannelTree();
-  },
-
-  toggleRawRecorder: async (sourceId, enabled) => {
-    await bridgeClient.setRawRecorder({
-      source_id: sourceId,
-      enabled,
-      output_path: null,
-    });
-    await get().refreshChannelTree();
-  },
-
-  seekReplay: async (req) => {
-    await bridgeClient.seekReplaySource(req);
-    await get().refreshChannelTree();
-  },
-
-  addScope: (title) => {
-    const state = get();
-    const scopeId = state.nextScopeId;
-    const allChannels = Object.values(state.channelsById);
-    const firstAnalog = allChannels.find((c) => c.modality === "scalar");
-
-    const tracks: ScopeTrackUiBinding[] = firstAnalog
-      ? [
-          {
-            channelId: firstAnalog.channel_id,
-            lane: "analog",
-            visible: true,
-            ...defaultYScaleAndOffset(firstAnalog),
-            colorRgba: TRACE_COLORS[(scopeId - 1) % TRACE_COLORS.length],
-          },
-        ]
-      : [];
-
-    const newScope: ScopeUiConfig = {
-      scopeId,
-      title: title ?? getDefaultScopeTitle("generic", state.locale, scopeId),
-      timeSpanNs: 20_000_000,
-      preTriggerRatio: 0.25,
-      panOffsetNs: 0,
-      sweepMode: "auto",
-      autoTimeoutMs: 120,
-      trigger: firstAnalog
-        ? {
-            kind: "edge",
-            channel_id: firstAnalog.channel_id,
-            level: 0,
-            hysteresis: 0.5,
-            slope: "rising",
-          }
-        : null,
-      tracks,
-      syncGroupId: null,
-      paused: false,
-      analogLayout: "overlay",
-      cursorsEnabled: false,
-      cursorARatio: 0.28,
-      cursorBRatio: 0.68,
-      activeAnalogChannelId: firstAnalog?.channel_id ?? null,
-    };
-
-    set({
-      scopes: { ...state.scopes, [scopeId]: newScope },
-      scopeOrder: [...state.scopeOrder, scopeId],
-      focusedScopeId: scopeId,
-      nextScopeId: scopeId + 1,
-    });
-
-    bridgeClient
-      .upsertScopeViewport(toViewportDto(newScope, 760))
-      .catch(() => {});
-
-    return scopeId;
-  },
-
-  removeScope: (scopeId) => {
-    const state = get();
-    if (!state.scopes[scopeId]) return;
-    const nextScopes = { ...state.scopes };
-    delete nextScopes[scopeId];
-    const nextOrder = state.scopeOrder.filter((id) => id !== scopeId);
-    const nextFocused =
-      state.focusedScopeId === scopeId ? (nextOrder[0] ?? null) : state.focusedScopeId;
-
-    set({
-      scopes: nextScopes,
-      scopeOrder: nextOrder,
-      focusedScopeId: nextFocused,
-    });
-    bridgeClient.topicBus.deleteScopeCache(scopeId);
-    bridgeClient.removeScopeViewport(scopeId).catch(() => {});
-  },
-
-  updateScope: (scopeId, updater) => {
-    const state = get();
-    const prev = state.scopes[scopeId];
-    if (!prev) return;
-    const next = updater(prev);
-    const canvasW = state.canvasWidthsByScope[scopeId] ?? 760;
-
-    set({
-      scopes: {
-        ...state.scopes,
-        [scopeId]: next,
-      },
-    });
-
-    bridgeClient
-      .upsertScopeViewport(toViewportDto(next, canvasW))
-      .catch(() => {});
-  },
-
-  setScopeCanvasWidth: (scopeId, widthPx) => {
-    const state = get();
-    const prevW = state.canvasWidthsByScope[scopeId] ?? 0;
-    if (Math.abs(prevW - widthPx) < 24) return;
-    const scope = state.scopes[scopeId];
-    if (!scope) return;
-
-    set({
-      canvasWidthsByScope: {
-        ...state.canvasWidthsByScope,
-        [scopeId]: widthPx,
-      },
-    });
-    bridgeClient
-      .upsertScopeViewport(toViewportDto(scope, widthPx))
-      .catch(() => {});
-  },
-
-  rearmScope: (scopeId) => {
-    get().updateScope(scopeId, (prev) => ({
-      ...prev,
-      panOffsetNs: 0,
-    }));
-    bridgeClient.rearmScope(scopeId).catch(() => {});
-  },
-
-  bindChannelToScope: (scopeId, channelId) => {
-    const state = get();
-    const ch = state.channelsById[channelId];
-    const scope = state.scopes[scopeId];
-    if (!ch || !scope) return;
-
-    if (scope.tracks.some((t) => t.channelId === channelId)) {
-      get().updateScope(scopeId, (prev) => ({
-        ...prev,
-        tracks: prev.tracks.map((t) =>
-          t.channelId === channelId ? { ...t, visible: true } : t,
-        ),
-      }));
-      return;
-    }
-
-    const lane = defaultLaneForChannel(ch);
-    const { yScale, yOffset } = defaultYScaleAndOffset(ch);
-    const colorRgba = TRACE_COLORS[scope.tracks.length % TRACE_COLORS.length];
-
-    get().updateScope(scopeId, (prev) => ({
-      ...prev,
-      activeAnalogChannelId:
-        lane === "analog" && prev.activeAnalogChannelId === null
-          ? channelId
-          : prev.activeAnalogChannelId,
-      trigger:
-        prev.trigger ??
-        (lane === "analog"
+      const newScope: ScopeUiConfig = {
+        scopeId,
+        title: title ?? getDefaultScopeTitle("generic", state.locale, scopeId),
+        timeSpanNs: 20_000_000,
+        preTriggerRatio: 0.25,
+        panOffsetNs: 0,
+        sweepMode: "auto",
+        autoTimeoutMs: 120,
+        trigger: firstAnalog
           ? {
               kind: "edge",
-              channel_id: channelId,
-              level: yOffset,
+              channel_id: firstAnalog.channel_id,
+              level: 0,
               hysteresis: 0.5,
               slope: "rising",
             }
-          : null),
-      tracks: [
-        ...prev.tracks,
-        {
-          channelId,
-          lane,
-          visible: true,
-          yScale,
-          yOffset,
-          colorRgba,
-        },
-      ],
-    }));
-  },
+          : null,
+        tracks,
+        syncGroupId: null,
+        paused: false,
+        analogLayout: "overlay",
+        cursorsEnabled: false,
+        cursorARatio: 0.28,
+        cursorBRatio: 0.68,
+        activeAnalogChannelId: firstAnalog?.channel_id ?? null,
+      };
 
-  broadcastSyncGroup: (groupId, originScopeId, patch) => {
-    const state = get();
-    const nextScopes = { ...state.scopes };
-    let changed = false;
+      set({
+        scopes: { ...state.scopes, [scopeId]: newScope },
+        scopeOrder: [...state.scopeOrder, scopeId],
+        focusedScopeId: scopeId,
+        nextScopeId: scopeId + 1,
+      });
 
-    for (const idStr of Object.keys(nextScopes)) {
-      const id = Number(idStr);
-      const sc = nextScopes[id];
-      if (sc.syncGroupId === groupId && id !== originScopeId) {
-        changed = true;
-        nextScopes[id] = {
-          ...sc,
-          timeSpanNs: patch.timeSpanNs ?? sc.timeSpanNs,
-          panOffsetNs: patch.panOffsetNs ?? sc.panOffsetNs,
-          cursorARatio: patch.cursorARatio ?? sc.cursorARatio,
-          cursorBRatio: patch.cursorBRatio ?? sc.cursorBRatio,
-        };
+      client
+        .upsertScopeViewport(toViewportDto(newScope, 760))
+        .catch(() => {});
+
+      return scopeId;
+    },
+
+    removeScope: (scopeId) => {
+      const state = get();
+      if (!state.scopes[scopeId]) return;
+      const nextScopes = { ...state.scopes };
+      delete nextScopes[scopeId];
+      const nextOrder = state.scopeOrder.filter((id) => id !== scopeId);
+      const nextFocused =
+        state.focusedScopeId === scopeId ? (nextOrder[0] ?? null) : state.focusedScopeId;
+
+      set({
+        scopes: nextScopes,
+        scopeOrder: nextOrder,
+        focusedScopeId: nextFocused,
+      });
+      client.topicBus.deleteScopeCache(scopeId);
+      client.removeScopeViewport(scopeId).catch(() => {});
+    },
+
+    updateScope: (scopeId, updater) => {
+      const state = get();
+      const prev = state.scopes[scopeId];
+      if (!prev) return;
+      let next = updater(prev);
+      const canvasW = state.canvasWidthsByScope[scopeId] ?? 760;
+
+      const joinedSyncGroup =
+        next.syncGroupId !== null && next.syncGroupId !== prev.syncGroupId;
+      if (joinedSyncGroup) {
+        const peer = Object.values(state.scopes).find(
+          (sc) => sc.scopeId !== scopeId && sc.syncGroupId === next.syncGroupId,
+        );
+        if (peer) {
+          next = {
+            ...next,
+            timeSpanNs: peer.timeSpanNs,
+            panOffsetNs: peer.panOffsetNs,
+            cursorsEnabled: peer.cursorsEnabled,
+            cursorARatio: peer.cursorARatio,
+            cursorBRatio: peer.cursorBRatio,
+          };
+        }
       }
-    }
 
-    if (changed) {
-      set({ scopes: nextScopes });
-    }
+      set({
+        scopes: {
+          ...state.scopes,
+          [scopeId]: next,
+        },
+      });
 
-    bridgeClient
-      .updateSyncGroup({
-        group_id: groupId,
-        origin_scope_id: originScopeId,
-        time_span_ns: patch.timeSpanNs ?? null,
-        center_offset_ns: patch.panOffsetNs ?? null,
-        cursor_a_ratio: patch.cursorARatio ?? null,
-        cursor_b_ratio: patch.cursorBRatio ?? null,
-      })
-      .catch(() => {});
-  },
+      client
+        .upsertScopeViewport(toViewportDto(next, canvasW))
+        .then(() => {
+          if (joinedSyncGroup && next.syncGroupId !== null) {
+            return client.updateSyncGroup({
+              group_id: next.syncGroupId,
+              origin_scope_id: scopeId,
+              time_span_ns: next.timeSpanNs,
+              center_offset_ns: next.panOffsetNs,
+              cursor_a_ratio: next.cursorARatio,
+              cursor_b_ratio: next.cursorBRatio,
+            });
+          }
+          return null;
+        })
+        .catch(() => {});
+    },
 
-  sendDownlink: async (req, labelSummary, isSliderEvent = false) => {
-    if (isSliderEvent) {
-      set((s) => ({ sliderEventCount: s.sliderEventCount + 1 }));
-    }
-    const receipt = await bridgeClient.sendDownlink(req);
+    setScopeCanvasWidth: (scopeId, widthPx) => {
+      const state = get();
+      const prevW = state.canvasWidthsByScope[scopeId] ?? 0;
+      if (Math.abs(prevW - widthPx) < 24) return;
+      const scope = state.scopes[scopeId];
+      if (!scope) return;
 
-    const now = new Date();
-    const ts = `${String(now.getHours()).padStart(2, "0")}:${String(
-      now.getMinutes(),
-    ).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}.${String(
-      now.getMilliseconds(),
-    ).padStart(3, "0")}`;
+      set({
+        canvasWidthsByScope: {
+          ...state.canvasWidthsByScope,
+          [scopeId]: widthPx,
+        },
+      });
+      client
+        .upsertScopeViewport(toViewportDto(scope, widthPx))
+        .catch(() => {});
+    },
 
-    const entry: DownlinkLogEntry = {
-      id: nextTxLogId++,
-      timestamp: ts,
-      sourceId: req.source_id,
-      summary: labelSummary ?? req.payload.kind,
-      coalesced: receipt.coalesced_existing,
-      resultKind: receipt.result_kind,
-    };
+    rearmScope: (scopeId) => {
+      get().updateScope(scopeId, (prev) => ({
+        ...prev,
+        panOffsetNs: 0,
+      }));
+      client.rearmScope(scopeId).catch(() => {});
+    },
 
-    set((s) => ({
-      txLog: [entry, ...s.txLog].slice(0, 24),
-    }));
+    bindChannelToScope: (scopeId, channelId) => {
+      const state = get();
+      const ch = state.channelsById[channelId];
+      const scope = state.scopes[scopeId];
+      if (!ch || !scope) return;
 
-    return receipt;
-  },
+      if (scope.tracks.some((t) => t.channelId === channelId)) {
+        get().updateScope(scopeId, (prev) => ({
+          ...prev,
+          tracks: prev.tracks.map((t) =>
+            t.channelId === channelId ? { ...t, visible: true } : t,
+          ),
+        }));
+        return;
+      }
 
-  injectGlitch: async () => {
-    await bridgeClient.injectMockGlitch();
-  },
-}));
+      const lane = defaultLaneForChannel(ch);
+      const { yScale, yOffset } = defaultYScaleAndOffset(ch);
+      const colorRgba = TRACE_COLORS[scope.tracks.length % TRACE_COLORS.length];
+
+      get().updateScope(scopeId, (prev) => ({
+        ...prev,
+        activeAnalogChannelId:
+          lane === "analog" && prev.activeAnalogChannelId === null
+            ? channelId
+            : prev.activeAnalogChannelId,
+        trigger:
+          prev.trigger ??
+          (lane === "analog"
+            ? {
+                kind: "edge",
+                channel_id: channelId,
+                level: yOffset,
+                hysteresis: 0.5,
+                slope: "rising",
+              }
+            : null),
+        tracks: [
+          ...prev.tracks,
+          {
+            channelId,
+            lane,
+            visible: true,
+            yScale,
+            yOffset,
+            colorRgba,
+          },
+        ],
+      }));
+    },
+
+    broadcastSyncGroup: (groupId, originScopeId, patch) => {
+      const state = get();
+      const origin = state.scopes[originScopeId];
+      const resolvedSpanNs = patch.timeSpanNs ?? origin?.timeSpanNs ?? 20_000_000;
+      const resolvedPanNs = patch.panOffsetNs ?? origin?.panOffsetNs ?? 0;
+      const resolvedCursorA = patch.cursorARatio ?? origin?.cursorARatio ?? null;
+      const resolvedCursorB = patch.cursorBRatio ?? origin?.cursorBRatio ?? null;
+
+      const nextScopes = { ...state.scopes };
+      let changed = false;
+
+      for (const idStr of Object.keys(nextScopes)) {
+        const id = Number(idStr);
+        const sc = nextScopes[id];
+        if (sc.syncGroupId === groupId && id !== originScopeId) {
+          changed = true;
+          nextScopes[id] = {
+            ...sc,
+            timeSpanNs: patch.timeSpanNs ?? sc.timeSpanNs,
+            panOffsetNs: patch.panOffsetNs ?? sc.panOffsetNs,
+            cursorsEnabled:
+              patch.cursorsEnabled !== undefined
+                ? patch.cursorsEnabled
+                : patch.cursorARatio !== undefined || patch.cursorBRatio !== undefined
+                  ? true
+                  : sc.cursorsEnabled,
+            cursorARatio: patch.cursorARatio ?? sc.cursorARatio,
+            cursorBRatio: patch.cursorBRatio ?? sc.cursorBRatio,
+          };
+        }
+      }
+
+      if (changed) {
+        set({ scopes: nextScopes });
+      }
+
+      client
+        .updateSyncGroup({
+          group_id: groupId,
+          origin_scope_id: originScopeId,
+          time_span_ns: resolvedSpanNs,
+          center_offset_ns: resolvedPanNs,
+          cursor_a_ratio: resolvedCursorA,
+          cursor_b_ratio: resolvedCursorB,
+        })
+        .catch(() => {});
+    },
+
+    sendDownlink: async (req, labelSummary, isSliderEvent = false) => {
+      if (isSliderEvent) {
+        set((s) => ({ sliderEventCount: s.sliderEventCount + 1 }));
+      }
+      const receipt = await client.sendDownlink(req);
+
+      const now = new Date();
+      const ts = `${String(now.getHours()).padStart(2, "0")}:${String(
+        now.getMinutes(),
+      ).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}.${String(
+        now.getMilliseconds(),
+      ).padStart(3, "0")}`;
+
+      const entry: DownlinkLogEntry = {
+        id: nextTxLogId++,
+        timestamp: ts,
+        sourceId: req.source_id,
+        summary: labelSummary ?? req.payload.kind,
+        coalesced: receipt.coalesced_existing,
+        resultKind: receipt.result_kind,
+      };
+
+      set((s) => ({
+        txLog: [entry, ...s.txLog].slice(0, 24),
+        ...(client.isMockMode() ? {} : { downlinkStats: client.getDownlinkStats() }),
+      }));
+
+      return receipt;
+    },
+
+    injectGlitch: async () => {
+      const groups = get().channelGroups;
+      const runningSimIds = groups
+        .filter((g) => g.source.transport_kind === "sim" && g.source.state === "running")
+        .map((g) => g.source.source_id);
+      const allSimIds =
+        runningSimIds.length > 0
+          ? runningSimIds
+          : groups
+              .filter((g) => g.source.transport_kind === "sim")
+              .map((g) => g.source.source_id);
+      await client.injectGlitch(allSimIds.length > 0 ? allSimIds : undefined);
+    },
+  }));
+}
+
+export const useWorkspaceStore = createWorkspaceStore();
