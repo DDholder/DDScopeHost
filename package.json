@@ -7,6 +7,7 @@
     "dev:ui": "pnpm --filter @ddscope/web-ui dev",
     "build": "pnpm --filter @ddscope/desktop build",
     "build:ui": "pnpm --filter @ddscope/web-ui build",
+    "test:ui": "pnpm --filter @ddscope/web-ui test",
     "typecheck": "pnpm -r typecheck"
   }
 }

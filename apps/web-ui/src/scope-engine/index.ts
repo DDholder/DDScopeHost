@@ -1,2 +1,10 @@
-// Placeholder module for the WebGPU/WebGL2 MSO oscilloscope rendering engine (Track C: TC2-TC4).
-export const SCOPE_ENGINE_READY = false;
+export const SCOPE_ENGINE_READY = true;
+
+export * from "./backend.ts";
+export * from "./create-backend.ts";
+export * from "./geometry.ts";
+export * from "./hud-overlay.ts";
+export * from "./layout.ts";
+export * from "./time-format.ts";
+export * from "./types.ts";
+export { ScopeViewportWidget, type ScopeViewportWidgetProps } from "./ScopeViewportWidget.tsx";
