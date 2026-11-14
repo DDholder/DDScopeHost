@@ -3,6 +3,7 @@ import type {
   ChannelNodeDto_Serialize,
   ChannelTreeSnapshotDto_Serialize,
   CreateSourceRequestDto_Deserialize,
+  CreateSourceRequestDto_Serialize,
   DownlinkPayloadDto,
   DownlinkReceiptDto,
   RawRecorderRequestDto_Deserialize,
@@ -37,6 +38,7 @@ import {
   type DdsfTrackBuildInput,
   type DdsfTrackStatsView,
 } from "./ddsf-parser.ts";
+import { normalizeSourceConfigToSerialize } from "./source-config-normalize.ts";
 
 interface InternalChannelDef {
   channelId: number;
@@ -66,6 +68,7 @@ interface InternalChannelDef {
 
 interface InternalSourceState {
   summary: SourceSummaryDto_Serialize;
+  config: CreateSourceRequestDto_Serialize;
   sampleRateHz: number;
   replayTotalBytes: number;
   replayProgressRatio: number;
@@ -178,17 +181,49 @@ export class MockSimulationCore {
     this.seedDefaultSimSource(options?.autoStartDefaultSim ?? true);
   }
 
-  private seedDefaultSimSource(autoStart: boolean): void {
-    const channels: InternalChannelDef[] = [
-      this.makeChannel("sim0", "ia", "Phase Current Ia", "A", "scalar", "f32", [], "ia", 0),
-      this.makeChannel("sim0", "ib", "Phase Current Ib", "A", "scalar", "f32", [], "ib", 1),
-      this.makeChannel("sim0", "ic", "Phase Current Ic", "A", "scalar", "f32", [], "ic", 2),
-      this.makeChannel("sim0", "v_bus", "DC Bus Voltage", "V", "scalar", "f32", [], "v_bus", 3),
-      this.makeChannel("sim0", "pwm_a", "Gate PWM A", null, "digital_bool", "bool", [], "pwm_a", 4),
-      this.makeChannel("sim0", "pwm_b", "Gate PWM B", null, "digital_bool", "bool", [], "pwm_b", 5),
-      this.makeChannel("sim0", "fault_pin", "Hardware OCP Pin", null, "digital_bool", "bool", [], "fault_pin", 6),
+  private buildSimPresetChannels(sourceId: string, analogCount: number): InternalChannelDef[] {
+    const channels: InternalChannelDef[] = [];
+    if (sourceId === "sim0" && analogCount === 4) {
+      channels.push(
+        this.makeChannel(sourceId, "ia", "Phase Current Ia", "A", "scalar", "f32", [], "ia", 0),
+        this.makeChannel(sourceId, "ib", "Phase Current Ib", "A", "scalar", "f32", [], "ib", 1),
+        this.makeChannel(sourceId, "ic", "Phase Current Ic", "A", "scalar", "f32", [], "ic", 2),
+        this.makeChannel(sourceId, "v_bus", "DC Bus Voltage", "V", "scalar", "f32", [], "v_bus", 3),
+      );
+    } else {
+      for (let i = 0; i < analogCount; i += 1) {
+        channels.push(
+          this.makeChannel(
+            sourceId,
+            `ch${i}`,
+            `Channel ${i}`,
+            i === 3 ? "V" : "A",
+            "scalar",
+            "f32",
+            [],
+            i === 3 ? "v_bus" : i % 2 === 0 ? "aux_sine" : "aux_cos",
+            i,
+          ),
+        );
+      }
+    }
+
+    channels.push(
+      this.makeChannel(sourceId, "pwm_a", "Gate PWM A", null, "digital_bool", "bool", [], "pwm_a", analogCount),
+      this.makeChannel(sourceId, "pwm_b", "Gate PWM B", null, "digital_bool", "bool", [], "pwm_b", analogCount + 1),
       this.makeChannel(
-        "sim0",
+        sourceId,
+        "fault_pin",
+        "Hardware OCP Pin",
+        null,
+        "digital_bool",
+        "bool",
+        [],
+        "fault_pin",
+        analogCount + 2,
+      ),
+      this.makeChannel(
+        sourceId,
         "ctrl_state",
         "FOC Controller State",
         null,
@@ -196,9 +231,14 @@ export class MockSimulationCore {
         "i32",
         DEFAULT_STATE_LABELS,
         "ctrl_state",
-        7,
+        analogCount + 3,
       ),
-    ];
+    );
+    return channels;
+  }
+
+  private seedDefaultSimSource(autoStart: boolean): void {
+    const channels = this.buildSimPresetChannels("sim0", 4);
 
     this.sources.set("sim0", {
       summary: {
@@ -207,6 +247,26 @@ export class MockSimulationCore {
         transport_kind: "sim",
         state: autoStart ? "running" : "stopped",
         raw_recording_path: null,
+      },
+      config: {
+        source_id: "sim0",
+        display_name: "FOC Motor Drive Sim (2 MHz)",
+        transport: {
+          kind: "sim",
+          sample_rate_hz: 2_000_000,
+          analog_channels: 4,
+          enable_glitch: true,
+          glitch_period_samples: 4_000_000,
+        },
+        clock: {
+          mode: "tier1_hardware_counter",
+          tick_hz: 2_000_000,
+          counter_bits: 32,
+        },
+        protocol: {
+          codec: "sim_preset",
+        },
+        auto_start: autoStart,
       },
       sampleRateHz: 2_000_000,
       replayTotalBytes: 0,
@@ -342,36 +402,8 @@ export class MockSimulationCore {
       });
     } else {
       const analogCount =
-        req.transport.kind === "sim" ? clamp(req.transport.analog_channels, 1, 8) : 3;
-      for (let i = 0; i < analogCount; i += 1) {
-        channels.push(
-          this.makeChannel(
-            req.source_id,
-            `ch${i}`,
-            `Channel ${i}`,
-            i === 3 ? "V" : "A",
-            "scalar",
-            "f32",
-            [],
-            i === 3 ? "v_bus" : i % 2 === 0 ? "aux_sine" : "aux_cos",
-            i,
-          ),
-        );
-      }
-      channels.push(
-        this.makeChannel(req.source_id, "dig0", "Digital Ch0", null, "digital_bool", "bool", [], "aux_bool", analogCount),
-        this.makeChannel(
-          req.source_id,
-          "state",
-          "FSM State",
-          null,
-          "state_machine",
-          "i32",
-          DEFAULT_STATE_LABELS,
-          "aux_state",
-          analogCount + 1,
-        ),
-      );
+        req.transport.kind === "sim" ? clamp(req.transport.analog_channels, 1, 16) : 4;
+      channels.push(...this.buildSimPresetChannels(req.source_id, analogCount));
     }
 
     const summary: SourceSummaryDto_Serialize = {
@@ -384,6 +416,7 @@ export class MockSimulationCore {
 
     this.sources.set(req.source_id, {
       summary,
+      config: normalizeSourceConfigToSerialize(req),
       sampleRateHz,
       replayTotalBytes: req.transport.kind === "raw_file_replay" ? 128 * 1024 * 1024 : 0,
       replayProgressRatio: 0,
@@ -475,6 +508,12 @@ export class MockSimulationCore {
       quota_used_bytes: this.quotaUsedBytes,
       pinned_bytes: this.totalPinnedBytes(),
     };
+  }
+
+  getSourceConfigs(): CreateSourceRequestDto_Serialize[] {
+    return Array.from(this.sources.values())
+      .sort((a, b) => a.summary.source_id.localeCompare(b.summary.source_id))
+      .map((src) => normalizeSourceConfigToSerialize(src.config));
   }
 
   upsertScopeViewport(cfg: ScopeViewportConfigDto_Deserialize): ScopeViewportSummaryDto_Serialize {
@@ -1049,7 +1088,7 @@ export class MockSimulationCore {
   ): DdsfTrackBuildInput {
     const dtNs = Math.max(100, Math.round(1e9 / sampleRateHz));
     const totalSamplesInWindow = Math.max(2, Math.floor(winTSpanNs / dtNs));
-    const useRawXy = totalSamplesInWindow <= Math.min(2048, 2 * canvasWidthPx);
+    const useRawXy = totalSamplesInWindow <= Math.min(4096, 2 * canvasWidthPx);
 
     if (useRawXy) {
       const count = totalSamplesInWindow;
@@ -1094,7 +1133,7 @@ export class MockSimulationCore {
     }
 
     // M4 envelope column extraction — mathematically preserves 1-sample glitches inside bucket [t0, t1]!
-    const colCount = clamp(Math.min(canvasWidthPx, 1024), 64, 1024);
+    const colCount = clamp(Math.min(canvasWidthPx, 2048), 64, 2048);
     const columns = new Float32Array(colCount * 5);
     const colSpanNs = winTSpanNs / colCount;
     const isBus = ch.signalRole === "v_bus";

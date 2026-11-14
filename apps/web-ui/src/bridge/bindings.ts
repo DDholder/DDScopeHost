@@ -25,6 +25,8 @@ export const commands = {
 	setRawRecorder: (req: RawRecorderRequestDto_Deserialize) => __TAURI_INVOKE<SourceSummaryDto_Serialize>("set_raw_recorder", { req }),
 	/**  Returns the complete channel tree snapshot across all workspace sources. */
 	getChannelTree: () => __TAURI_INVOKE<ChannelTreeSnapshotDto_Serialize>("get_channel_tree"),
+	/**  Returns exportable control-plane configurations for all registered workspace sources. */
+	getSourceConfigs: () => __TAURI_INVOKE<CreateSourceRequestDto_Serialize[]>("get_source_configs"),
 	/**  Creates or updates a scope viewport subscription, tracks, trigger, and quota. */
 	upsertScopeViewport: (config: ScopeViewportConfigDto_Deserialize) => __TAURI_INVOKE<ScopeViewportSummaryDto_Serialize>("upsert_scope_viewport", { config }),
 	/**  Removes a scope viewport subscription from the workspace. */
@@ -49,6 +51,12 @@ export const commands = {
 	getDataBridgeStats: () => __TAURI_INVOKE<DataBridgeStatsDto_Serialize>("get_data_bridge_stats"),
 	/**  Updates the target frame-push rate (clamped internally to `[15, 240]` Hz). */
 	setDataBridgeRate: (rateHz: number) => __TAURI_INVOKE<number>("set_data_bridge_rate", { rateHz }),
+	/**  Loads the portable default project configuration stored alongside the executable. */
+	loadDefaultProjectConfig: () => __TAURI_INVOKE<string | null>("load_default_project_config"),
+	/**  Saves the portable default project configuration alongside the executable and returns the saved path. */
+	saveDefaultProjectConfig: (configJson: string) => __TAURI_INVOKE<string>("save_default_project_config", { configJson }),
+	/**  Clears the portable default project configuration stored alongside the executable. */
+	clearDefaultProjectConfig: () => __TAURI_INVOKE<boolean>("clear_default_project_config"),
 };
 
 /** Events */

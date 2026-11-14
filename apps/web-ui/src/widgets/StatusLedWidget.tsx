@@ -4,15 +4,22 @@ import { bridgeClient } from "../bridge/control-client.ts";
 import { DdsfSnapshotKind } from "../bridge/ddsf-spec.ts";
 import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
+import { ChannelBindSelect } from "./ChannelBindSelect.tsx";
 import type { DashboardWidgetItem } from "./types.ts";
 
 export interface StatusLedWidgetProps {
   widget: DashboardWidgetItem;
   channelsById: Record<number, ChannelNodeDto_Serialize>;
   locale: UiLocale;
+  onBindChannel?: (channelId: number) => void;
 }
 
-export function StatusLedWidget({ widget, channelsById, locale }: StatusLedWidgetProps) {
+export function StatusLedWidget({
+  widget,
+  channelsById,
+  locale,
+  onBindChannel,
+}: StatusLedWidgetProps) {
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
     translate(locale, key, params);
 
@@ -86,7 +93,16 @@ export function StatusLedWidget({ widget, channelsById, locale }: StatusLedWidge
   }, [binding?.channelId, locale]);
 
   if (!binding) {
-    return <div className="widget-unbound-box">{t("widget.unbound")}</div>;
+    return (
+      <div className="widget-unbound-box">
+        <span>{t("widget.unbound")}</span>
+        <ChannelBindSelect
+          channelsById={channelsById}
+          placeholder={t("widget.selectChannel")}
+          onBindChannel={onBindChannel}
+        />
+      </div>
+    );
   }
 
   return (

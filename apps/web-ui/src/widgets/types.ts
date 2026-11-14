@@ -82,6 +82,25 @@ export const WIDGET_CATALOG: ReadonlyArray<WidgetCatalogEntry> = [
   { type: "cmd_button", badge: "CMD", defaultColSpan: 8, defaultRowSpan: 3 },
 ];
 
+export const DASHBOARD_GRID_ROW_HEIGHT_PX = 42;
+export const DASHBOARD_GRID_GAP_PX = 8;
+export const DASHBOARD_GRID_ROW_STRIDE_PX =
+  DASHBOARD_GRID_ROW_HEIGHT_PX + DASHBOARD_GRID_GAP_PX;
+
+export function computeCanvasGridCell(
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number; width: number },
+): { col: number; row: number } {
+  const colWidth = Math.max(12, rect.width / DASHBOARD_GRID_COLS);
+  const col = Math.max(0, Math.floor((clientX - rect.left) / colWidth));
+  const row = Math.max(
+    0,
+    Math.floor((clientY - rect.top) / DASHBOARD_GRID_ROW_STRIDE_PX),
+  );
+  return { col, row };
+}
+
 export function defaultSizeForWidgetType(type: WidgetType): {
   colSpan: number;
   rowSpan: number;

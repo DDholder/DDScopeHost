@@ -69,6 +69,7 @@ export function SourceWizardModal() {
   const [replayLoop, setReplayLoop] = useState(true);
 
   // Clock & Protocol fields
+  const [pllAutoEstimate, setPllAutoEstimate] = useState(false);
   const [nominalRateHz, setNominalRateHz] = useState(500_000);
   const [hwTickHz, setHwTickHz] = useState(1_000_000);
   const [channelNamesText, setChannelNamesText] = useState("va, vb, vc, iq");
@@ -78,9 +79,13 @@ export function SourceWizardModal() {
 
   useEffect(() => {
     if (!open) return;
-    const count = channelGroups.length;
-    setSourceId(`src${count}`);
-    setDisplayName(t("wizard.defaultName", { index: count }));
+    const existingIds = new Set(channelGroups.map((g) => g.source.source_id));
+    let idx = channelGroups.length;
+    while (existingIds.has(`src${idx}`)) {
+      idx += 1;
+    }
+    setSourceId(`src${idx}`);
+    setDisplayName(t("wizard.defaultName", { index: idx }));
     setErrorMsg(null);
     bridgeClient
       .listSerialPorts()
@@ -91,9 +96,22 @@ export function SourceWizardModal() {
         }
       })
       .catch(() => {});
-  }, [open, channelGroups.length, t]);
+  }, [open, channelGroups, t]);
 
   if (!open) return null;
+
+  const handleTransportChange = (nextKind: WizardTransportKind) => {
+    setTransportKind(nextKind);
+    if (nextKind === "sim") {
+      setPllAutoEstimate(false);
+      setNominalRateHz(simRateHz);
+    } else {
+      if (protocolCodec === "sim_preset") {
+        setProtocolCodec("just_float");
+      }
+      setPllAutoEstimate(true);
+    }
+  };
 
   const handleSubmit = async (ev: FormEvent) => {
     ev.preventDefault();
@@ -174,7 +192,7 @@ export function SourceWizardModal() {
       case "tier2_software_pll":
         clock = {
           mode: "tier2_software_pll",
-          nominal_sample_rate_hz: nominalRateHz,
+          nominal_sample_rate_hz: pllAutoEstimate ? null : nominalRateHz,
         };
         break;
       case "tier3_host_arrival":
@@ -274,7 +292,7 @@ export function SourceWizardModal() {
               <span>{t("wizard.transport")}</span>
               <select
                 value={transportKind}
-                onChange={(e) => setTransportKind(e.target.value as WizardTransportKind)}
+                onChange={(e) => handleTransportChange(e.target.value as WizardTransportKind)}
                 data-testid="wizard-transport-kind"
               >
                 <option value="sim">{t("wizard.transport.sim")}</option>
@@ -456,14 +474,26 @@ export function SourceWizardModal() {
             </label>
 
             {clockMode === "tier2_software_pll" && (
-              <label className="wizard-field">
+              <div className="wizard-field">
                 <span>{t("wizard.pllRate")}</span>
                 <input
                   type="number"
+                  min={1}
+                  disabled={pllAutoEstimate}
                   value={nominalRateHz}
                   onChange={(e) => setNominalRateHz(Number(e.target.value) || 500_000)}
+                  data-testid="wizard-pll-rate"
                 />
-              </label>
+                <label className="wizard-check">
+                  <input
+                    type="checkbox"
+                    checked={pllAutoEstimate}
+                    onChange={(e) => setPllAutoEstimate(e.target.checked)}
+                    data-testid="wizard-pll-auto"
+                  />
+                  <span>{t("wizard.pllAuto")}</span>
+                </label>
+              </div>
             )}
 
             {clockMode === "tier1_hardware_counter" && (

@@ -28,11 +28,12 @@ use ddscope_core::{
 use super::dto::{
     ApiErrorDto, ChannelModalityDto, ChannelNodeDto, ChannelTreeSnapshotDto, ClockConfigDto,
     CreateSourceRequestDto, DownlinkPayloadDto, DownlinkReceiptDto, EdgeSlopeDto,
-    ProtocolConfigDto, ScopeLaneKindDto, ScopeViewportConfigDto, ScopeViewportSummaryDto,
-    SendDownlinkRequestDto, SerialFlowControlDto, SerialParityDto, SerialPortInfoDto,
-    SerialStopBitsDto, SourceChannelGroupDto, SourceRuntimeStateDto, SourceSummaryDto,
-    SourceTelemetryDto, StateLabelEntryDto, SyncGroupUpdateDto, TransportConfigDto,
-    TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto, WorkspaceTelemetryEvent,
+    FixedFieldSpecDto, ProtocolConfigDto, ScopeLaneKindDto, ScopeViewportConfigDto,
+    ScopeViewportSummaryDto, SendDownlinkRequestDto, SerialFlowControlDto, SerialParityDto,
+    SerialPortInfoDto, SerialStopBitsDto, SourceChannelGroupDto, SourceRuntimeStateDto,
+    SourceSummaryDto, SourceTelemetryDto, StateLabelEntryDto, SyncGroupUpdateDto,
+    TransportConfigDto, TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto,
+    WorkspaceTelemetryEvent,
 };
 use ddscope_core::workspace::DownlinkRequest;
 
@@ -335,6 +336,126 @@ pub fn create_source_dto_to_core(req: CreateSourceRequestDto) -> Result<SourceCo
         protocol,
         runtime: TransportRuntimeConfig::default(),
         auto_start: req.auto_start,
+    })
+}
+
+/// Converts a core [`SourceConfig`] back into a control-plane [`CreateSourceRequestDto`].
+pub fn source_config_core_to_dto(cfg: &SourceConfig) -> Result<CreateSourceRequestDto, ApiErrorDto> {
+    let transport = match &cfg.transport {
+        SourceTransportConfig::Sim(sim) => TransportConfigDto::Sim {
+            sample_rate_hz: sim.sample_rate_hz,
+            analog_channels: sim.analog_channels,
+            enable_glitch: sim.enable_glitch,
+            glitch_period_samples: sim.glitch_period_samples,
+        },
+        SourceTransportConfig::Serial(ser) => TransportConfigDto::Serial {
+            port_name: ser.port_name.clone(),
+            baud_rate: ser.baud_rate,
+            data_bits: ser.data_bits,
+            parity: match ser.parity {
+                SerialParity::None => SerialParityDto::None,
+                SerialParity::Odd => SerialParityDto::Odd,
+                SerialParity::Even => SerialParityDto::Even,
+            },
+            stop_bits: match ser.stop_bits {
+                SerialStopBits::One => SerialStopBitsDto::One,
+                SerialStopBits::Two => SerialStopBitsDto::Two,
+            },
+            flow_control: match ser.flow_control {
+                SerialFlowControl::None => SerialFlowControlDto::None,
+                SerialFlowControl::HardwareRtsCts => SerialFlowControlDto::HardwareRtsCts,
+                SerialFlowControl::SoftwareXonXoff => SerialFlowControlDto::SoftwareXonXoff,
+            },
+            auto_reconnect: ser.auto_reconnect,
+        },
+        SourceTransportConfig::Udp(udp) => TransportConfigDto::Udp {
+            bind_addr: udp.bind_addr.clone(),
+            multicast_group: udp.multicast_group.clone(),
+            recv_buffer_bytes: udp.recv_buffer_bytes,
+            remote_tx_addr: udp.remote_tx_addr.clone(),
+        },
+        SourceTransportConfig::TcpClient(tcp) => TransportConfigDto::TcpClient {
+            remote_addr: tcp.remote_addr.clone(),
+            auto_reconnect: tcp.auto_reconnect,
+            tcp_nodelay: tcp.tcp_nodelay,
+        },
+        SourceTransportConfig::TcpServer(srv) => TransportConfigDto::TcpServer {
+            listen_addr: srv.listen_addr.clone(),
+            tcp_nodelay: srv.tcp_nodelay,
+        },
+        SourceTransportConfig::RawFileReplay(rep) => TransportConfigDto::RawFileReplay {
+            file_path: rep.file_path.to_string_lossy().into_owned(),
+            full_speed_offline: rep.full_speed_offline,
+            playback_speed: rep.playback_speed,
+            loop_playback: rep.loop_playback,
+            nominal_byte_rate: rep.nominal_byte_rate,
+        },
+        SourceTransportConfig::Custom { transport_kind, .. } => {
+            return Err(ApiErrorDto::invalid_config(format!(
+                "custom transport `{}` is not exportable as CreateSourceRequestDto",
+                transport_kind_to_str(*transport_kind)
+            )));
+        }
+    };
+
+    let clock = match cfg.clock_mode {
+        ClockMode::Tier1HardwareCounter {
+            tick_hz,
+            counter_bits,
+        } => ClockConfigDto::Tier1HardwareCounter {
+            tick_hz,
+            counter_bits,
+        },
+        ClockMode::Tier2SoftwarePll {
+            nominal_sample_rate_hz,
+        } => ClockConfigDto::Tier2SoftwarePll {
+            nominal_sample_rate_hz,
+        },
+        ClockMode::Tier3HostArrival => ClockConfigDto::Tier3HostArrival,
+    };
+
+    let protocol = match &cfg.protocol {
+        SourceProtocolConfig::SimPreset(_) => ProtocolConfigDto::SimPreset,
+        SourceProtocolConfig::JustFloat(jf) => ProtocolConfigDto::JustFloat {
+            channel_names: jf.channel_names.clone(),
+        },
+        SourceProtocolConfig::FireWater(fw) => ProtocolConfigDto::FireWater {
+            channel_names: if !fw.channel_names.is_empty() {
+                fw.channel_names.clone()
+            } else {
+                fw.columns.iter().map(|c| c.name.clone()).collect()
+            },
+        },
+        SourceProtocolConfig::FixedSchemaBinary(fb) => ProtocolConfigDto::FixedSchemaBinary {
+            header_magic: fb.header_magic.clone(),
+            fields: fb
+                .fields
+                .iter()
+                .map(|f| FixedFieldSpecDto {
+                    name: f.name.clone(),
+                    scalar_type: scalar_type_to_str(f.scalar_type).to_string(),
+                    scale: f.scale.scale,
+                    offset: f.scale.offset,
+                    unit: f.unit.clone(),
+                    is_state_enum: f.is_state_enum,
+                })
+                .collect(),
+            has_hw_tick_first_col: fb.has_hw_tick_first_col,
+        },
+        SourceProtocolConfig::Custom { codec_id, .. } => {
+            return Err(ApiErrorDto::invalid_config(format!(
+                "custom protocol `{codec_id}` is not exportable as CreateSourceRequestDto"
+            )));
+        }
+    };
+
+    Ok(CreateSourceRequestDto {
+        source_id: cfg.source_id.as_str().to_owned(),
+        display_name: cfg.display_name.clone(),
+        transport,
+        clock,
+        protocol,
+        auto_start: cfg.auto_start,
     })
 }
 

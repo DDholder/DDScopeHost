@@ -1,9 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UiLocale } from "../i18n/index.ts";
 import { formatBytesCompact } from "../scope-engine/time-format.ts";
 import { ChannelTreeSidebar } from "./ChannelTreeSidebar.tsx";
 import { DockviewStage } from "./DockviewStage.tsx";
 import { DownlinkBar } from "./DownlinkBar.tsx";
+import { readJsonFileFromInput, saveJsonFile } from "./file-dialog.ts";
 import { SourceWizardModal } from "./SourceWizardModal.tsx";
 import { useWorkspaceStore } from "./store.ts";
 import { useI18n } from "./use-i18n.ts";
@@ -21,6 +22,16 @@ export function WorkspaceShell() {
   const setMockRateHz = useWorkspaceStore((s) => s.setMockRateHz);
   const injectGlitch = useWorkspaceStore((s) => s.injectGlitch);
   const rearmScope = useWorkspaceStore((s) => s.rearmScope);
+  const exportProjectConfig = useWorkspaceStore((s) => s.exportProjectConfig);
+  const importProjectConfig = useWorkspaceStore((s) => s.importProjectConfig);
+  const saveDefaultProjectConfig = useWorkspaceStore((s) => s.saveDefaultProjectConfig);
+
+  const [projectNotice, setProjectNotice] = useState<{
+    kind: "ok" | "warn" | "err";
+    text: string;
+  } | null>(null);
+  const [projectBusy, setProjectBusy] = useState(false);
+  const projectFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void initWorkspace();
@@ -30,6 +41,89 @@ export function WorkspaceShell() {
     Object.values(scopes).forEach((sc) => {
       rearmScope(sc.scopeId);
     });
+  };
+
+  const handleExportProject = async () => {
+    try {
+      const json = exportProjectConfig();
+      const saved = await saveJsonFile(json, "ddscope-project.json");
+      if (saved) {
+        setProjectNotice({
+          kind: "ok",
+          text: t("topbar.projectExported"),
+        });
+      }
+    } catch (err: unknown) {
+      setProjectNotice({
+        kind: "err",
+        text: t("topbar.projectConfigError", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      });
+    }
+  };
+
+  const handleImportProjectFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.currentTarget;
+    try {
+      const jsonText = await readJsonFileFromInput(input);
+      if (jsonText === null) return;
+      setProjectBusy(true);
+      const res = await importProjectConfig(jsonText);
+      if (res.missingChannelPaths.length > 0) {
+        setProjectNotice({
+          kind: "warn",
+          text: t("topbar.projectImportedMissing", {
+            sources: res.sourceCount,
+            scopes: res.scopeCount,
+            canvases: res.canvasCount,
+            missing: res.missingChannelPaths.length,
+          }),
+        });
+      } else {
+        setProjectNotice({
+          kind: "ok",
+          text: t("topbar.projectImported", {
+            sources: res.sourceCount,
+            scopes: res.scopeCount,
+            canvases: res.canvasCount,
+            widgets: res.widgetCount,
+          }),
+        });
+      }
+    } catch (err: unknown) {
+      setProjectNotice({
+        kind: "err",
+        text: t("topbar.projectConfigError", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      });
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  const handleSaveDefaultProject = async () => {
+    try {
+      setProjectBusy(true);
+      const res = await saveDefaultProjectConfig();
+      setProjectNotice({
+        kind: "ok",
+        text:
+          res.mode === "exe-dir"
+            ? t("topbar.projectDefaultSavedExe", { path: res.location })
+            : t("topbar.projectDefaultSavedBrowser"),
+      });
+    } catch (err: unknown) {
+      setProjectNotice({
+        kind: "err",
+        text: t("topbar.projectConfigError", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      });
+    } finally {
+      setProjectBusy(false);
+    }
   };
 
   const quotaPct =
@@ -50,6 +144,47 @@ export function WorkspaceShell() {
         <div className="ddscope-brand">
           <span className="ddscope-badge">DDScopeHost</span>
           <span className="ddscope-subtitle">{t("topbar.subtitle")}</span>
+        </div>
+
+        <div className="topbar-project-actions" data-testid="topbar-project-actions">
+          <button
+            type="button"
+            className="scope-btn-xs"
+            data-testid="export-project-btn"
+            title={t("topbar.exportProjectTitle")}
+            disabled={!initialized || projectBusy}
+            onClick={() => void handleExportProject()}
+          >
+            {t("topbar.exportProject")}
+          </button>
+          <button
+            type="button"
+            className="scope-btn-xs"
+            data-testid="import-project-btn"
+            title={t("topbar.importProjectTitle")}
+            disabled={!initialized || projectBusy}
+            onClick={() => projectFileInputRef.current?.click()}
+          >
+            {t("topbar.importProject")}
+          </button>
+          <button
+            type="button"
+            className="scope-btn-xs scope-btn-accent"
+            data-testid="save-default-project-btn"
+            title={t("topbar.saveDefaultProjectTitle")}
+            disabled={!initialized || projectBusy}
+            onClick={() => void handleSaveDefaultProject()}
+          >
+            {t("topbar.saveDefaultProject")}
+          </button>
+          <input
+            ref={projectFileInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: "none" }}
+            data-testid="import-project-input"
+            onChange={(e) => void handleImportProjectFile(e)}
+          />
         </div>
 
         <div className="ddscope-telemetry">
@@ -152,6 +287,22 @@ export function WorkspaceShell() {
           </select>
         </div>
       </header>
+
+      {projectNotice && (
+        <div
+          className={`config-io-notice config-io-notice-${projectNotice.kind}`}
+          data-testid="project-config-notice"
+        >
+          <span>{projectNotice.text}</span>
+          <button
+            type="button"
+            className="config-io-notice-close"
+            onClick={() => setProjectNotice(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <div className="ddscope-workspace-body">
         {initError ? (

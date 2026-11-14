@@ -5,6 +5,7 @@ import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
 import { channelValueToAxis } from "../scope-engine/layout.ts";
 import { formatMetricValue } from "../scope-engine/time-format.ts";
+import { ChannelBindSelect } from "./ChannelBindSelect.tsx";
 import type { DashboardWidgetItem } from "./types.ts";
 
 export interface RadialGaugeWidgetProps {
@@ -12,6 +13,7 @@ export interface RadialGaugeWidgetProps {
   channelsById: Record<number, ChannelNodeDto_Serialize>;
   locale: UiLocale;
   onUpdateWidget: (updater: (prev: DashboardWidgetItem) => DashboardWidgetItem) => void;
+  onBindChannel?: (channelId: number) => void;
 }
 
 const ARC_CIRCUMFERENCE = 2 * Math.PI * 40;
@@ -23,6 +25,7 @@ export function RadialGaugeWidget({
   channelsById,
   locale,
   onUpdateWidget,
+  onBindChannel,
 }: RadialGaugeWidgetProps) {
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
     translate(locale, key, params);
@@ -91,7 +94,16 @@ export function RadialGaugeWidget({
   }, [binding?.channelId, binding?.scale, binding?.offset, gaugeCfg.min, gaugeCfg.max, gaugeCfg.warnHigh]);
 
   if (!binding) {
-    return <div className="widget-unbound-box">{t("widget.unbound")}</div>;
+    return (
+      <div className="widget-unbound-box">
+        <span>{t("widget.unbound")}</span>
+        <ChannelBindSelect
+          channelsById={channelsById}
+          placeholder={t("widget.selectChannel")}
+          onBindChannel={onBindChannel}
+        />
+      </div>
+    );
   }
 
   return (

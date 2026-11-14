@@ -25,9 +25,32 @@ export const EN_MESSAGES = {
   "topbar.startingTitle": "Starting DDScopeHost High-Frequency Workbench...",
   "topbar.startingDesc":
     "Initializing DDSF v1 data bus, simulation worker, and WebGPU/WebGL2 stage.",
+  "topbar.exportProject": "Export Project",
+  "topbar.exportProjectTitle":
+    "Export complete project config (data sources + whole-page layout & controls) to a JSON file",
+  "topbar.importProject": "Load Project",
+  "topbar.importProjectTitle":
+    "Load a complete project config JSON file (replaces data sources and whole-page layout)",
+  "topbar.saveDefaultProject": "Save as Default",
+  "topbar.saveDefaultProjectTitle":
+    "Save current project config directly as the portable default alongside the application (auto-loaded on startup)",
+  "topbar.projectExported": "Exported complete project config.",
+  "topbar.projectImported":
+    "Loaded project ({sources} source(s), {scopes} scope(s), {canvases} canvas(es), {widgets} widget(s)).",
+  "topbar.projectImportedMissing":
+    "Loaded project ({sources} source(s), {scopes} scope(s), {canvases} canvas(es); {missing} channel path(s) unmatched).",
+  "topbar.projectDefaultSavedExe": "Saved as portable default project config: {path}",
+  "topbar.projectDefaultSavedBrowser":
+    "Saved as default project config in browser storage (desktop mode saves next to executable).",
+  "topbar.projectConfigError": "Project config error: {error}",
 
   // Channel Tree Sidebar
   "sidebar.title": "Sources & Channel Tree",
+  "sidebar.tab.sources": "Sources & Channels",
+  "sidebar.tab.toolbox": "Widget Toolbox",
+  "sidebar.emptySourcesTitle": "No Data Sources",
+  "sidebar.emptySourcesDesc":
+    "Click + New Source above to add a simulation, serial, network, or replay source.",
   "sidebar.newSource": "+ New Source",
   "sidebar.expandTitle": "Expand Sources & Channels",
   "sidebar.collapseTitle": "Collapse Sidebar",
@@ -45,6 +68,15 @@ export const EN_MESSAGES = {
   "sidebar.recTitle": "Toggle Bypass .ddraw Raw Recorder",
   "sidebar.del": "Del",
   "sidebar.delTitle": "Remove Source",
+  "sidebar.exportAllSources": "Export Config",
+  "sidebar.exportAllSourcesTitle": "Export all data source configurations to a JSON file",
+  "sidebar.importSources": "Load Config",
+  "sidebar.importSourcesTitle": "Load data source configurations from a JSON file",
+  "sidebar.exportOneSource": "Export",
+  "sidebar.exportOneSourceTitle": "Export this data source configuration",
+  "sidebar.sourcesExported": "Exported {count} data source config(s).",
+  "sidebar.sourcesImported": "Loaded {imported} source(s) ({skipped} skipped).",
+  "sidebar.sourcesImportError": "Failed to load sources config: {error}",
   "sidebar.seekTitle": "Seek File Position",
   "sidebar.speedTitle": "Playback Speed",
   "sidebar.dragRowTitle": "Drag onto any MSO Oscilloscope pane or click + to bind",
@@ -62,6 +94,18 @@ export const EN_MESSAGES = {
     "Create a new independent MSO oscilloscope viewport or drag channels from the sidebar.",
   "stage.addScope": "+ Add MSO Scope",
   "stage.addCanvas": "+ Add Canvas",
+  "stage.exportBoard": "Export Board",
+  "stage.exportBoardTitle":
+    "Export entire page layout, all oscilloscopes, canvases, widgets, and channel colors to JSON",
+  "stage.importBoard": "Load Board",
+  "stage.importBoardTitle":
+    "Load entire page layout and all widget/scope configurations from a JSON file",
+  "stage.boardExported": "Board configuration exported ({scopes} scope(s), {canvases} canvas(es)).",
+  "stage.boardImported":
+    "Board configuration loaded ({scopes} scope(s), {canvases} canvas(es), {widgets} widget(s)).",
+  "stage.boardImportedMissing":
+    "Board loaded ({scopes} scope(s), {canvases} canvas(es); {missing} channel path(s) unbound — load Sources Config if needed).",
+  "stage.boardImportError": "Failed to load board config: {error}",
   "stage.unavailable": "Scope #{id} is unavailable.",
   "stage.canvasUnavailable": "Canvas #{id} is unavailable.",
   "stage.splitStacked": "Split Stacked",
@@ -97,6 +141,7 @@ export const EN_MESSAGES = {
   "canvas.emptyDesc":
     "Drag any widget from the Widget Toolbox on the left, or drop a channel directly onto the grid.",
   "widget.unbound": "Drop a channel here",
+  "widget.selectChannel": "Select a channel...",
   "widget.configToggle": "Config",
   "widget.remove": "Remove widget",
   "widget.raw": "Raw",
@@ -145,6 +190,9 @@ export const EN_MESSAGES = {
   "scope.zeroYTitle": "Reset vertical coordinate axis center to 0",
   "scope.channelCondTitle": "Configure per-channel scale & offset",
   "scope.channelCondLabel": "Channel Scale & Offset",
+  "scope.channelColorTitle": "Set channel waveform color",
+  "scope.channelColorLabel": "Channel Waveform Color",
+  "scope.customColor": "Color",
   "scope.chScale": "Scale",
   "scope.chOffset": "Offset",
   "scope.chReset": "Reset 1×/+0",
@@ -250,6 +298,7 @@ export const EN_MESSAGES = {
   "wizard.codec.fireWater": "FireWater (SIMD CSV)",
   "wizard.codec.fixedSchema": "FixedSchemaBinary (Mixed Struct)",
   "wizard.pllRate": "PLL Nominal Sample Rate (Hz)",
+  "wizard.pllAuto": "Auto-estimate sample rate (OLS)",
   "wizard.hwTick": "Hardware Tick Clock (Hz)",
   "wizard.channelNames": "Channel Names (comma separated)",
   "wizard.autoStart": "Auto-Start Acquisition Immediately",
@@ -282,9 +331,31 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "topbar.startingTitle": "正在启动 DDScopeHost 高频多域示波工作台...",
   "topbar.startingDesc":
     "正在初始化 DDSF v1 二进制总线、仿真 Worker 与 WebGPU/WebGL2 渲染管线。",
+  "topbar.exportProject": "导出项目",
+  "topbar.exportProjectTitle":
+    "导出完整项目配置（数据源 + 整页画板排布与控件配置）到 JSON 文件",
+  "topbar.importProject": "加载项目",
+  "topbar.importProjectTitle":
+    "从 JSON 文件加载完整项目配置（恢复数据源与整页画板排布）",
+  "topbar.saveDefaultProject": "设为默认",
+  "topbar.saveDefaultProjectTitle":
+    "直接将当前项目配置保存为默认配置（存放在程序同级目录，下次启动自动加载）",
+  "topbar.projectExported": "完整项目配置已导出。",
+  "topbar.projectImported":
+    "项目配置已加载（{sources} 个数据源，{scopes} 个示波器，{canvases} 个画布，{widgets} 个控件）。",
+  "topbar.projectImportedMissing":
+    "项目配置已加载（{sources} 个数据源，{scopes} 个示波器，{canvases} 个画布；{missing} 条通道路径未匹配）。",
+  "topbar.projectDefaultSavedExe": "已保存为程序同级目录默认配置：{path}",
+  "topbar.projectDefaultSavedBrowser":
+    "已保存为浏览器默认项目配置（桌面端将直接保存于程序同级目录）。",
+  "topbar.projectConfigError": "项目配置操作失败：{error}",
 
   // Channel Tree Sidebar
   "sidebar.title": "数据源与通道树",
+  "sidebar.tab.sources": "数据源 / 通道",
+  "sidebar.tab.toolbox": "控件箱",
+  "sidebar.emptySourcesTitle": "暂无数据源",
+  "sidebar.emptySourcesDesc": "点击上方「+ 新建数据源」添加仿真、串口、网络或文件回放数据源。",
   "sidebar.newSource": "+ 新建数据源",
   "sidebar.expandTitle": "展开数据源与通道树",
   "sidebar.collapseTitle": "收起侧边栏",
@@ -302,6 +373,15 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "sidebar.recTitle": "开关旁路直录 .ddraw 原始数据文件",
   "sidebar.del": "删除",
   "sidebar.delTitle": "移除数据源",
+  "sidebar.exportAllSources": "导出配置",
+  "sidebar.exportAllSourcesTitle": "导出全部数据源配置为 JSON 文件",
+  "sidebar.importSources": "加载配置",
+  "sidebar.importSourcesTitle": "从 JSON 文件加载并恢复数据源配置",
+  "sidebar.exportOneSource": "导出",
+  "sidebar.exportOneSourceTitle": "导出此数据源配置",
+  "sidebar.sourcesExported": "已导出 {count} 个数据源配置。",
+  "sidebar.sourcesImported": "已加载 {imported} 个数据源（跳过 {skipped} 个）。",
+  "sidebar.sourcesImportError": "加载数据源配置失败：{error}",
   "sidebar.seekTitle": "定位文件回放进度",
   "sidebar.speedTitle": "回放倍速",
   "sidebar.dragRowTitle": "拖拽至任意 MSO 示波器窗格，或点击 + 快捷绑定",
@@ -318,6 +398,17 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "stage.emptyDesc": "点击下方按钮新建独立 MSO 示波器视口，或从左侧通道树拖拽通道。",
   "stage.addScope": "+ 新建示波器",
   "stage.addCanvas": "+ 新建测控画布",
+  "stage.exportBoard": "导出画板配置",
+  "stage.exportBoardTitle":
+    "导出整个页面的分屏排布、全部示波器、测控画布、控件与通道颜色配置",
+  "stage.importBoard": "加载画板配置",
+  "stage.importBoardTitle": "从 JSON 文件加载并恢复整个页面的控件排布与配置",
+  "stage.boardExported": "整页画板配置已导出（{scopes} 个示波器，{canvases} 个测控画布）。",
+  "stage.boardImported":
+    "整页画板配置已加载（{scopes} 个示波器，{canvases} 个画布，{widgets} 个控件）。",
+  "stage.boardImportedMissing":
+    "整页画板已加载（{scopes} 个示波器，{canvases} 个画布；有 {missing} 条通道路径未匹配，可先加载对应数据源配置）。",
+  "stage.boardImportError": "加载画板配置失败：{error}",
   "stage.unavailable": "示波器 #{id} 不可用。",
   "stage.canvasUnavailable": "测控画布 #{id} 不可用。",
   "stage.splitStacked": "上下分屏",
@@ -351,6 +442,7 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "canvas.emptyTitle": "当前画布暂无控件",
   "canvas.emptyDesc": "请从左侧「控件箱」拖拽控件到此画布，或直接拖入通道生成实时仪表。",
   "widget.unbound": "请将左侧通道拖入此处",
+  "widget.selectChannel": "选择绑定通道...",
   "widget.configToggle": "配置",
   "widget.remove": "移除控件",
   "widget.raw": "原始值",
@@ -398,6 +490,9 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "scope.zeroYTitle": "重置纵坐标轴中心偏移为 0",
   "scope.channelCondTitle": "独立配置当前通道的缩放倍率与偏置",
   "scope.channelCondLabel": "通道独立缩放与偏置",
+  "scope.channelColorTitle": "设置通道波形颜色",
+  "scope.channelColorLabel": "通道波形颜色",
+  "scope.customColor": "颜色",
   "scope.chScale": "缩放",
   "scope.chOffset": "偏置",
   "scope.chReset": "复位 1×/+0",
@@ -502,6 +597,7 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "wizard.codec.fireWater": "FireWater (SIMD 高速 CSV)",
   "wizard.codec.fixedSchema": "FixedSchemaBinary (混合结构体二进制)",
   "wizard.pllRate": "PLL 标称采样率 (Hz)",
+  "wizard.pllAuto": "自动估算采样率 (OLS 自适应)",
   "wizard.hwTick": "硬件计数时钟频率 (Hz)",
   "wizard.channelNames": "通道名称列表 (逗号分隔)",
   "wizard.autoStart": "创建后立即启动采集",

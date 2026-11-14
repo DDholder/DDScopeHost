@@ -1157,13 +1157,15 @@ impl NativeScalarSeries {
         }
 
         // 3. Columns mode: Select pyramid level L
-        // Select coarsest level where bucket duration <= dt_pixel (samples_per_pixel >= span)
-        let samples_per_pixel = sample_count_in_range / w_px;
+        // Require >= 4 buckets/samples per pixel on average so bucket midpoints cover pixel slots densely
+        // without multi-pixel ZOH staircase plateaus; fall back to Level 0 (direct raw sample aggregation)
+        // when < 256 samples/pixel.
         let inv_dt_pixel = (w_px as f64) / ((t_max - t_min) as f64);
         let mut slots = vec![PixelSlot::EMPTY; w_px];
 
-        if samples_per_pixel >= 16_777_216 && !self.pyramid.l4.is_empty() {
-            // Level 4
+        if sample_count_in_range >= w_px.saturating_mul(67_108_864) && !self.pyramid.l4.is_empty()
+        {
+            // Level 4 (4 * 16_777_216 samples/px)
             for b in self.pyramid.l4.as_slice() {
                 feed_bucket_into_slots(&mut slots, b, t_min, t_max, inv_dt_pixel, w_px);
             }
@@ -1184,8 +1186,10 @@ impl NativeScalarSeries {
                     &mut slots,
                 );
             }
-        } else if samples_per_pixel >= 262_144 && !self.pyramid.l3.is_empty() {
-            // Level 3
+        } else if sample_count_in_range >= w_px.saturating_mul(1_048_576)
+            && !self.pyramid.l3.is_empty()
+        {
+            // Level 3 (4 * 262_144 samples/px)
             for b in self.pyramid.l3.as_slice() {
                 feed_bucket_into_slots(&mut slots, b, t_min, t_max, inv_dt_pixel, w_px);
             }
@@ -1203,15 +1207,21 @@ impl NativeScalarSeries {
                     &mut slots,
                 );
             }
-        } else if samples_per_pixel >= 4_096 {
-            // Level 2
+        } else if sample_count_in_range >= w_px.saturating_mul(16_384) {
+            // Level 2 (4 * 4_096 samples/px)
             for c in start_chunk..end_chunk {
                 let handle = &self.sealed_chunks[c];
                 if let ChunkStorageRef::InMemory(data_chunk) = &handle.storage {
                     if let DataChunk::Scalar(sc) = data_chunk.as_ref() {
-                        for b in sc.m4.l2.as_slice() {
-                            feed_bucket_into_slots(&mut slots, b, t_min, t_max, inv_dt_pixel, w_px);
-                        }
+                        feed_sealed_scalar_chunk_level(
+                            sc,
+                            2,
+                            t_min,
+                            t_max,
+                            inv_dt_pixel,
+                            w_px,
+                            &mut slots,
+                        );
                     }
                 }
             }
@@ -1226,15 +1236,21 @@ impl NativeScalarSeries {
                     &mut slots,
                 );
             }
-        } else {
-            // Level 1
+        } else if sample_count_in_range >= w_px.saturating_mul(256) {
+            // Level 1 (4 * 64 samples/px)
             for c in start_chunk..end_chunk {
                 let handle = &self.sealed_chunks[c];
                 if let ChunkStorageRef::InMemory(data_chunk) = &handle.storage {
                     if let DataChunk::Scalar(sc) = data_chunk.as_ref() {
-                        for b in sc.m4.l1.as_slice() {
-                            feed_bucket_into_slots(&mut slots, b, t_min, t_max, inv_dt_pixel, w_px);
-                        }
+                        feed_sealed_scalar_chunk_level(
+                            sc,
+                            1,
+                            t_min,
+                            t_max,
+                            inv_dt_pixel,
+                            w_px,
+                            &mut slots,
+                        );
                     }
                 }
             }
@@ -1244,6 +1260,35 @@ impl NativeScalarSeries {
                     &self.scale,
                     1,
                     (t_min, t_max),
+                    inv_dt_pixel,
+                    w_px,
+                    &mut slots,
+                );
+            }
+        } else {
+            // Level 0 (2 < samples/px < 256): direct raw-sample M4 reduction per pixel column
+            for c in start_chunk..end_chunk {
+                let handle = &self.sealed_chunks[c];
+                if let ChunkStorageRef::InMemory(data_chunk) = &handle.storage {
+                    if let DataChunk::Scalar(sc) = data_chunk.as_ref() {
+                        feed_sealed_scalar_chunk_level(
+                            sc,
+                            0,
+                            t_min,
+                            t_max,
+                            inv_dt_pixel,
+                            w_px,
+                            &mut slots,
+                        );
+                    }
+                }
+            }
+            if active_intersects {
+                feed_raw_samples_from_active_chunk(
+                    &self.active,
+                    &self.scale,
+                    t_min,
+                    t_max,
                     inv_dt_pixel,
                     w_px,
                     &mut slots,
@@ -1326,19 +1371,17 @@ fn count_active_samples_in_range(
     idx_end.saturating_sub(idx_start)
 }
 
-/// Extracts raw points from a sealed ScalarDataChunk within [t_min, t_max].
-fn extract_raw_points_from_scalar_chunk(
+/// Returns the half-open sample index range `[idx_start, idx_end)` in a sealed
+/// [`ScalarDataChunk`] whose timestamps fall within `[t_min, t_max]`.
+fn scalar_chunk_index_range(
     sc: &ScalarDataChunk,
     t_min: TimestampNs,
     t_max: TimestampNs,
-    span: f32,
-    out: &mut Vec<DdsfAnalogPoint>,
-) {
-    let len = sc.len();
-    if len == 0 {
-        return;
+) -> Option<(usize, usize)> {
+    if sc.is_empty() {
+        return None;
     }
-    let (idx_start, idx_end) = match &sc.timestamps {
+    let range = match &sc.timestamps {
         TimestampColumn::RelU32 {
             base_ts_ns,
             rel_ns,
@@ -1350,12 +1393,12 @@ fn extract_raw_points_from_scalar_chunk(
             } else {
                 let diff = t_min - base;
                 if diff > u32::MAX as u64 {
-                    return;
+                    return None;
                 }
                 diff as u32
             };
             let end_rel = if t_max < base {
-                return;
+                return None;
             } else {
                 let diff = t_max - base;
                 diff.min(u32::MAX as u64) as u32
@@ -1373,6 +1416,45 @@ fn extract_raw_points_from_scalar_chunk(
             )
         }
     };
+    Some(range)
+}
+
+/// Accumulates a single raw sample `(t, val)` directly into its pixel column slot.
+#[inline(always)]
+fn feed_raw_sample_into_slots(
+    slots: &mut [PixelSlot],
+    t: TimestampNs,
+    val: f32,
+    t_min: TimestampNs,
+    inv_dt_pixel: f64,
+    w_px: usize,
+) {
+    let p = (((t.saturating_sub(t_min)) as f64 * inv_dt_pixel) as usize).min(w_px - 1);
+    let slot = &mut slots[p];
+    if !slot.has_data {
+        slot.v_first = val;
+        slot.v_min = val;
+        slot.v_max = val;
+        slot.v_last = val;
+        slot.has_data = true;
+    } else {
+        slot.v_min = slot.v_min.min(val);
+        slot.v_max = slot.v_max.max(val);
+        slot.v_last = val;
+    }
+}
+
+/// Extracts raw points from a sealed ScalarDataChunk within [t_min, t_max].
+fn extract_raw_points_from_scalar_chunk(
+    sc: &ScalarDataChunk,
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    span: f32,
+    out: &mut Vec<DdsfAnalogPoint>,
+) {
+    let Some((idx_start, idx_end)) = scalar_chunk_index_range(sc, t_min, t_max) else {
+        return;
+    };
 
     for i in idx_start..idx_end {
         if let Some((t, val)) = sc.get_sample_as_f64(i) {
@@ -1386,6 +1468,103 @@ fn extract_raw_points_from_scalar_chunk(
                 y_val: val as f32,
             });
         }
+    }
+}
+
+/// Feeds raw samples from a sealed [`ScalarDataChunk`] within `[t_min, t_max]` directly into
+/// pixel slots (Level 0 fine decimation when `< 256` samples/pixel).
+fn feed_raw_samples_from_scalar_chunk(
+    sc: &ScalarDataChunk,
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    inv_dt_pixel: f64,
+    w_px: usize,
+    slots: &mut [PixelSlot],
+) {
+    let Some((idx_start, idx_end)) = scalar_chunk_index_range(sc, t_min, t_max) else {
+        return;
+    };
+
+    for i in idx_start..idx_end {
+        if let Some((t, val)) = sc.get_sample_as_f64(i) {
+            feed_raw_sample_into_slots(slots, t, val as f32, t_min, inv_dt_pixel, w_px);
+        }
+    }
+}
+
+/// Feeds raw samples from [`ActiveScalarChunk`] within `[t_min, t_max]` directly into pixel slots.
+fn feed_raw_samples_from_active_chunk(
+    active: &ActiveScalarChunk,
+    scale: &LinearScale,
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    inv_dt_pixel: f64,
+    w_px: usize,
+    slots: &mut [PixelSlot],
+) {
+    let slice = active.timestamps();
+    if slice.is_empty() {
+        return;
+    }
+    let idx_start = slice.partition_point(|&a| a < t_min);
+    let idx_end = slice.partition_point(|&a| a <= t_max);
+
+    for i in idx_start..idx_end {
+        if let Some((t, val)) = active.get_sample_as_f64(i, scale) {
+            feed_raw_sample_into_slots(slots, t, val as f32, t_min, inv_dt_pixel, w_px);
+        }
+    }
+}
+
+/// Feeds a sealed [`ScalarDataChunk`] into pixel slots at the chosen pyramid level (`0`, `1`, or `2`),
+/// covering any unaligned tail when a chunk's pyramid levels are partial.
+fn feed_sealed_scalar_chunk_level(
+    sc: &ScalarDataChunk,
+    target_level: usize,
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    inv_dt_pixel: f64,
+    w_px: usize,
+    slots: &mut [PixelSlot],
+) {
+    if target_level >= 2 {
+        for b in sc.m4.l2.as_slice() {
+            feed_bucket_into_slots(slots, b, t_min, t_max, inv_dt_pixel, w_px);
+        }
+        let l1_slice = sc.m4.l1.as_slice();
+        let l2_covered_l1 = sc.m4.l2.len().saturating_mul(M4_BRANCH_FACTOR);
+        if l2_covered_l1 < l1_slice.len() {
+            for b in &l1_slice[l2_covered_l1..] {
+                feed_bucket_into_slots(slots, b, t_min, t_max, inv_dt_pixel, w_px);
+            }
+        }
+        let l1_covered_raw = l1_slice.len().saturating_mul(M4_BRANCH_FACTOR);
+        if l1_covered_raw < sc.len() {
+            for i in l1_covered_raw..sc.len() {
+                if let Some((t, val)) = sc.get_sample_as_f64(i) {
+                    if t >= t_min && t <= t_max {
+                        feed_raw_sample_into_slots(slots, t, val as f32, t_min, inv_dt_pixel, w_px);
+                    }
+                }
+            }
+        }
+    } else if target_level == 1 {
+        let l1_slice = sc.m4.l1.as_slice();
+        for b in l1_slice {
+            feed_bucket_into_slots(slots, b, t_min, t_max, inv_dt_pixel, w_px);
+        }
+        let l1_covered_raw = l1_slice.len().saturating_mul(M4_BRANCH_FACTOR);
+        if l1_covered_raw < sc.len() {
+            for i in l1_covered_raw..sc.len() {
+                if let Some((t, val)) = sc.get_sample_as_f64(i) {
+                    if t >= t_min && t <= t_max {
+                        feed_raw_sample_into_slots(slots, t, val as f32, t_min, inv_dt_pixel, w_px);
+                    }
+                }
+            }
+        }
+    } else {
+        feed_raw_samples_from_scalar_chunk(sc, t_min, t_max, inv_dt_pixel, w_px, slots);
     }
 }
 
@@ -1587,20 +1766,27 @@ pub fn query_chunks_m4_viewport(
         return Ok(M4QueryResult::Raw(raw_points));
     }
 
-    let samples_per_pixel = sample_count_in_range / w_px;
+    let target_level = if sample_count_in_range >= w_px.saturating_mul(16_384) {
+        2
+    } else if sample_count_in_range >= w_px.saturating_mul(256) {
+        1
+    } else {
+        0
+    };
     let inv_dt_pixel = (w_px as f64) / ((t_max - t_min) as f64);
     let mut slots = vec![PixelSlot::EMPTY; w_px];
 
     for chunk in &chunks[first_intersect_idx..end_intersect_idx] {
         if let DataChunk::Scalar(sc) = chunk.as_ref() {
-            let buckets = if samples_per_pixel >= 4_096 {
-                sc.m4.l2.as_slice()
-            } else {
-                sc.m4.l1.as_slice()
-            };
-            for b in buckets {
-                feed_bucket_into_slots(&mut slots, b, t_min, t_max, inv_dt_pixel, w_px);
-            }
+            feed_sealed_scalar_chunk_level(
+                sc,
+                target_level,
+                t_min,
+                t_max,
+                inv_dt_pixel,
+                w_px,
+                &mut slots,
+            );
         }
     }
 
@@ -2946,5 +3132,100 @@ mod tests {
 
         // Looking up earlier timestamp returns None
         assert!(series.get_sample_by_timestamp(10_000).is_none());
+    }
+
+    #[test]
+    fn test_query_m4_viewport_no_zoh_staircase_in_l0_and_l1_transition() {
+        let mut series =
+            NativeScalarSeries::new(ChannelId(1), ScalarType::F32, LinearScale::identity());
+        let quota = Arc::new(MemoryQuotaManager::with_default_quota());
+        series.set_quota_manager(Arc::clone(&quota));
+
+        // 200,000 samples (3 sealed chunks + active tail) of a smooth sine wave (period = 1000 samples).
+        let total_n = 200_000usize;
+        let dt_ns = 500u64; // 2 MHz
+        let freq_period_samples = 1000.0_f64;
+        let ts: Vec<TimestampNs> = (0..total_n).map(|i| (i as u64) * dt_ns).collect();
+        let vals: Vec<f32> = (0..total_n)
+            .map(|i| (10.0 * (2.0 * std::f64::consts::PI * (i as f64) / freq_period_samples).sin()) as f32)
+            .collect();
+        series.append(&ts, ScalarSlice::F32(&vals)).expect("append ok");
+
+        // Case A: Former staircase zone: N = 2,400 samples across w_px = 800 (3 samples/px).
+        // Previously fell into 64-sample L1 buckets and emitted ~26-pixel flat ZOH staircases!
+        let t_a_start = 10_000 * dt_ns;
+        let t_a_end = (10_000 + 2_399) * dt_ns;
+        let res_a = series.query_m4_viewport(t_a_start, t_a_end, 800).unwrap();
+        let cols_a = match res_a {
+            M4QueryResult::Columns(cols) => cols,
+            M4QueryResult::Raw(_) => panic!("expected Columns mode for N = 2,400, w_px = 800"),
+        };
+        assert_eq!(cols_a.len(), 800);
+
+        // Verify zero multi-pixel flat ZOH runs and bounded per-column slope across sine wave.
+        let mut max_flat_run = 0usize;
+        let mut cur_flat_run = 1usize;
+        let mut max_adj_jump = 0.0_f32;
+        for i in 1..cols_a.len() {
+            let prev = cols_a[i - 1];
+            let curr = cols_a[i];
+            if (curr.v_min - prev.v_min).abs() < 1e-4 && (curr.v_max - prev.v_max).abs() < 1e-4 {
+                cur_flat_run += 1;
+                max_flat_run = max_flat_run.max(cur_flat_run);
+            } else {
+                cur_flat_run = 1;
+            }
+            max_adj_jump = max_adj_jump.max((curr.v_first - prev.v_last).abs());
+            assert!(
+                (curr.v_max - curr.v_min) < 0.25,
+                "Column {} envelope height {} too wide for 3 samples/px smooth sine",
+                i,
+                curr.v_max - curr.v_min
+            );
+        }
+        assert!(
+            max_flat_run <= 2,
+            "Unexpected flat ZOH staircase run of {} pixels at 3 samples/px",
+            max_flat_run
+        );
+        assert!(
+            max_adj_jump < 0.25,
+            "Unexpected vertical staircase jump {} at 3 samples/px",
+            max_adj_jump
+        );
+
+        // Case B: Pinned chunks query_chunks_m4_viewport at 3 samples/px also uses smooth L0.
+        let guard = series.pin_range(t_a_start, t_a_end).unwrap();
+        let pinned_res = query_chunks_m4_viewport(guard.chunks(), t_a_start, t_a_end, 800).unwrap();
+        let pinned_cols = match pinned_res {
+            M4QueryResult::Columns(cols) => cols,
+            M4QueryResult::Raw(_) => panic!("expected Columns mode from query_chunks_m4_viewport"),
+        };
+        assert_eq!(pinned_cols.len(), 800);
+        for i in 1..pinned_cols.len() {
+            let jump = (pinned_cols[i].v_first - pinned_cols[i - 1].v_last).abs();
+            assert!(
+                jump < 0.25,
+                "Pinned chunk query emitted staircase jump {} at col {}",
+                jump,
+                i
+            );
+        }
+
+        // Case C: L1 boundary (>= 256 samples/px): N = 200,000 samples over w_px = 500 (400 samples/px).
+        let res_c = series
+            .query_m4_viewport(ts[0], ts[total_n - 1], 500)
+            .unwrap();
+        let cols_c = match res_c {
+            M4QueryResult::Columns(cols) => cols,
+            M4QueryResult::Raw(_) => panic!("expected Columns mode for N = 200,000, w_px = 500"),
+        };
+        assert_eq!(cols_c.len(), 500);
+        let max_v = cols_c
+            .iter()
+            .map(|c| c.v_max)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_v = cols_c.iter().map(|c| c.v_min).fold(f32::INFINITY, f32::min);
+        assert!(max_v > 9.95 && min_v < -9.95, "Amplitude must be preserved");
     }
 }

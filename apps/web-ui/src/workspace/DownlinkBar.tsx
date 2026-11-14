@@ -17,17 +17,19 @@ export function DownlinkBar() {
   const sendDownlink = useWorkspaceStore((s) => s.sendDownlink);
   const injectGlitch = useWorkspaceStore((s) => s.injectGlitch);
 
-  const [targetSource, setTargetSource] = useState("sim0");
-  const [priority, setPriority] = useState<DownlinkPriorityDto>("normal");
+  const downlinkConfig = useWorkspaceStore((s) => s.downlinkConfig);
+  const updateDownlinkConfig = useWorkspaceStore((s) => s.updateDownlinkConfig);
+  const { priority, manualMode, asciiText, appendNewline, hexText, kvKey, kvVal } =
+    downlinkConfig;
+  const targetSource =
+    channelGroups.length === 0
+      ? ""
+      : channelGroups.some((g) => g.source.source_id === downlinkConfig.targetSource)
+        ? downlinkConfig.targetSource
+        : channelGroups[0].source.source_id;
+
   const [kpLocal, setKpLocal] = useState(downlinkStats.motorKp);
   const [freqLocal, setFreqLocal] = useState(downlinkStats.motorFreqHz);
-
-  const [manualMode, setManualMode] = useState<ManualPayloadMode>("ascii_text");
-  const [asciiText, setAsciiText] = useState("SET_MODE=FOC_RUN");
-  const [appendNewline, setAppendNewline] = useState(true);
-  const [hexText, setHexText] = useState("AA 55 01 10");
-  const [kvKey, setKvKey] = useState("kp");
-  const [kvVal, setKvVal] = useState("1.75");
   const [manualError, setManualError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -38,14 +40,8 @@ export function DownlinkBar() {
     setFreqLocal(downlinkStats.motorFreqHz);
   }, [downlinkStats.motorFreqHz]);
 
-  useEffect(() => {
-    if (channelGroups.length === 0) return;
-    if (!channelGroups.some((g) => g.source.source_id === targetSource)) {
-      setTargetSource(channelGroups[0].source.source_id);
-    }
-  }, [channelGroups, targetSource]);
-
   const handleSliderKp = (val: number) => {
+    if (!targetSource) return;
     setKpLocal(val);
     void sendDownlink(
       {
@@ -60,6 +56,7 @@ export function DownlinkBar() {
   };
 
   const handleSliderFreq = (val: number) => {
+    if (!targetSource) return;
     setFreqLocal(val);
     void sendDownlink(
       {
@@ -74,6 +71,7 @@ export function DownlinkBar() {
   };
 
   const handleBurstCoalesce = async () => {
+    if (!targetSource) return;
     const base = kpLocal;
     const tasks: Promise<unknown>[] = [];
     for (let i = 1; i <= 10; i += 1) {
@@ -97,6 +95,7 @@ export function DownlinkBar() {
 
   const handleManualSend = async (ev: FormEvent) => {
     ev.preventDefault();
+    if (!targetSource) return;
     setManualError(null);
     try {
       if (manualMode === "ascii_text") {
@@ -251,8 +250,10 @@ export function DownlinkBar() {
               <select
                 className="scope-select"
                 value={targetSource}
-                onChange={(e) => setTargetSource(e.target.value)}
+                disabled={channelGroups.length === 0}
+                onChange={(e) => updateDownlinkConfig({ targetSource: e.target.value })}
               >
+                {channelGroups.length === 0 && <option value="">--</option>}
                 {channelGroups.map((g) => (
                   <option key={g.source.source_id} value={g.source.source_id}>
                     {g.source.source_id}
@@ -265,7 +266,9 @@ export function DownlinkBar() {
               <select
                 className="scope-select"
                 value={priority}
-                onChange={(e) => setPriority(e.target.value as DownlinkPriorityDto)}
+                onChange={(e) =>
+                  updateDownlinkConfig({ priority: e.target.value as DownlinkPriorityDto })
+                }
               >
                 <option value="normal">{t("downlink.prioNormal")}</option>
                 <option value="high">{t("downlink.prioHigh")}</option>
@@ -276,6 +279,7 @@ export function DownlinkBar() {
               className="scope-btn scope-btn-accent"
               data-testid="burst-coalesce-btn"
               title={t("downlink.burstTitle")}
+              disabled={!targetSource}
               onClick={() => void handleBurstCoalesce()}
             >
               {t("downlink.burstBtn")}
@@ -283,13 +287,14 @@ export function DownlinkBar() {
           </div>
 
           <div className="downlink-slider-row">
-            <span className="downlink-slider-key">{targetSource}:kp</span>
+            <span className="downlink-slider-key">{targetSource ? `${targetSource}:kp` : "kp"}</span>
             <input
               type="range"
               min={0.1}
               max={5.0}
               step={0.05}
               value={kpLocal}
+              disabled={!targetSource}
               data-testid="slider-kp"
               onChange={(e) => handleSliderKp(Number(e.target.value))}
             />
@@ -297,13 +302,16 @@ export function DownlinkBar() {
           </div>
 
           <div className="downlink-slider-row">
-            <span className="downlink-slider-key">{targetSource}:freq_hz</span>
+            <span className="downlink-slider-key">
+              {targetSource ? `${targetSource}:freq_hz` : "freq_hz"}
+            </span>
             <input
               type="range"
               min={5}
               max={200}
               step={1}
               value={freqLocal}
+              disabled={!targetSource}
               data-testid="slider-freq"
               onChange={(e) => handleSliderFreq(Number(e.target.value))}
             />
@@ -318,7 +326,9 @@ export function DownlinkBar() {
               className="scope-select"
               value={manualMode}
               data-testid="manual-tx-mode"
-              onChange={(e) => setManualMode(e.target.value as ManualPayloadMode)}
+              onChange={(e) =>
+                updateDownlinkConfig({ manualMode: e.target.value as ManualPayloadMode })
+              }
             >
               <option value="ascii_text">{t("downlink.modeAscii")}</option>
               <option value="hex_bytes">{t("downlink.modeHex")}</option>
@@ -332,14 +342,14 @@ export function DownlinkBar() {
                   className="downlink-input"
                   value={asciiText}
                   data-testid="manual-tx-ascii-input"
-                  onChange={(e) => setAsciiText(e.target.value)}
+                  onChange={(e) => updateDownlinkConfig({ asciiText: e.target.value })}
                   placeholder={t("downlink.asciiPlaceholder")}
                 />
                 <label className="downlink-nl-check">
                   <input
                     type="checkbox"
                     checked={appendNewline}
-                    onChange={(e) => setAppendNewline(e.target.checked)}
+                    onChange={(e) => updateDownlinkConfig({ appendNewline: e.target.checked })}
                   />
                   \n
                 </label>
@@ -352,7 +362,7 @@ export function DownlinkBar() {
                 className="downlink-input"
                 value={hexText}
                 data-testid="manual-tx-hex-input"
-                onChange={(e) => setHexText(e.target.value)}
+                onChange={(e) => updateDownlinkConfig({ hexText: e.target.value })}
                 placeholder="AA 55 01 FF"
               />
             )}
@@ -363,14 +373,14 @@ export function DownlinkBar() {
                   type="text"
                   className="downlink-input downlink-input-key"
                   value={kvKey}
-                  onChange={(e) => setKvKey(e.target.value)}
+                  onChange={(e) => updateDownlinkConfig({ kvKey: e.target.value })}
                   placeholder={t("downlink.keyPlaceholder")}
                 />
                 <input
                   type="text"
                   className="downlink-input downlink-input-val"
                   value={kvVal}
-                  onChange={(e) => setKvVal(e.target.value)}
+                  onChange={(e) => updateDownlinkConfig({ kvVal: e.target.value })}
                   placeholder={t("downlink.valPlaceholder")}
                 />
               </>
@@ -380,6 +390,7 @@ export function DownlinkBar() {
               type="submit"
               className="scope-btn scope-btn-accent"
               data-testid="manual-tx-send-btn"
+              disabled={!targetSource}
             >
               {t("downlink.sendTx")}
             </button>

@@ -6,6 +6,7 @@ import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
 import { channelValueToAxis } from "../scope-engine/layout.ts";
 import { formatMetricValue } from "../scope-engine/time-format.ts";
+import { ChannelBindSelect } from "./ChannelBindSelect.tsx";
 import type { DashboardWidgetItem, WidgetChannelBinding } from "./types.ts";
 
 export interface WatchTableWidgetProps {
@@ -13,6 +14,7 @@ export interface WatchTableWidgetProps {
   channelsById: Record<number, ChannelNodeDto_Serialize>;
   locale: UiLocale;
   onUpdateWidget: (updater: (prev: DashboardWidgetItem) => DashboardWidgetItem) => void;
+  onBindChannel?: (channelId: number) => void;
 }
 
 export function WatchTableWidget({
@@ -20,6 +22,7 @@ export function WatchTableWidget({
   channelsById,
   locale,
   onUpdateWidget,
+  onBindChannel,
 }: WatchTableWidgetProps) {
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
     translate(locale, key, params);
@@ -112,7 +115,16 @@ export function WatchTableWidget({
   }, [widget.bindings, channelsById, locale, flushRows]);
 
   if (widget.bindings.length === 0) {
-    return <div className="widget-unbound-box">{t("widget.watch.empty")}</div>;
+    return (
+      <div className="widget-unbound-box">
+        <span>{t("widget.watch.empty")}</span>
+        <ChannelBindSelect
+          channelsById={channelsById}
+          placeholder={t("widget.selectChannel")}
+          onBindChannel={onBindChannel}
+        />
+      </div>
+    );
   }
 
   return (

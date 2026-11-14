@@ -23,6 +23,7 @@ pub fn create_specta_builder() -> Builder<tauri::Wry> {
             commands::seek_replay_source,
             commands::set_raw_recorder,
             commands::get_channel_tree,
+            commands::get_source_configs,
             commands::upsert_scope_viewport,
             commands::remove_scope_viewport,
             commands::rearm_scope,
@@ -32,6 +33,9 @@ pub fn create_specta_builder() -> Builder<tauri::Wry> {
             commands::detach_data_bridge,
             commands::get_data_bridge_stats,
             commands::set_data_bridge_rate,
+            commands::load_default_project_config,
+            commands::save_default_project_config,
+            commands::clear_default_project_config,
         ])
         .events(collect_events![commands::WorkspaceTelemetryEvent])
 }

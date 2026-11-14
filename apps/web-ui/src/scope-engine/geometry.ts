@@ -404,15 +404,16 @@ export class ScopeGeometryBuilder {
     const [r, g, b, a] = rgbaNumberToFloat4(cfg.colorRgba);
     const plotLeftPx = rect.x * dpr;
     const plotWidthPx = rect.width * dpr;
-    const colHalfW = Math.max(0.75 * dpr, (plotWidthPx / Math.max(1, count)) * 0.55);
-    const aaHalfW = 1.05 * dpr;
+    const colStepPx = plotWidthPx / Math.max(1, count);
+    const colHalfW = Math.max(0.75 * dpr, colStepPx * 0.52);
+    const aaHalfW = 1.35 * dpr;
 
     const toYPx = (v: number): number =>
       (axisConfig
         ? channelValueToY(v, rect, axisConfig, cfg.yScale, cfg.yOffset)
         : analogValueToY(v, rect, cfg.yScale, cfg.yOffset)) * dpr;
 
-    let prevXPx = 0;
+    let prevLastXPx = 0;
     let prevLastYPx = 0;
 
     for (let i = 0; i < count; i += 1) {
@@ -424,23 +425,40 @@ export class ScopeGeometryBuilder {
       const vLast = columns[base + 4];
 
       const xPx = plotLeftPx + xNorm * plotWidthPx;
+      const xFirstPx = xPx - colStepPx * 0.25;
+      const xLastPx = xPx + colStepPx * 0.25;
       const yFirst = toYPx(vFirst);
       const yMin = toYPx(vMin);
       const yMax = toYPx(vMax);
       const yLast = toYPx(vLast);
 
-      const topY = Math.min(yMin, yMax) - 0.7 * dpr;
-      const botY = Math.max(yMin, yMax) + 0.7 * dpr;
-
-      // Envelope vertical bar (100% glitch preserving)
-      this.pushSolidRect(xPx - colHalfW, topY, xPx + colHalfW, botY, r, g, b, a * 0.92);
-
-      // Connect prev vLast -> curr vFirst for continuous trace readability
+      // Connect previous column exit -> current entry for continuous trace progression
       if (i > 0) {
-        this.pushAaSegment(prevXPx, prevLastYPx, xPx, yFirst, aaHalfW, r, g, b, a * 0.85);
+        this.pushAaSegment(prevLastXPx, prevLastYPx, xFirstPx, yFirst, aaHalfW, r, g, b, a);
       }
 
-      prevXPx = xPx;
+      // Draw continuous intra-column entry -> exit slope
+      this.pushAaSegment(xFirstPx, yFirst, xLastPx, yLast, aaHalfW, r, g, b, a);
+
+      // Emit vertical envelope bar whenever interior extrema exceed [yFirst, yLast] (100% glitch preservation)
+      const segTopY = Math.min(yFirst, yLast);
+      const segBotY = Math.max(yFirst, yLast);
+      const envTopY = Math.min(yMin, yMax);
+      const envBotY = Math.max(yMin, yMax);
+      if (envTopY < segTopY - 0.25 * dpr || envBotY > segBotY + 0.25 * dpr) {
+        this.pushSolidRect(
+          xPx - colHalfW,
+          envTopY - 0.7 * dpr,
+          xPx + colHalfW,
+          envBotY + 0.7 * dpr,
+          r,
+          g,
+          b,
+          a * 0.92,
+        );
+      }
+
+      prevLastXPx = xLastPx;
       prevLastYPx = yLast;
     }
   }

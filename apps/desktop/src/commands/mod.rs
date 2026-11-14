@@ -96,6 +96,15 @@ pub fn get_channel_tree(
     state.get_channel_tree()
 }
 
+/// Returns exportable control-plane configurations for all registered workspace sources.
+#[tauri::command]
+#[specta::specta]
+pub fn get_source_configs(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<Vec<CreateSourceRequestDto>, ApiErrorDto> {
+    state.get_source_configs()
+}
+
 /// Creates or updates a scope viewport subscription, tracks, trigger, and quota.
 #[tauri::command]
 #[specta::specta]
@@ -267,4 +276,32 @@ pub fn set_data_bridge_rate(
     rate_hz: u32,
 ) -> Result<u32, ApiErrorDto> {
     state.set_data_bridge_rate(rate_hz)
+}
+
+/// Loads the portable default project configuration stored alongside the executable.
+#[tauri::command]
+#[specta::specta]
+pub fn load_default_project_config(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<Option<String>, ApiErrorDto> {
+    state.load_default_project_config()
+}
+
+/// Saves the portable default project configuration alongside the executable and returns the saved path.
+#[tauri::command]
+#[specta::specta]
+pub fn save_default_project_config(
+    state: tauri::State<'_, DesktopBridgeState>,
+    config_json: String,
+) -> Result<String, ApiErrorDto> {
+    state.save_default_project_config(&config_json)
+}
+
+/// Clears the portable default project configuration stored alongside the executable.
+#[tauri::command]
+#[specta::specta]
+pub fn clear_default_project_config(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<bool, ApiErrorDto> {
+    state.clear_default_project_config()
 }

@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useRef,
   useState,
   type DragEvent,
@@ -13,6 +14,10 @@ import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
 import { ScopeViewportWidget } from "../scope-engine/ScopeViewportWidget.tsx";
 import type { ScopeCallbacks, ScopeUiConfig } from "../scope-engine/types.ts";
+import {
+  DDSCOPE_POINTER_DROP_EVENT,
+  type PointerDropEventDetail,
+} from "../workspace/pointer-dnd.ts";
 import { CmdButtonWidget } from "./CmdButtonWidget.tsx";
 import { DigitalMeterWidget } from "./DigitalMeterWidget.tsx";
 import { ParamSliderWidget } from "./ParamSliderWidget.tsx";
@@ -21,8 +26,10 @@ import { StatusLedWidget } from "./StatusLedWidget.tsx";
 import { WatchTableWidget } from "./WatchTableWidget.tsx";
 import {
   DASHBOARD_GRID_COLS,
+  DASHBOARD_GRID_ROW_STRIDE_PX,
   WIDGET_TYPES,
   clampGridRect,
+  computeCanvasGridCell,
   type DashboardCanvasConfig,
   type DashboardWidgetItem,
   type WidgetType,
@@ -59,9 +66,7 @@ export interface DashboardCanvasProps {
   ) => Promise<DownlinkReceiptDto>;
 }
 
-const GRID_ROW_HEIGHT_PX = 42;
-const GRID_GAP_PX = 8;
-const GRID_ROW_STRIDE_PX = GRID_ROW_HEIGHT_PX + GRID_GAP_PX;
+const GRID_ROW_STRIDE_PX = DASHBOARD_GRID_ROW_STRIDE_PX;
 
 function parseDroppedWidgetType(ev: DragEvent): WidgetType | null {
   const rawJson = ev.dataTransfer.getData("application/x-ddscope-widget");
@@ -97,9 +102,14 @@ function parseDroppedChannelId(ev: DragEvent): number | null {
       // Ignore malformed JSON
     }
   }
-  const plain = ev.dataTransfer.getData("text/plain");
-  if (/^\d+$/.test(plain.trim())) {
-    return Number(plain.trim());
+  const plain = ev.dataTransfer.getData("text/plain").trim();
+  if (plain.startsWith("channel:")) {
+    const num = Number(plain.slice("channel:".length));
+    if (Number.isFinite(num)) {
+      return num;
+    }
+  } else if (/^\d+$/.test(plain)) {
+    return Number(plain);
   }
   return null;
 }
@@ -132,12 +142,92 @@ export function DashboardCanvas({
   const computeDropCell = (clientX: number, clientY: number): { col: number; row: number } => {
     const el = gridRef.current;
     if (!el) return { col: 0, row: 0 };
-    const rect = el.getBoundingClientRect();
-    const colWidth = Math.max(12, rect.width / DASHBOARD_GRID_COLS);
-    const col = Math.max(0, Math.floor((clientX - rect.left) / colWidth));
-    const row = Math.max(0, Math.floor((clientY - rect.top) / GRID_ROW_STRIDE_PX));
-    return { col, row };
+    return computeCanvasGridCell(clientX, clientY, el.getBoundingClientRect());
   };
+
+  const dropChannelAtCell = (chId: number, clientX: number, clientY: number) => {
+    const cell = computeDropCell(clientX, clientY);
+    const ch = channelsById[chId];
+    const autoType: WidgetType =
+      ch && (ch.modality === "digital_bool" || ch.modality === "state_machine")
+        ? "status_led"
+        : "digital_meter";
+    onAddWidget(canvas.canvasId, autoType, {
+      col: cell.col,
+      row: cell.row,
+      channelId: chId,
+    });
+  };
+
+  const dropChannelOnWidget = (widget: DashboardWidgetItem, chId: number) => {
+    if (widget.type === "mso_scope" && widget.scopeId !== null) {
+      scopeCallbacks.onDropChannel(widget.scopeId, chId);
+    } else {
+      onBindChannelToWidget(canvas.canvasId, widget.id, chId);
+    }
+  };
+
+  const dropHandlersRef = useRef({
+    canvasId: canvas.canvasId,
+    widgets: canvas.widgets,
+    onAddWidget,
+    dropChannelAtCell,
+    dropChannelOnWidget,
+  });
+  dropHandlersRef.current = {
+    canvasId: canvas.canvasId,
+    widgets: canvas.widgets,
+    onAddWidget,
+    dropChannelAtCell,
+    dropChannelOnWidget,
+  };
+
+  useEffect(() => {
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+
+    const onPointerDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent<PointerDropEventDetail>).detail;
+      if (!detail) return;
+      ev.stopPropagation();
+      setGridDragOver(false);
+      setCardDragOverId(null);
+
+      const latest = dropHandlersRef.current;
+      if (detail.dropKind === "widget-card" && detail.payload.kind === "channel") {
+        const targetWidget = latest.widgets.find((w) => w.id === detail.widgetId);
+        if (targetWidget) {
+          latest.dropChannelOnWidget(targetWidget, detail.payload.channelId);
+        }
+        return;
+      }
+
+      if (detail.dropKind === "canvas-grid") {
+        if (detail.payload.kind === "widget") {
+          const cell = computeCanvasGridCell(
+            detail.clientX,
+            detail.clientY,
+            gridEl.getBoundingClientRect(),
+          );
+          latest.onAddWidget(latest.canvasId, detail.payload.widgetType, {
+            col: cell.col,
+            row: cell.row,
+          });
+          return;
+        }
+        if (detail.payload.kind === "channel") {
+          latest.dropChannelAtCell(
+            detail.payload.channelId,
+            detail.clientX,
+            detail.clientY,
+          );
+        }
+      }
+    };
+
+    gridEl.addEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
+    return () => gridEl.removeEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
+  }, []);
 
   const handleGridDragOver = (ev: DragEvent<HTMLDivElement>) => {
     const types = Array.from(ev.dataTransfer.types);
@@ -169,16 +259,7 @@ export function DashboardCanvas({
     if (chId !== null) {
       ev.preventDefault();
       ev.stopPropagation();
-      const ch = channelsById[chId];
-      const autoType: WidgetType =
-        ch && (ch.modality === "digital_bool" || ch.modality === "state_machine")
-          ? "status_led"
-          : "digital_meter";
-      onAddWidget(canvas.canvasId, autoType, {
-        col: cell.col,
-        row: cell.row,
-        channelId: chId,
-      });
+      dropChannelAtCell(chId, ev.clientX, ev.clientY);
     }
   };
 
@@ -195,11 +276,7 @@ export function DashboardCanvas({
     setCardDragOverId(null);
     setGridDragOver(false);
 
-    if (widget.type === "mso_scope" && widget.scopeId !== null) {
-      scopeCallbacks.onDropChannel(widget.scopeId, chId);
-    } else {
-      onBindChannelToWidget(canvas.canvasId, widget.id, chId);
-    }
+    dropChannelOnWidget(widget, chId);
   };
 
   const startMoveDrag = (
@@ -278,6 +355,9 @@ export function DashboardCanvas({
     const handleUpdate = (updater: (prev: DashboardWidgetItem) => DashboardWidgetItem) =>
       onUpdateWidget(canvas.canvasId, widget.id, updater);
 
+    const bindChannel = (channelId: number) =>
+      onBindChannelToWidget(canvas.canvasId, widget.id, channelId);
+
     switch (widget.type) {
       case "digital_meter":
         return (
@@ -286,6 +366,7 @@ export function DashboardCanvas({
             channelsById={channelsById}
             locale={locale}
             onUpdateWidget={handleUpdate}
+            onBindChannel={bindChannel}
           />
         );
       case "radial_gauge":
@@ -295,6 +376,7 @@ export function DashboardCanvas({
             channelsById={channelsById}
             locale={locale}
             onUpdateWidget={handleUpdate}
+            onBindChannel={bindChannel}
           />
         );
       case "status_led":
@@ -303,6 +385,7 @@ export function DashboardCanvas({
             widget={widget}
             channelsById={channelsById}
             locale={locale}
+            onBindChannel={bindChannel}
           />
         );
       case "watch_table":
@@ -312,6 +395,7 @@ export function DashboardCanvas({
             channelsById={channelsById}
             locale={locale}
             onUpdateWidget={handleUpdate}
+            onBindChannel={bindChannel}
           />
         );
       case "param_slider":
@@ -392,9 +476,15 @@ export function DashboardCanvas({
       <div
         ref={gridRef}
         className={`dashboard-grid ${gridDragOver ? "is-drag-over" : ""}`}
+        data-drop-canvas-grid="true"
+        data-drop-canvas-id={canvas.canvasId}
         data-testid={`dashboard-grid-${canvas.canvasId}`}
         onDragOver={handleGridDragOver}
-        onDragLeave={() => setGridDragOver(false)}
+        onDragLeave={(ev) => {
+          if (!ev.currentTarget.contains(ev.relatedTarget as Node | null)) {
+            setGridDragOver(false);
+          }
+        }}
         onDrop={handleGridDrop}
       >
         {canvas.widgets.length === 0 ? (
@@ -411,6 +501,8 @@ export function DashboardCanvas({
                 className={`widget-card ${isCardDropTarget ? "is-channel-drop-over" : ""} ${
                   !canvas.locked ? "is-editable" : ""
                 }`}
+                data-drop-widget-id={widget.id}
+                data-drop-canvas-id={canvas.canvasId}
                 data-testid={`widget-card-${widget.id}`}
                 style={{
                   gridColumn: `${widget.col + 1} / span ${widget.colSpan}`,
@@ -418,14 +510,27 @@ export function DashboardCanvas({
                 }}
                 onDragOver={(ev) => {
                   const types = Array.from(ev.dataTransfer.types);
-                  if (types.includes("application/x-ddscope-channel")) {
+                  const isWidgetDrag = types.includes("application/x-ddscope-widget");
+                  if (
+                    !isWidgetDrag &&
+                    (types.includes("application/x-ddscope-channel") ||
+                      types.includes("text/plain"))
+                  ) {
                     ev.preventDefault();
                     ev.stopPropagation();
-                    setCardDragOverId(widget.id);
+                    ev.dataTransfer.dropEffect = "copy";
+                    if (cardDragOverId !== widget.id) {
+                      setCardDragOverId(widget.id);
+                    }
                   }
                 }}
-                onDragLeave={() => {
-                  if (cardDragOverId === widget.id) setCardDragOverId(null);
+                onDragLeave={(ev) => {
+                  if (
+                    !ev.currentTarget.contains(ev.relatedTarget as Node | null) &&
+                    cardDragOverId === widget.id
+                  ) {
+                    setCardDragOverId(null);
+                  }
                 }}
                 onDrop={(ev) => handleCardDrop(ev, widget)}
               >

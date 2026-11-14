@@ -15,6 +15,7 @@ import {
   zoomYAxisAtCursor,
   type ScopeTrackRenderConfig,
 } from "../src/scope-engine/layout.ts";
+import { computeCanvasGridCell } from "../src/widgets/types.ts";
 import { createWorkspaceStore } from "../src/workspace/store.ts";
 
 test("Whole-axis vertical coordinate mapping & independent per-channel scale/offset", () => {
@@ -328,6 +329,165 @@ test("Workspace store seeds default dashboard canvas, manages widgets, and defau
   assert.ok(track);
   assert.equal(track.yScale, 1);
   assert.equal(track.yOffset, 0);
+
+  client.stopDataPlane();
+});
+
+test("computeCanvasGridCell converts pointer coordinates into bounded canvas grid cells", () => {
+  // 1200px wide / 24 cols = 50px per col; row stride = 50px
+  const rect = { left: 100, top: 50, width: 1200 };
+  assert.deepEqual(computeCanvasGridCell(225, 160, rect), { col: 2, row: 2 });
+  assert.deepEqual(computeCanvasGridCell(50, 10, rect), { col: 0, row: 0 });
+  assert.deepEqual(computeCanvasGridCell(40, 105, { left: 0, top: 0, width: 100 }), {
+    col: 3,
+    row: 2,
+  });
+});
+
+test("bindChannelToWidget binds mso_scope, param_slider, and cmd_button targets cleanly", async () => {
+  const bus = new HighFreqTopicBus();
+  const client = new BridgeClient(bus);
+  const store = createWorkspaceStore(client);
+
+  await store.getState().initWorkspace();
+  const allChannels = Object.values(store.getState().channelsById);
+  const targetCh = allChannels[0];
+  assert.ok(targetCh);
+
+  // Embedded mso_scope
+  const msoWidgetId = store.getState().addWidgetToCanvas(1, "mso_scope");
+  store.getState().bindChannelToWidget(1, msoWidgetId, targetCh.channel_id);
+  const msoWidget = store.getState().canvases[1].widgets.find((w) => w.id === msoWidgetId);
+  assert.ok(msoWidget && msoWidget.scopeId !== null);
+  const msoTracks = store.getState().scopes[msoWidget.scopeId].tracks;
+  assert.ok(msoTracks.some((t) => t.channelId === targetCh.channel_id));
+
+  // Parameter slider
+  const sliderWidgetId = store.getState().addWidgetToCanvas(1, "param_slider");
+  store.getState().bindChannelToWidget(1, sliderWidgetId, targetCh.channel_id);
+  const sliderWidget = store
+    .getState()
+    .canvases[1].widgets.find((w) => w.id === sliderWidgetId);
+  assert.ok(sliderWidget);
+  assert.equal(sliderWidget.primaryBinding?.channelId, targetCh.channel_id);
+  assert.equal(sliderWidget.sliderConfig?.sourceId, targetCh.source_id);
+  assert.equal(sliderWidget.sliderConfig?.key, targetCh.local_path);
+
+  // Command button
+  const cmdWidgetId = store.getState().addWidgetToCanvas(1, "cmd_button");
+  store.getState().bindChannelToWidget(1, cmdWidgetId, targetCh.channel_id);
+  const cmdWidget = store.getState().canvases[1].widgets.find((w) => w.id === cmdWidgetId);
+  assert.ok(cmdWidget);
+  assert.equal(cmdWidget.primaryBinding?.channelId, targetCh.channel_id);
+  assert.equal(cmdWidget.buttonConfig?.sourceId, targetCh.source_id);
+  assert.equal(cmdWidget.buttonConfig?.kvKey, targetCh.local_path);
+
+  client.stopDataPlane();
+});
+
+test("Workspace store switches sidebar tabs, supports deleting sim0 cleanly, and emits smooth M4 vertices", async () => {
+  const bus = new HighFreqTopicBus();
+  const client = new BridgeClient(bus);
+  const store = createWorkspaceStore(client);
+
+  await store.getState().initWorkspace();
+  assert.equal(store.getState().sidebarTab, "sources");
+  store.getState().setSidebarTab("toolbox");
+  assert.equal(store.getState().sidebarTab, "toolbox");
+  store.getState().setSidebarTab("sources");
+  assert.equal(store.getState().sidebarTab, "sources");
+
+  assert.equal(store.getState().channelGroups[0]?.source.source_id, "sim0");
+  await store.getState().removeSource("sim0");
+
+  const afterRemove = store.getState();
+  assert.equal(afterRemove.channelGroups.length, 0);
+  assert.equal(Object.keys(afterRemove.channelsById).length, 0);
+  assert.equal(afterRemove.telemetryBySource.sim0, undefined);
+  assert.deepEqual(afterRemove.scopes[1].tracks, []);
+  assert.equal(afterRemove.scopes[1].trigger, null);
+  assert.equal(afterRemove.scopes[1].activeAnalogChannelId, null);
+  for (const w of afterRemove.canvases[1].widgets) {
+    assert.equal(w.primaryBinding, null);
+    assert.deepEqual(w.bindings, []);
+    if (w.sliderConfig) assert.equal(w.sliderConfig.sourceId, "");
+    if (w.buttonConfig) assert.equal(w.buttonConfig.sourceId, "");
+  }
+
+  // Creating another source after deleting sim0 works cleanly
+  await store.getState().createSource({
+    source_id: "sim_after",
+    display_name: "Recreated Sim",
+    transport: {
+      kind: "sim",
+      sample_rate_hz: 1_000_000,
+      analog_channels: 2,
+      enable_glitch: false,
+      glitch_period_samples: 500_000,
+    },
+    clock: { mode: "tier2_software_pll", nominal_sample_rate_hz: null },
+    protocol: { codec: "sim_preset" },
+    auto_start: false,
+  });
+  assert.equal(store.getState().channelGroups.length, 1);
+  assert.equal(store.getState().channelGroups[0].source.source_id, "sim_after");
+
+  // Smooth sine M4 geometry emission produces finite coordinates
+  const track: ScopeTrackRenderConfig[] = [
+    {
+      channelId: 1,
+      label: "sine",
+      unit: "V",
+      lane: "analog",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0x38bdf8ff,
+      stateLabels: [],
+    },
+  ];
+  const layout = computeMsoLayout(880, 340, track, "overlay");
+  const cols: number[] = [];
+  const colCount = 800;
+  for (let i = 0; i < colCount; i += 1) {
+    const p0 = (i / colCount) * Math.PI * 4;
+    const p1 = ((i + 0.9) / colCount) * Math.PI * 4;
+    const vFirst = 10 * Math.sin(p0);
+    const vLast = 10 * Math.sin(p1);
+    cols.push(
+      (i + 0.5) / colCount,
+      vFirst,
+      Math.min(vFirst, vLast),
+      Math.max(vFirst, vLast),
+      vLast,
+    );
+  }
+  const fb = new DdsfFrameBuilder();
+  const frameBuf = fb.pack({
+    frameSeq: 1,
+    hostNowNs: 10_000_000,
+    scopes: [
+      {
+        scopeId: 1,
+        triggerState: TriggerRuntimeStateCode.Roll,
+        mode: 0,
+        winTStartNs: 0,
+        winTSpanNs: 10_000_000,
+        subpixelOffsetNs: 0,
+        tracks: [{ channelId: 1, blockKind: DdsfBlockKind.AnalogM4Column, columns: cols }],
+      },
+    ],
+    snapshots: [],
+  });
+  const parsed = parseDdsfFrame(frameBuf);
+  const built = new ScopeGeometryBuilder().build(layout, 1, parsed.scopes[0], track, {
+    yAxisScale: 15,
+    yAxisOffset: 0,
+  });
+  assert.ok(built.signalVertexCount > 0);
+  for (let i = 0; i < built.totalVertexCount * FLOATS_PER_VERTEX; i += 1) {
+    assert.ok(Number.isFinite(built.vertices[i]), `non-finite vertex float at ${i}`);
+  }
 
   client.stopDataPlane();
 });

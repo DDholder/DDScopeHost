@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, type DragEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
 import {
   DockviewReact,
   themeAbyss,
@@ -6,10 +14,16 @@ import {
   type DockviewReadyEvent,
   type IDockviewPanelProps,
   type IWatermarkPanelProps,
+  type SerializedDockview,
 } from "dockview";
 import { ScopeViewportWidget, type ScopeCallbacks } from "../scope-engine/index.ts";
 import { DashboardCanvas, WIDGET_TYPES, type WidgetType } from "../widgets/index.ts";
 import { useWorkspaceStore } from "./store.ts";
+import {
+  DDSCOPE_POINTER_DROP_EVENT,
+  type PointerDropEventDetail,
+} from "./pointer-dnd.ts";
+import { readJsonFileFromInput, saveJsonFile } from "./file-dialog.ts";
 import { useI18n } from "./use-i18n.ts";
 
 interface ScopePanelParams {
@@ -170,16 +184,45 @@ function WorkspaceWatermark(_props: IWatermarkPanelProps) {
   const addScope = useWorkspaceStore((s) => s.addScope);
   const addCanvas = useWorkspaceStore((s) => s.addCanvas);
   const addWidgetToCanvas = useWorkspaceStore((s) => s.addWidgetToCanvas);
+  const importBoardConfig = useWorkspaceStore((s) => s.importBoardConfig);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const watermarkRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = watermarkRef.current;
+    if (!el) return;
+    const onPointerDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent<PointerDropEventDetail>).detail;
+      if (!detail || detail.payload.kind !== "widget") return;
+      ev.stopPropagation();
+      const cid = addCanvas();
+      addWidgetToCanvas(cid, detail.payload.widgetType);
+    };
+    el.addEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
+    return () => el.removeEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
+  }, [addCanvas, addWidgetToCanvas]);
+
   return (
     <div
+      ref={watermarkRef}
       className="dockview-watermark"
+      data-drop-watermark="true"
       onDragOver={(ev) => {
-        if (Array.from(ev.dataTransfer.types).includes("application/x-ddscope-widget")) {
+        const types = Array.from(ev.dataTransfer.types);
+        if (types.includes("application/x-ddscope-widget") || types.includes("text/plain")) {
           ev.preventDefault();
           ev.dataTransfer.dropEffect = "copy";
+          ev.currentTarget.classList.add("is-drag-over");
+        }
+      }}
+      onDragLeave={(ev) => {
+        if (!ev.currentTarget.contains(ev.relatedTarget as Node | null)) {
+          ev.currentTarget.classList.remove("is-drag-over");
         }
       }}
       onDrop={(ev) => {
+        ev.currentTarget.classList.remove("is-drag-over");
         const wType = parseWatermarkWidgetType(ev);
         if (!wType) return;
         ev.preventDefault();
@@ -205,7 +248,54 @@ function WorkspaceWatermark(_props: IWatermarkPanelProps) {
         >
           {t("stage.addCanvas")}
         </button>
+        <button
+          type="button"
+          className="scope-btn"
+          data-testid="watermark-import-board-btn"
+          title={t("stage.importBoardTitle")}
+          onClick={() => importInputRef.current?.click()}
+        >
+          {t("stage.importBoard")}
+        </button>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".json,application/json"
+          style={{ display: "none" }}
+          data-testid="watermark-import-board-input"
+          onChange={(ev) => {
+            void (async () => {
+              try {
+                const text = await readJsonFileFromInput(ev.currentTarget);
+                if (text === null) return;
+                setImportError(null);
+                await importBoardConfig(text);
+              } catch (err: unknown) {
+                setImportError(
+                  t("stage.boardImportError", {
+                    error: err instanceof Error ? err.message : String(err),
+                  }),
+                );
+              }
+            })();
+          }}
+        />
       </div>
+      {importError && (
+        <div
+          className="config-io-notice err"
+          data-testid="watermark-import-board-error"
+        >
+          <span>{importError}</span>
+          <button
+            type="button"
+            className="scope-btn-xs"
+            onClick={() => setImportError(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -216,14 +306,27 @@ export function DockviewStage() {
   const scopes = useWorkspaceStore((s) => s.scopes);
   const canvasOrder = useWorkspaceStore((s) => s.canvasOrder);
   const canvases = useWorkspaceStore((s) => s.canvases);
+  const layoutRestoreSeq = useWorkspaceStore((s) => s.layoutRestoreSeq);
   const addScope = useWorkspaceStore((s) => s.addScope);
   const removeScope = useWorkspaceStore((s) => s.removeScope);
   const addCanvas = useWorkspaceStore((s) => s.addCanvas);
   const removeCanvas = useWorkspaceStore((s) => s.removeCanvas);
   const setFocusedScopeId = useWorkspaceStore((s) => s.setFocusedScopeId);
   const setActiveCanvasId = useWorkspaceStore((s) => s.setActiveCanvasId);
+  const registerDockviewLayoutAccessor = useWorkspaceStore(
+    (s) => s.registerDockviewLayoutAccessor,
+  );
+  const exportBoardConfig = useWorkspaceStore((s) => s.exportBoardConfig);
+  const importBoardConfig = useWorkspaceStore((s) => s.importBoardConfig);
 
   const apiRef = useRef<DockviewApi | null>(null);
+  const isRestoringLayoutRef = useRef(false);
+  const lastAppliedRestoreSeqRef = useRef(0);
+  const boardImportInputRef = useRef<HTMLInputElement | null>(null);
+  const [boardNotice, setBoardNotice] = useState<{
+    kind: "ok" | "warn" | "err";
+    text: string;
+  } | null>(null);
   const scopesRef = useRef(scopes);
   scopesRef.current = scopes;
   const canvasesRef = useRef(canvases);
@@ -318,14 +421,43 @@ export function DockviewStage() {
     [],
   );
 
+  const applyBoardLayoutRestore = useCallback(
+    (api: DockviewApi) => {
+      const st = useWorkspaceStore.getState();
+      scopesRef.current = st.scopes;
+      canvasesRef.current = st.canvases;
+      isRestoringLayoutRef.current = true;
+      try {
+        if (st.scopeOrder.length === 0 && st.canvasOrder.length === 0) {
+          api.clear();
+        } else if (st.pendingDockviewLayout) {
+          try {
+            api.fromJSON(st.pendingDockviewLayout as unknown as SerializedDockview);
+          } catch {
+            api.clear();
+          }
+          syncPanelsToStore(api, st.scopeOrder, st.canvasOrder);
+        } else {
+          api.clear();
+          syncPanelsToStore(api, st.scopeOrder, st.canvasOrder);
+        }
+      } finally {
+        isRestoringLayoutRef.current = false;
+      }
+    },
+    [syncPanelsToStore],
+  );
+
   const handleReady = useCallback(
     (event: DockviewReadyEvent) => {
       const api = event.api;
       apiRef.current = api;
-      const st = useWorkspaceStore.getState();
-      syncPanelsToStore(api, st.scopeOrder, st.canvasOrder);
+      registerDockviewLayoutAccessor(
+        () => api.toJSON() as unknown as Record<string, unknown>,
+      );
 
       api.onDidRemovePanel((panel) => {
+        if (isRestoringLayoutRef.current) return;
         if (panel.id.startsWith("scope-")) {
           const idNum = Number(panel.id.slice("scope-".length));
           if (Number.isFinite(idNum) && useWorkspaceStore.getState().scopes[idNum]) {
@@ -340,6 +472,7 @@ export function DockviewStage() {
       });
 
       api.onDidActivePanelChange((panel) => {
+        if (isRestoringLayoutRef.current) return;
         if (!panel) return;
         if (panel.id.startsWith("scope-")) {
           const idNum = Number(panel.id.slice("scope-".length));
@@ -353,15 +486,42 @@ export function DockviewStage() {
           }
         }
       });
+
+      const st = useWorkspaceStore.getState();
+      if (st.layoutRestoreSeq !== lastAppliedRestoreSeqRef.current) {
+        lastAppliedRestoreSeqRef.current = st.layoutRestoreSeq;
+        applyBoardLayoutRestore(api);
+      } else {
+        syncPanelsToStore(api, st.scopeOrder, st.canvasOrder);
+      }
     },
-    [removeCanvas, removeScope, setActiveCanvasId, setFocusedScopeId, syncPanelsToStore],
+    [
+      applyBoardLayoutRestore,
+      registerDockviewLayoutAccessor,
+      removeCanvas,
+      removeScope,
+      setActiveCanvasId,
+      setFocusedScopeId,
+      syncPanelsToStore,
+    ],
   );
+
+  useEffect(() => {
+    return () => {
+      registerDockviewLayoutAccessor(null);
+    };
+  }, [registerDockviewLayoutAccessor]);
 
   useEffect(() => {
     const api = apiRef.current;
     if (!api) return;
+    if (layoutRestoreSeq !== lastAppliedRestoreSeqRef.current) {
+      lastAppliedRestoreSeqRef.current = layoutRestoreSeq;
+      applyBoardLayoutRestore(api);
+      return;
+    }
     syncPanelsToStore(api, scopeOrder, canvasOrder);
-  }, [scopeOrder, canvasOrder, syncPanelsToStore]);
+  }, [scopeOrder, canvasOrder, layoutRestoreSeq, applyBoardLayoutRestore, syncPanelsToStore]);
 
   const handleSplitLayout = (direction: "below" | "right") => {
     const api = apiRef.current;
@@ -375,6 +535,63 @@ export function DockviewStage() {
       });
     } else {
       addScope();
+    }
+  };
+
+  const handleExportBoardClick = async () => {
+    try {
+      const json = exportBoardConfig();
+      const saved = await saveJsonFile(json, "ddscope-board.json");
+      if (saved) {
+        setBoardNotice({
+          kind: "ok",
+          text: t("stage.boardExported", {
+            scopes: scopeOrder.length,
+            canvases: canvasOrder.length,
+          }),
+        });
+      }
+    } catch (err: unknown) {
+      setBoardNotice({
+        kind: "err",
+        text: t("stage.boardImportError", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      });
+    }
+  };
+
+  const handleImportBoardFile = async (ev: ChangeEvent<HTMLInputElement>) => {
+    try {
+      const text = await readJsonFileFromInput(ev.currentTarget);
+      if (text === null) return;
+      const res = await importBoardConfig(text);
+      if (res.missingChannelPaths.length > 0) {
+        setBoardNotice({
+          kind: "warn",
+          text: t("stage.boardImportedMissing", {
+            scopes: res.scopeCount,
+            canvases: res.canvasCount,
+            missing: res.missingChannelPaths.length,
+          }),
+        });
+      } else {
+        setBoardNotice({
+          kind: "ok",
+          text: t("stage.boardImported", {
+            scopes: res.scopeCount,
+            canvases: res.canvasCount,
+            widgets: res.widgetCount,
+          }),
+        });
+      }
+    } catch (err: unknown) {
+      setBoardNotice({
+        kind: "err",
+        text: t("stage.boardImportError", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      });
     }
   };
 
@@ -414,7 +631,55 @@ export function DockviewStage() {
           </button>
         </div>
         <span className="stage-hint">{t("stage.hint")}</span>
+        <div className="stage-mini-right">
+          <button
+            type="button"
+            className="scope-btn"
+            data-testid="export-board-btn"
+            title={t("stage.exportBoardTitle")}
+            onClick={() => {
+              void handleExportBoardClick();
+            }}
+          >
+            {t("stage.exportBoard")}
+          </button>
+          <button
+            type="button"
+            className="scope-btn"
+            data-testid="import-board-btn"
+            title={t("stage.importBoardTitle")}
+            onClick={() => boardImportInputRef.current?.click()}
+          >
+            {t("stage.importBoard")}
+          </button>
+          <input
+            ref={boardImportInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: "none" }}
+            data-testid="import-board-input"
+            onChange={(ev) => {
+              void handleImportBoardFile(ev);
+            }}
+          />
+        </div>
       </div>
+
+      {boardNotice && (
+        <div
+          className={`config-io-notice ${boardNotice.kind}`}
+          data-testid="board-config-notice"
+        >
+          <span>{boardNotice.text}</span>
+          <button
+            type="button"
+            className="scope-btn-xs"
+            onClick={() => setBoardNotice(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <div className="dockview-container">
         <DockviewReact

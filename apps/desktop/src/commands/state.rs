@@ -1,5 +1,6 @@
 //! Managed Tauri application state bridging control-plane commands and the zero-copy data plane.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ddscope_core::transport::list_serial_ports as core_list_serial_ports;
@@ -205,6 +206,20 @@ impl DesktopBridgeState {
         }
     }
 
+    /// Implements `get_source_configs`.
+    pub fn get_source_configs(&self) -> Result<Vec<CreateSourceRequestDto>, ApiErrorDto> {
+        let Some(ws) = self.workspace() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for (_summary, cfg) in ws.list_source_configs() {
+            if let Ok(dto) = convert::source_config_core_to_dto(&cfg) {
+                out.push(dto);
+            }
+        }
+        Ok(out)
+    }
+
     /// Implements `upsert_scope_viewport`.
     pub fn upsert_scope_viewport(
         &self,
@@ -286,5 +301,106 @@ impl DesktopBridgeState {
             .map_err(ApiErrorDto::from)?;
         let mode = push_res.map_err(ApiErrorDto::from)?;
         Ok(Some(mode))
+    }
+
+    /// Loads the portable default project config stored alongside the application executable.
+    pub fn load_default_project_config(&self) -> Result<Option<String>, ApiErrorDto> {
+        let path = portable_default_project_config_path()?;
+        load_default_project_config_from_path(&path)
+    }
+
+    /// Saves the portable default project config JSON alongside the application executable.
+    pub fn save_default_project_config(&self, config_json: &str) -> Result<String, ApiErrorDto> {
+        let path = portable_default_project_config_path()?;
+        save_default_project_config_to_path(&path, config_json)
+    }
+
+    /// Removes the portable default project config file alongside the application executable, if present.
+    pub fn clear_default_project_config(&self) -> Result<bool, ApiErrorDto> {
+        let path = portable_default_project_config_path()?;
+        clear_default_project_config_at_path(&path)
+    }
+}
+
+/// Portable default project config filename stored next to the executable (never in OS user Documents/AppData).
+pub const DEFAULT_PROJECT_CONFIG_FILENAME: &str = "ddscope.default-project.json";
+
+/// Resolves the portable default project config path inside the executable's own directory.
+pub fn portable_default_project_config_path() -> Result<PathBuf, ApiErrorDto> {
+    let exe_path = std::env::current_exe().map_err(|err| ApiErrorDto {
+        code: "IO_ERROR".to_string(),
+        message: format!("failed to resolve executable path: {err}"),
+    })?;
+    let exe_dir = exe_path.parent().ok_or_else(|| ApiErrorDto {
+        code: "IO_ERROR".to_string(),
+        message: "executable path has no parent directory".to_string(),
+    })?;
+    Ok(exe_dir.join(DEFAULT_PROJECT_CONFIG_FILENAME))
+}
+
+/// Reads a default project config file from `path`, returning `Ok(None)` if it does not exist.
+pub fn load_default_project_config_from_path(path: &Path) -> Result<Option<String>, ApiErrorDto> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(ApiErrorDto {
+            code: "IO_ERROR".to_string(),
+            message: format!("failed to read default project config '{}': {err}", path.display()),
+        }),
+    }
+}
+
+/// Validates and atomically writes `config_json` to `path`, returning the saved path string.
+pub fn save_default_project_config_to_path(
+    path: &Path,
+    config_json: &str,
+) -> Result<String, ApiErrorDto> {
+    let parsed: serde_json::Value = serde_json::from_str(config_json).map_err(|err| {
+        ApiErrorDto::invalid_config(format!("invalid default project config JSON: {err}"))
+    })?;
+    if !parsed.is_object() {
+        return Err(ApiErrorDto::invalid_config(
+            "default project config root must be a JSON object",
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| ApiErrorDto {
+            code: "IO_ERROR".to_string(),
+            message: format!(
+                "failed to create directory '{}' for default project config: {err}",
+                parent.display()
+            ),
+        })?;
+    }
+
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, config_json).map_err(|err| ApiErrorDto {
+        code: "IO_ERROR".to_string(),
+        message: format!("failed to write temp default project config '{}': {err}", tmp_path.display()),
+    })?;
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(ApiErrorDto {
+            code: "IO_ERROR".to_string(),
+            message: format!(
+                "failed to finalize default project config '{}': {err}",
+                path.display()
+            ),
+        });
+    }
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Removes the default project config file at `path` if present.
+pub fn clear_default_project_config_at_path(path: &Path) -> Result<bool, ApiErrorDto> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(ApiErrorDto {
+            code: "IO_ERROR".to_string(),
+            message: format!("failed to remove default project config '{}': {err}", path.display()),
+        }),
     }
 }

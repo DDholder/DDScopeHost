@@ -326,7 +326,7 @@ export function renderScopeHud(
     const lane = layout.stateLanes[i];
     const midY = lane.rect.y + lane.rect.height * 0.5;
     ctx.textAlign = "right";
-    ctx.fillStyle = "#e2e8f0";
+    ctx.fillStyle = rgbaNumberToCss(lane.track.colorRgba, 0.95);
     const shortLabel = fitTruncatedText(ctx, lane.track.label, plotLeft - 10);
     ctx.fillText(shortLabel, plotLeft - 6, midY);
   }

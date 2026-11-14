@@ -2,6 +2,7 @@ import { create, type StoreApi, type UseBoundStore } from "zustand";
 import type {
   ChannelNodeDto_Serialize,
   CreateSourceRequestDto_Deserialize,
+  CreateSourceRequestDto_Serialize,
   DownlinkReceiptDto,
   ScopeLaneKindDto,
   ScopeViewportConfigDto_Deserialize,
@@ -41,6 +42,22 @@ import {
   type DashboardWidgetItem,
   type WidgetType,
 } from "../widgets/types.ts";
+import {
+  DEFAULT_DOWNLINK_UI_CONFIG,
+  normalizeSourceConfigForExport,
+  parseBoardConfigJson,
+  parseProjectConfigJson,
+  parseSourcesConfigJson,
+  projectToBoardFile,
+  rehydrateBoardFromConfig,
+  serializeBoardConfig,
+  serializeProjectConfig,
+  serializeSourcesConfig,
+  synthesizeFallbackSourceConfig,
+  type BoardConfigFileV1,
+  type DownlinkUiConfig,
+  type ProjectConfigFileV1,
+} from "./config-io.ts";
 
 const TRACE_COLORS = [
   0x38bdf8ff, // sky
@@ -68,6 +85,7 @@ export interface WorkspaceStoreState {
   runtimeStatus: RuntimeStatus | null;
   channelGroups: SourceChannelGroupDto_Serialize[];
   channelsById: Record<number, ChannelNodeDto_Serialize>;
+  sourceConfigsById: Record<string, CreateSourceRequestDto_Serialize>;
   telemetryBySource: Record<string, SourceTelemetryDto>;
   quota: {
     usedBytes: number;
@@ -94,17 +112,26 @@ export interface WorkspaceStoreState {
   locale: UiLocale;
   mockRateHz: 60 | 120;
   sidebarCollapsed: boolean;
+  sidebarTab: "sources" | "toolbox";
   downlinkBarCollapsed: boolean;
   sourceWizardOpen: boolean;
+  downlinkConfig: DownlinkUiConfig;
+  pendingDockviewLayout: Record<string, unknown> | null;
+  layoutRestoreSeq: number;
 
   setLocale: (locale: UiLocale) => void;
   initWorkspace: () => Promise<void>;
   refreshChannelTree: () => Promise<void>;
   setMockRateHz: (rate: 60 | 120) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
+  setSidebarTab: (tab: "sources" | "toolbox") => void;
   setDownlinkBarCollapsed: (collapsed: boolean) => void;
   setSourceWizardOpen: (open: boolean) => void;
   setFocusedScopeId: (scopeId: number | null) => void;
+  updateDownlinkConfig: (patch: Partial<DownlinkUiConfig>) => void;
+  registerDockviewLayoutAccessor: (
+    accessor: (() => Record<string, unknown> | null) | null,
+  ) => void;
 
   createSource: (req: CreateSourceRequestDto_Deserialize) => Promise<void>;
   startSource: (sourceId: string) => Promise<void>;
@@ -112,6 +139,11 @@ export interface WorkspaceStoreState {
   removeSource: (sourceId: string) => Promise<void>;
   toggleRawRecorder: (sourceId: string, enabled: boolean) => Promise<void>;
   seekReplay: (req: SeekReplayRequestDto_Deserialize) => Promise<void>;
+  exportSourcesConfig: (sourceIds?: string[]) => string;
+  importSourcesConfig: (
+    jsonText: string,
+    options?: { replaceExisting?: boolean },
+  ) => Promise<{ importedIds: string[]; skippedIds: string[] }>;
 
   addScope: (title?: string, options?: { dockInStage?: boolean }) => number;
   removeScope: (scopeId: number) => void;
@@ -149,6 +181,27 @@ export interface WorkspaceStoreState {
   ) => void;
   removeCanvasWidget: (canvasId: number, widgetId: string) => void;
   bindChannelToWidget: (canvasId: number, widgetId: string, channelId: number) => void;
+  exportBoardConfig: () => string;
+  importBoardConfig: (jsonText: string) => Promise<{
+    scopeCount: number;
+    canvasCount: number;
+    widgetCount: number;
+    missingChannelPaths: string[];
+  }>;
+
+  exportProjectConfig: () => string;
+  importProjectConfig: (jsonText: string) => Promise<{
+    sourceCount: number;
+    scopeCount: number;
+    canvasCount: number;
+    widgetCount: number;
+    missingChannelPaths: string[];
+  }>;
+  saveDefaultProjectConfig: () => Promise<{
+    location: string;
+    mode: "exe-dir" | "browser-storage";
+  }>;
+  clearDefaultProjectConfig: () => Promise<void>;
 
   sendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
@@ -629,13 +682,187 @@ export function createWorkspaceStore(
   let nextTxLogId = 1;
   let telemetryUnsub: (() => void) | null = null;
   let metricsUnsub: (() => void) | null = null;
+  let dockviewLayoutAccessor: (() => Record<string, unknown> | null) | null = null;
 
-  return create<WorkspaceStoreState>((set, get) => ({
+  return create<WorkspaceStoreState>((set, get) => {
+    const fetchSourceConfigMap = async (
+      groups: SourceChannelGroupDto_Serialize[],
+      overrides?: Record<string, CreateSourceRequestDto_Serialize>,
+    ): Promise<Record<string, CreateSourceRequestDto_Serialize>> => {
+      const rawList = await client.getSourceConfigs().catch(() => []);
+      const byIdFromBridge: Record<string, CreateSourceRequestDto_Serialize> = {};
+      for (const cfg of rawList) {
+        byIdFromBridge[cfg.source_id] = normalizeSourceConfigForExport(cfg);
+      }
+
+      const prevConfigs = get().sourceConfigsById;
+      const merged: Record<string, CreateSourceRequestDto_Serialize> = {};
+      for (const grp of groups) {
+        const id = grp.source.source_id;
+        merged[id] =
+          byIdFromBridge[id] ??
+          overrides?.[id] ??
+          prevConfigs[id] ??
+          synthesizeFallbackSourceConfig(grp);
+      }
+      return merged;
+    };
+
+    const collectExportableSources = (
+      state: WorkspaceStoreState,
+      sourceIds?: ReadonlyArray<string>,
+    ): CreateSourceRequestDto_Serialize[] => {
+      const targetIds = sourceIds
+        ? new Set(sourceIds)
+        : new Set(state.channelGroups.map((g) => g.source.source_id));
+      const list: CreateSourceRequestDto_Serialize[] = [];
+      for (const grp of state.channelGroups) {
+        if (!targetIds.has(grp.source.source_id)) continue;
+        list.push(
+          state.sourceConfigsById[grp.source.source_id] ??
+            synthesizeFallbackSourceConfig(grp),
+        );
+      }
+      return list;
+    };
+
+    const collectBoardExportInput = (state: WorkspaceStoreState) => {
+      const liveLayout = dockviewLayoutAccessor
+        ? dockviewLayoutAccessor()
+        : state.pendingDockviewLayout;
+      const effectiveTargetSource =
+        state.channelGroups.length === 0
+          ? state.downlinkConfig.targetSource
+          : state.channelGroups.some((g) => g.source.source_id === state.downlinkConfig.targetSource)
+            ? state.downlinkConfig.targetSource
+            : state.channelGroups[0].source.source_id;
+
+      return {
+        scopes: state.scopes,
+        scopeOrder: state.scopeOrder,
+        canvases: state.canvases,
+        canvasOrder: state.canvasOrder,
+        channelsById: state.channelsById,
+        ui: {
+          mockRateHz: state.mockRateHz,
+          sidebarCollapsed: state.sidebarCollapsed,
+          sidebarTab: state.sidebarTab,
+          downlinkBarCollapsed: state.downlinkBarCollapsed,
+          focusedScopeId: state.focusedScopeId,
+          activeCanvasId: state.activeCanvasId,
+        },
+        downlink: {
+          ...state.downlinkConfig,
+          targetSource: effectiveTargetSource,
+        },
+        dockviewLayout: liveLayout,
+      };
+    };
+
+    const applyRehydratedBoard = async (file: BoardConfigFileV1) => {
+      const stateBefore = get();
+      const rehydrated = rehydrateBoardFromConfig({
+        file,
+        channelsById: stateBefore.channelsById,
+        availableSourceIds: stateBefore.channelGroups.map((g) => g.source.source_id),
+      });
+
+      const oldScopeIds = Object.keys(stateBefore.scopes).map((k) => Number(k));
+      for (const oldId of oldScopeIds) {
+        client.topicBus.deleteScopeCache(oldId);
+      }
+      await Promise.all(
+        oldScopeIds.map((oldId) => client.removeScopeViewport(oldId).catch(() => {})),
+      );
+
+      if (rehydrated.ui.mockRateHz !== stateBefore.mockRateHz) {
+        client.setMockRate(rehydrated.ui.mockRateHz);
+      }
+
+      const nextWidths: Record<number, number> = {};
+      for (const idStr of Object.keys(rehydrated.scopes)) {
+        nextWidths[Number(idStr)] = 760;
+      }
+
+      set((s) => ({
+        scopes: rehydrated.scopes,
+        scopeOrder: rehydrated.scopeOrder,
+        focusedScopeId: rehydrated.ui.focusedScopeId,
+        nextScopeId: rehydrated.nextScopeId,
+        canvasWidthsByScope: nextWidths,
+        canvases: rehydrated.canvases,
+        canvasOrder: rehydrated.canvasOrder,
+        activeCanvasId: rehydrated.ui.activeCanvasId,
+        nextCanvasId: rehydrated.nextCanvasId,
+        nextWidgetSeq: rehydrated.nextWidgetSeq,
+        mockRateHz: rehydrated.ui.mockRateHz,
+        sidebarCollapsed: rehydrated.ui.sidebarCollapsed,
+        sidebarTab: rehydrated.ui.sidebarTab,
+        downlinkBarCollapsed: rehydrated.ui.downlinkBarCollapsed,
+        downlinkConfig: rehydrated.downlink,
+        pendingDockviewLayout: rehydrated.dockviewLayout,
+        layoutRestoreSeq: s.layoutRestoreSeq + 1,
+      }));
+
+      await Promise.all(
+        Object.values(rehydrated.scopes).map((sc) =>
+          client.upsertScopeViewport(toViewportDto(sc, 760)).catch(() => {}),
+        ),
+      );
+
+      return {
+        scopeCount: rehydrated.scopeOrder.length,
+        canvasCount: rehydrated.canvasOrder.length,
+        widgetCount: Object.values(rehydrated.canvases).reduce(
+          (sum, cv) => sum + cv.widgets.length,
+          0,
+        ),
+        missingChannelPaths: rehydrated.missingChannelPaths,
+      };
+    };
+
+    const applyProjectFile = async (projectFile: ProjectConfigFileV1) => {
+      const existingTree = await client.getChannelTree();
+      for (const grp of existingTree.sources) {
+        await client.removeSource(grp.source.source_id);
+      }
+      for (const srcCfg of projectFile.sources) {
+        await client.createSource(srcCfg as unknown as CreateSourceRequestDto_Deserialize);
+      }
+
+      const tree = await client.getChannelTree();
+      const chMap: Record<number, ChannelNodeDto_Serialize> = {};
+      for (const grp of tree.sources) {
+        for (const ch of grp.channels) {
+          chMap[ch.channel_id] = ch;
+        }
+      }
+      const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+      set({
+        channelGroups: tree.sources,
+        channelsById: chMap,
+        sourceConfigsById: sourceConfigs,
+        quota: {
+          usedBytes: tree.quota_used_bytes ?? 0,
+          limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
+          pinnedBytes: tree.pinned_bytes ?? 0,
+        },
+      });
+
+      const boardResult = await applyRehydratedBoard(projectToBoardFile(projectFile));
+      return {
+        sourceCount: projectFile.sources.length,
+        ...boardResult,
+      };
+    };
+
+    return {
     initialized: false,
     initError: null,
     runtimeStatus: null,
     channelGroups: [],
     channelsById: {},
+    sourceConfigsById: {},
     telemetryBySource: {},
     quota: {
       usedBytes: 0,
@@ -677,8 +904,12 @@ export function createWorkspaceStore(
     locale: detectInitialLocale(),
     mockRateHz: 120,
     sidebarCollapsed: false,
+    sidebarTab: "sources",
     downlinkBarCollapsed: false,
     sourceWizardOpen: false,
+    downlinkConfig: { ...DEFAULT_DOWNLINK_UI_CONFIG },
+    pendingDockviewLayout: null,
+    layoutRestoreSeq: 0,
 
     setLocale: (nextLocale) => {
       persistLocale(nextLocale);
@@ -758,36 +989,61 @@ export function createWorkspaceStore(
           }
         }
 
-        const defaultScopes = buildDefaultScopeConfigs(chMap, get().locale);
-        await Promise.all(
-          Object.values(defaultScopes).map((sc) =>
-            client.upsertScopeViewport(toViewportDto(sc, 760)),
-          ),
-        );
+        let appliedDefaultProject = false;
+        const defaultProjectJson = await client.loadDefaultProjectConfig().catch(() => null);
+        if (defaultProjectJson !== null) {
+          try {
+            const projectFile = parseProjectConfigJson(defaultProjectJson);
+            await applyProjectFile(projectFile);
+            appliedDefaultProject = true;
+          } catch (err) {
+            console.warn(
+              "Failed to apply portable default project config, falling back to built-in defaults:",
+              err,
+            );
+          }
+        }
 
-        const defaultCanvas = buildDefaultDashboardCanvas(chMap, get().locale);
+        if (appliedDefaultProject) {
+          set({
+            initialized: true,
+            initError: null,
+            runtimeStatus: status,
+          });
+        } else {
+          const defaultScopes = buildDefaultScopeConfigs(chMap, get().locale);
+          await Promise.all(
+            Object.values(defaultScopes).map((sc) =>
+              client.upsertScopeViewport(toViewportDto(sc, 760)),
+            ),
+          );
 
-        set({
-          initialized: true,
-          initError: null,
-          runtimeStatus: status,
-          channelGroups: tree.sources,
-          channelsById: chMap,
-          quota: {
-            usedBytes: tree.quota_used_bytes ?? 0,
-            limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
-            pinnedBytes: tree.pinned_bytes ?? 0,
-          },
-          scopes: defaultScopes,
-          scopeOrder: [1, 2],
-          focusedScopeId: 1,
-          nextScopeId: 3,
-          canvases: { 1: defaultCanvas.canvas },
-          canvasOrder: [1],
-          activeCanvasId: 1,
-          nextCanvasId: 2,
-          nextWidgetSeq: defaultCanvas.nextWidgetSeq,
-        });
+          const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+          const defaultCanvas = buildDefaultDashboardCanvas(chMap, get().locale);
+
+          set({
+            initialized: true,
+            initError: null,
+            runtimeStatus: status,
+            channelGroups: tree.sources,
+            channelsById: chMap,
+            sourceConfigsById: sourceConfigs,
+            quota: {
+              usedBytes: tree.quota_used_bytes ?? 0,
+              limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
+              pinnedBytes: tree.pinned_bytes ?? 0,
+            },
+            scopes: defaultScopes,
+            scopeOrder: [1, 2],
+            focusedScopeId: 1,
+            nextScopeId: 3,
+            canvases: { 1: defaultCanvas.canvas },
+            canvasOrder: [1],
+            activeCanvasId: 1,
+            nextCanvasId: 2,
+            nextWidgetSeq: defaultCanvas.nextWidgetSeq,
+          });
+        }
       } catch (err: unknown) {
         set({
           initError: err instanceof Error ? err.message : String(err),
@@ -803,9 +1059,11 @@ export function createWorkspaceStore(
           chMap[ch.channel_id] = ch;
         }
       }
+      const sourceConfigs = await fetchSourceConfigMap(tree.sources);
       set({
         channelGroups: tree.sources,
         channelsById: chMap,
+        sourceConfigsById: sourceConfigs,
         quota: {
           usedBytes: tree.quota_used_bytes ?? 0,
           limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
@@ -820,12 +1078,30 @@ export function createWorkspaceStore(
     },
 
     setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
+    setSidebarTab: (tab) => set({ sidebarTab: tab }),
     setDownlinkBarCollapsed: (collapsed) => set({ downlinkBarCollapsed: collapsed }),
     setSourceWizardOpen: (open) => set({ sourceWizardOpen: open }),
     setFocusedScopeId: (scopeId) => set({ focusedScopeId: scopeId }),
+    updateDownlinkConfig: (patch) =>
+      set((s) => ({
+        downlinkConfig: {
+          ...s.downlinkConfig,
+          ...patch,
+        },
+      })),
+    registerDockviewLayoutAccessor: (accessor) => {
+      dockviewLayoutAccessor = accessor;
+    },
 
     createSource: async (req) => {
       await client.createSource(req);
+      const norm = normalizeSourceConfigForExport(req);
+      set((s) => ({
+        sourceConfigsById: {
+          ...s.sourceConfigsById,
+          [norm.source_id]: norm,
+        },
+      }));
       await get().refreshChannelTree();
     },
 
@@ -841,7 +1117,119 @@ export function createWorkspaceStore(
 
     removeSource: async (sourceId) => {
       await client.removeSource(sourceId);
-      await get().refreshChannelTree();
+      const tree = await client.getChannelTree();
+      const chMap: Record<number, ChannelNodeDto_Serialize> = {};
+      for (const grp of tree.sources) {
+        for (const ch of grp.channels) {
+          chMap[ch.channel_id] = ch;
+        }
+      }
+
+      const state = get();
+      const nextTelemetry = { ...state.telemetryBySource };
+      delete nextTelemetry[sourceId];
+
+      const fallbackSourceId = tree.sources[0]?.source.source_id ?? "";
+      const changedScopesToSync: Array<{ scope: ScopeUiConfig; canvasW: number }> = [];
+      const nextScopes: Record<number, ScopeUiConfig> = {};
+      for (const [idStr, sc] of Object.entries(state.scopes)) {
+        const scopeId = Number(idStr);
+        const remainingTracks = sc.tracks.filter((t) => Boolean(chMap[t.channelId]));
+        const nextTrigger =
+          sc.trigger && chMap[sc.trigger.channel_id] ? sc.trigger : null;
+        const tracksChanged = remainingTracks.length !== sc.tracks.length;
+        const triggerChanged = nextTrigger !== sc.trigger;
+
+        if (tracksChanged || triggerChanged) {
+          const activeStillPresent =
+            sc.activeAnalogChannelId !== null &&
+            remainingTracks.some((t) => t.channelId === sc.activeAnalogChannelId);
+          const nextActiveAnalog = activeStillPresent
+            ? sc.activeAnalogChannelId
+            : (remainingTracks.find((t) => t.lane === "analog")?.channelId ?? null);
+          const updatedScope: ScopeUiConfig = {
+            ...sc,
+            tracks: remainingTracks,
+            trigger: nextTrigger,
+            activeAnalogChannelId: nextActiveAnalog,
+          };
+          nextScopes[scopeId] = updatedScope;
+          if (remainingTracks.length === 0) {
+            client.topicBus.deleteScopeCache(scopeId);
+          }
+          changedScopesToSync.push({
+            scope: updatedScope,
+            canvasW: state.canvasWidthsByScope[scopeId] ?? 760,
+          });
+        } else {
+          nextScopes[scopeId] = sc;
+        }
+      }
+
+      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
+      for (const [idStr, cv] of Object.entries(state.canvases)) {
+        const canvasId = Number(idStr);
+        let canvasChanged = false;
+        const nextWidgets = cv.widgets.map((w) => {
+          let updated = w;
+          if (w.primaryBinding && !chMap[w.primaryBinding.channelId]) {
+            updated = { ...updated, primaryBinding: null };
+            canvasChanged = true;
+          }
+          if (w.bindings.some((b) => !chMap[b.channelId])) {
+            updated = {
+              ...updated,
+              bindings: w.bindings.filter((b) => Boolean(chMap[b.channelId])),
+            };
+            canvasChanged = true;
+          }
+          if (w.sliderConfig && w.sliderConfig.sourceId === sourceId) {
+            updated = {
+              ...updated,
+              sliderConfig: { ...w.sliderConfig, sourceId: fallbackSourceId },
+            };
+            canvasChanged = true;
+          }
+          if (w.buttonConfig && w.buttonConfig.sourceId === sourceId) {
+            updated = {
+              ...updated,
+              buttonConfig: { ...w.buttonConfig, sourceId: fallbackSourceId },
+            };
+            canvasChanged = true;
+          }
+          return updated;
+        });
+        nextCanvases[canvasId] = canvasChanged ? { ...cv, widgets: nextWidgets } : cv;
+      }
+
+      const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+      set({
+        channelGroups: tree.sources,
+        channelsById: chMap,
+        sourceConfigsById: sourceConfigs,
+        telemetryBySource: nextTelemetry,
+        scopes: nextScopes,
+        canvases: nextCanvases,
+        ...(state.downlinkConfig.targetSource === sourceId
+          ? {
+              downlinkConfig: {
+                ...state.downlinkConfig,
+                targetSource: fallbackSourceId,
+              },
+            }
+          : {}),
+        quota: {
+          usedBytes: tree.quota_used_bytes ?? 0,
+          limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
+          pinnedBytes: tree.pinned_bytes ?? 0,
+        },
+      });
+
+      await Promise.all(
+        changedScopesToSync.map(({ scope, canvasW }) =>
+          client.upsertScopeViewport(toViewportDto(scope, canvasW)).catch(() => {}),
+        ),
+      );
     },
 
     toggleRawRecorder: async (sourceId, enabled) => {
@@ -856,6 +1244,218 @@ export function createWorkspaceStore(
     seekReplay: async (req) => {
       await client.seekReplaySource(req);
       await get().refreshChannelTree();
+    },
+
+    exportSourcesConfig: (sourceIds) => {
+      const state = get();
+      const list = collectExportableSources(state, sourceIds);
+      if (sourceIds) {
+        for (const id of sourceIds) {
+          if (list.some((item) => item.source_id === id)) continue;
+          const cached = state.sourceConfigsById[id];
+          if (cached) list.push(cached);
+        }
+      }
+      return serializeSourcesConfig(list);
+    },
+
+    importSourcesConfig: async (jsonText, options) => {
+      const file = parseSourcesConfigJson(jsonText);
+      const replaceExisting = options?.replaceExisting ?? true;
+      const snapshotState = get();
+      const channelsBefore = snapshotState.channelsById;
+      const existingIds = new Set(snapshotState.channelGroups.map((g) => g.source.source_id));
+      const replacedSourceIds = new Set<string>();
+      const importedOverrides: Record<string, CreateSourceRequestDto_Serialize> = {};
+      const importedIds: string[] = [];
+      const skippedIds: string[] = [];
+
+      for (const srcCfg of file.sources) {
+        if (existingIds.has(srcCfg.source_id)) {
+          if (!replaceExisting) {
+            skippedIds.push(srcCfg.source_id);
+            continue;
+          }
+          replacedSourceIds.add(srcCfg.source_id);
+          await client.removeSource(srcCfg.source_id);
+        }
+        await client.createSource(srcCfg);
+        existingIds.add(srcCfg.source_id);
+        importedIds.push(srcCfg.source_id);
+        importedOverrides[srcCfg.source_id] = srcCfg;
+      }
+
+      const tree = await client.getChannelTree();
+      const chMap: Record<number, ChannelNodeDto_Serialize> = {};
+      const channelByFullPath = new Map<string, ChannelNodeDto_Serialize>();
+      for (const grp of tree.sources) {
+        for (const ch of grp.channels) {
+          chMap[ch.channel_id] = ch;
+          channelByFullPath.set(ch.full_path, ch);
+        }
+      }
+      const nextSourceConfigs = await fetchSourceConfigMap(tree.sources, importedOverrides);
+
+      const rebindChannelId = (oldChannelId: number): number | null => {
+        const oldCh = channelsBefore[oldChannelId];
+        if (oldCh) {
+          if (!replacedSourceIds.has(oldCh.source_id) && chMap[oldChannelId]) {
+            return oldChannelId;
+          }
+          const matched = channelByFullPath.get(oldCh.full_path);
+          return matched ? matched.channel_id : null;
+        }
+        return chMap[oldChannelId] ? oldChannelId : null;
+      };
+
+      const latest = get();
+      const changedScopesToSync: Array<{ scope: ScopeUiConfig; canvasW: number }> = [];
+      const nextScopes: Record<number, ScopeUiConfig> = {};
+
+      for (const [idStr, sc] of Object.entries(latest.scopes)) {
+        const scopeId = Number(idStr);
+        const seenTrackIds = new Set<number>();
+        const nextTracks: ScopeTrackUiBinding[] = [];
+        let tracksChanged = false;
+
+        for (const tr of sc.tracks) {
+          const reboundId = rebindChannelId(tr.channelId);
+          if (reboundId === null) {
+            tracksChanged = true;
+            continue;
+          }
+          if (reboundId !== tr.channelId) {
+            tracksChanged = true;
+          }
+          if (seenTrackIds.has(reboundId)) {
+            tracksChanged = true;
+            continue;
+          }
+          seenTrackIds.add(reboundId);
+          nextTracks.push({ ...tr, channelId: reboundId });
+        }
+
+        let nextTrigger = sc.trigger;
+        let triggerChanged = false;
+        if (sc.trigger) {
+          const reboundTrigId = rebindChannelId(sc.trigger.channel_id);
+          if (reboundTrigId === null) {
+            nextTrigger = null;
+            triggerChanged = true;
+          } else if (reboundTrigId !== sc.trigger.channel_id) {
+            nextTrigger = { ...sc.trigger, channel_id: reboundTrigId };
+            triggerChanged = true;
+          }
+        }
+
+        const reboundActiveId =
+          sc.activeAnalogChannelId !== null ? rebindChannelId(sc.activeAnalogChannelId) : null;
+        const activeStillValid =
+          reboundActiveId !== null &&
+          nextTracks.some((tr) => tr.channelId === reboundActiveId && tr.lane === "analog");
+        const nextActiveAnalog = activeStillValid
+          ? reboundActiveId
+          : (nextTracks.find((tr) => tr.lane === "analog")?.channelId ?? null);
+        const activeChanged = nextActiveAnalog !== sc.activeAnalogChannelId;
+
+        if (tracksChanged || triggerChanged || activeChanged) {
+          const updatedScope: ScopeUiConfig = {
+            ...sc,
+            tracks: nextTracks,
+            trigger: nextTrigger,
+            activeAnalogChannelId: nextActiveAnalog,
+          };
+          nextScopes[scopeId] = updatedScope;
+          if (nextTracks.length === 0) {
+            client.topicBus.deleteScopeCache(scopeId);
+          }
+          changedScopesToSync.push({
+            scope: updatedScope,
+            canvasW: latest.canvasWidthsByScope[scopeId] ?? 760,
+          });
+        } else {
+          nextScopes[scopeId] = sc;
+        }
+      }
+
+      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
+      for (const [idStr, cv] of Object.entries(latest.canvases)) {
+        const canvasId = Number(idStr);
+        let canvasChanged = false;
+        const nextWidgets = cv.widgets.map((w) => {
+          let updated = w;
+          if (w.primaryBinding) {
+            const reboundPrimary = rebindChannelId(w.primaryBinding.channelId);
+            if (reboundPrimary === null) {
+              updated = { ...updated, primaryBinding: null };
+              canvasChanged = true;
+            } else if (reboundPrimary !== w.primaryBinding.channelId) {
+              updated = {
+                ...updated,
+                primaryBinding: { ...w.primaryBinding, channelId: reboundPrimary },
+              };
+              canvasChanged = true;
+            }
+          }
+          if (w.bindings.length > 0) {
+            const seenBindingIds = new Set<number>();
+            const nextBindings: typeof w.bindings = [];
+            let bindingsChanged = false;
+            for (const b of w.bindings) {
+              const reboundId = rebindChannelId(b.channelId);
+              if (reboundId === null) {
+                bindingsChanged = true;
+                continue;
+              }
+              if (reboundId !== b.channelId) {
+                bindingsChanged = true;
+              }
+              if (seenBindingIds.has(reboundId)) {
+                bindingsChanged = true;
+                continue;
+              }
+              seenBindingIds.add(reboundId);
+              nextBindings.push({ ...b, channelId: reboundId });
+            }
+            if (bindingsChanged) {
+              updated = { ...updated, bindings: nextBindings };
+              canvasChanged = true;
+            }
+          }
+          return updated;
+        });
+        nextCanvases[canvasId] = canvasChanged ? { ...cv, widgets: nextWidgets } : cv;
+      }
+
+      const activeSourceIds = new Set(tree.sources.map((g) => g.source.source_id));
+      const nextTelemetry: Record<string, SourceTelemetryDto> = {};
+      for (const [srcId, tel] of Object.entries(latest.telemetryBySource)) {
+        if (activeSourceIds.has(srcId)) {
+          nextTelemetry[srcId] = tel;
+        }
+      }
+
+      set({
+        channelGroups: tree.sources,
+        channelsById: chMap,
+        sourceConfigsById: nextSourceConfigs,
+        telemetryBySource: nextTelemetry,
+        scopes: nextScopes,
+        canvases: nextCanvases,
+        quota: {
+          usedBytes: tree.quota_used_bytes ?? 0,
+          limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
+          pinnedBytes: tree.pinned_bytes ?? 0,
+        },
+      });
+
+      await Promise.all(
+        changedScopesToSync.map(({ scope, canvasW }) =>
+          client.upsertScopeViewport(toViewportDto(scope, canvasW)).catch(() => {}),
+        ),
+      );
+
+      return { importedIds, skippedIds };
     },
 
     addScope: (title, options) => {
@@ -1357,6 +1957,12 @@ export function createWorkspaceStore(
       const ch = state.channelsById[channelId];
       if (!canvas || !ch) return;
 
+      const targetWidget = canvas.widgets.find((w) => w.id === widgetId);
+      if (targetWidget?.type === "mso_scope" && targetWidget.scopeId !== null) {
+        get().bindChannelToScope(targetWidget.scopeId, channelId);
+        return;
+      }
+
       get().updateCanvasWidget(canvasId, widgetId, (prev) => {
         if (prev.type === "watch_table") {
           if (prev.bindings.some((b) => b.channelId === channelId)) {
@@ -1386,8 +1992,81 @@ export function createWorkspaceStore(
               : {}),
           };
         }
+        if (prev.type === "param_slider") {
+          const prevCfg = prev.sliderConfig ?? {
+            sourceId: ch.source_id,
+            key: ch.local_path || "kp",
+            min: 0.2,
+            max: 6.0,
+            step: 0.05,
+            value: 1.2,
+          };
+          return {
+            ...prev,
+            primaryBinding: { channelId, scale: 1, offset: 0 },
+            sliderConfig: {
+              ...prevCfg,
+              sourceId: ch.source_id,
+              key: ch.local_path || prevCfg.key,
+            },
+          };
+        }
+        if (prev.type === "cmd_button") {
+          const prevCfg = prev.buttonConfig ?? {
+            sourceId: ch.source_id,
+            mode: "ascii" as const,
+            command: "SET_MODE=FOC_RUN",
+            kvKey: ch.local_path || "kp",
+            kvValue: 1.5,
+            priority: "high" as const,
+          };
+          return {
+            ...prev,
+            primaryBinding: { channelId, scale: 1, offset: 0 },
+            buttonConfig: {
+              ...prevCfg,
+              sourceId: ch.source_id,
+              kvKey: ch.local_path || prevCfg.kvKey,
+            },
+          };
+        }
         return prev;
       });
+    },
+
+    exportBoardConfig: () => {
+      return serializeBoardConfig(collectBoardExportInput(get()));
+    },
+
+    importBoardConfig: async (jsonText) => {
+      const file = parseBoardConfigJson(jsonText);
+      return applyRehydratedBoard(file);
+    },
+
+    exportProjectConfig: () => {
+      const state = get();
+      return serializeProjectConfig({
+        ...collectBoardExportInput(state),
+        sources: collectExportableSources(state),
+      });
+    },
+
+    importProjectConfig: async (jsonText) => {
+      const projectFile = parseProjectConfigJson(jsonText);
+      return applyProjectFile(projectFile);
+    },
+
+    saveDefaultProjectConfig: async () => {
+      const state = get();
+      const jsonText = serializeProjectConfig({
+        ...collectBoardExportInput(state),
+        sources: collectExportableSources(state),
+      });
+      return client.saveDefaultProjectConfig(jsonText);
+    },
+
+    clearDefaultProjectConfig: async () => {
+      await client.clearDefaultProjectConfig();
     },
 
     sendDownlink: async (req, labelSummary, isSliderEvent = false) => {
@@ -1433,7 +2112,8 @@ export function createWorkspaceStore(
               .map((g) => g.source.source_id);
       await client.injectGlitch(allSimIds.length > 0 ? allSimIds : undefined);
     },
-  }));
+  };
+  });
 }
 
 export const useWorkspaceStore = createWorkspaceStore();

@@ -3,6 +3,7 @@ import {
   events,
   type ChannelTreeSnapshotDto_Serialize,
   type CreateSourceRequestDto_Deserialize,
+  type CreateSourceRequestDto_Serialize,
   type DownlinkReceiptDto,
   type EngineStatusDto,
   type RawRecorderRequestDto_Deserialize,
@@ -27,6 +28,8 @@ import {
   type ZeroCopyBridgeHostAdapter,
 } from "./zero-copy-bridge.ts";
 
+export const DEFAULT_PROJECT_STORAGE_KEY = "ddscope.defaultProjectConfig.v1";
+
 export interface ControlPlaneCommands {
   getEngineInfo(): Promise<EngineStatusDto>;
   listSerialPorts(): Promise<SerialPortInfoDto_Serialize[]>;
@@ -41,6 +44,7 @@ export interface ControlPlaneCommands {
     req: RawRecorderRequestDto_Deserialize,
   ): Promise<SourceSummaryDto_Serialize>;
   getChannelTree(): Promise<ChannelTreeSnapshotDto_Serialize>;
+  getSourceConfigs?(): Promise<CreateSourceRequestDto_Serialize[]>;
   upsertScopeViewport(
     config: ScopeViewportConfigDto_Deserialize,
   ): Promise<ScopeViewportSummaryDto_Serialize>;
@@ -48,6 +52,9 @@ export interface ControlPlaneCommands {
   rearmScope(scopeId: number): Promise<null>;
   updateSyncGroup(update: SyncGroupUpdateDto_Deserialize): Promise<null>;
   sendDownlink(req: SendDownlinkRequestDto_Deserialize): Promise<DownlinkReceiptDto>;
+  loadDefaultProjectConfig?(): Promise<string | null>;
+  saveDefaultProjectConfig?(configJson: string): Promise<string>;
+  clearDefaultProjectConfig?(): Promise<boolean>;
 }
 
 export interface ControlPlaneHostAdapter {
@@ -399,6 +406,16 @@ export class BridgeClient {
     );
   }
 
+  getSourceConfigs(): Promise<CreateSourceRequestDto_Serialize[]> {
+    return this.withTauriOrMock(
+      () =>
+        this.host.commands.getSourceConfigs
+          ? this.host.commands.getSourceConfigs()
+          : Promise.resolve([]),
+      () => this.mock.getSourceConfigs(),
+    );
+  }
+
   upsertScopeViewport(
     config: ScopeViewportConfigDto_Deserialize,
   ): Promise<ScopeViewportSummaryDto_Serialize> {
@@ -615,6 +632,71 @@ export class BridgeClient {
 
   injectMockGlitch(): Promise<void> {
     return this.injectGlitch();
+  }
+
+  async loadDefaultProjectConfig(): Promise<string | null> {
+    if (this.host.isTauriHost() && this.host.commands.loadDefaultProjectConfig) {
+      try {
+        return await this.host.commands.loadDefaultProjectConfig();
+      } catch (err: unknown) {
+        if (!isStubNotImplementedError(err)) {
+          throw err;
+        }
+      }
+    }
+    if (typeof window !== "undefined" && window.localStorage) {
+      try {
+        return window.localStorage.getItem(DEFAULT_PROJECT_STORAGE_KEY);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  async saveDefaultProjectConfig(
+    configJson: string,
+  ): Promise<{ location: string; mode: "exe-dir" | "browser-storage" }> {
+    if (this.host.isTauriHost() && this.host.commands.saveDefaultProjectConfig) {
+      try {
+        const savedPath = await this.host.commands.saveDefaultProjectConfig(configJson);
+        return { location: savedPath, mode: "exe-dir" };
+      } catch (err: unknown) {
+        if (!isStubNotImplementedError(err)) {
+          throw err;
+        }
+      }
+    }
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(DEFAULT_PROJECT_STORAGE_KEY, configJson);
+      return {
+        location: `localStorage/${DEFAULT_PROJECT_STORAGE_KEY}`,
+        mode: "browser-storage",
+      };
+    }
+    throw new Error("No persistent default project config storage available in this environment.");
+  }
+
+  async clearDefaultProjectConfig(): Promise<boolean> {
+    if (this.host.isTauriHost() && this.host.commands.clearDefaultProjectConfig) {
+      try {
+        return await this.host.commands.clearDefaultProjectConfig();
+      } catch (err: unknown) {
+        if (!isStubNotImplementedError(err)) {
+          throw err;
+        }
+      }
+    }
+    if (typeof window !== "undefined" && window.localStorage) {
+      try {
+        const existed = window.localStorage.getItem(DEFAULT_PROJECT_STORAGE_KEY) !== null;
+        window.localStorage.removeItem(DEFAULT_PROJECT_STORAGE_KEY);
+        return existed;
+      } catch {
+        return false;
+      }
+    }
+    return false;
   }
 }
 

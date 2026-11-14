@@ -40,6 +40,11 @@ async fn stub_backend_preserves_pre_m4_contract() {
         .expect("stub get_channel_tree returns empty tree cleanly");
     assert!(tree.sources.is_empty());
 
+    let cfgs = state
+        .get_source_configs()
+        .expect("stub get_source_configs returns empty list cleanly");
+    assert!(cfgs.is_empty());
+
     let create_err = state
         .create_source(make_sim_create_request("sim0"))
         .expect_err("stub create_source must return NOT_IMPLEMENTED");
@@ -252,6 +257,16 @@ async fn live_workspace_control_plane_roundtrip() {
     assert!(receipt.accepted);
     assert_eq!(receipt.result_kind, "sent_fire_and_forget");
 
+    // 4b. Query retained source configurations for config export
+    let exported_cfgs = state.get_source_configs().expect("get_source_configs");
+    assert_eq!(exported_cfgs.len(), 2);
+    assert_eq!(exported_cfgs[0].source_id, "sim0");
+    assert_eq!(exported_cfgs[1].source_id, "udp0");
+    assert_eq!(
+        exported_cfgs[1].display_name.as_deref(),
+        Some("UDP Loopback TX")
+    );
+
     // 5. Telemetry event conversion
     let snap = ws.telemetry_snapshot();
     let event = convert::telemetry_snapshot_to_event(&snap, 1234.5);
@@ -279,4 +294,50 @@ async fn live_workspace_control_plane_roundtrip() {
         .await
         .expect("remove udp0");
     ws.shutdown().await.expect("shutdown workspace");
+}
+
+#[test]
+fn portable_default_project_config_saves_next_to_exe_and_round_trips() {
+    use ddscope_desktop_lib::commands::state::{
+        clear_default_project_config_at_path, load_default_project_config_from_path,
+        portable_default_project_config_path, save_default_project_config_to_path,
+        DEFAULT_PROJECT_CONFIG_FILENAME,
+    };
+
+    let exe_cfg_path = portable_default_project_config_path().expect("resolve exe dir path");
+    let exe_dir = std::env::current_exe()
+        .expect("current_exe")
+        .parent()
+        .expect("exe parent")
+        .to_path_buf();
+    assert_eq!(exe_cfg_path, exe_dir.join(DEFAULT_PROJECT_CONFIG_FILENAME));
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ddscope_portable_cfg_test_{}",
+        std::process::id()
+    ));
+    let test_file = temp_dir.join(DEFAULT_PROJECT_CONFIG_FILENAME);
+    let _ = clear_default_project_config_at_path(&test_file);
+
+    assert_eq!(
+        load_default_project_config_from_path(&test_file).expect("load missing"),
+        None
+    );
+
+    let err = save_default_project_config_to_path(&test_file, "{not-valid-json")
+        .expect_err("invalid JSON must be rejected");
+    assert_eq!(err.code, "INVALID_CONFIG");
+
+    let payload = r#"{"schema":"ddscope.project.v1","sources":[],"board":{}}"#;
+    let saved_path =
+        save_default_project_config_to_path(&test_file, payload).expect("save valid JSON");
+    assert_eq!(saved_path, test_file.to_string_lossy());
+    assert_eq!(
+        load_default_project_config_from_path(&test_file).expect("load saved"),
+        Some(payload.to_string())
+    );
+
+    assert!(clear_default_project_config_at_path(&test_file).expect("clear saved"));
+    assert!(!clear_default_project_config_at_path(&test_file).expect("clear missing"));
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

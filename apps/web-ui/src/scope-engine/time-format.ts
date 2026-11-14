@@ -69,3 +69,29 @@ export function rgbaNumberToCss(rgba: number, alphaOverride?: number): string {
   const a = alphaOverride ?? ((rgba & 0xff) / 255 || 1);
   return `rgba(${r}, ${g}, ${b}, ${a})`;
 }
+
+export function rgbaNumberToHex(rgba: number): string {
+  const r = ((rgba >>> 24) & 0xff).toString(16).padStart(2, "0");
+  const g = ((rgba >>> 16) & 0xff).toString(16).padStart(2, "0");
+  const b = ((rgba >>> 8) & 0xff).toString(16).padStart(2, "0");
+  return `#${r}${g}${b}`;
+}
+
+export function hexToRgbaNumber(hex: string, alpha = 0xff): number {
+  const cleaned = hex.trim().replace(/^#/, "");
+  let r = 0x38;
+  let g = 0xbd;
+  let b = 0xf8;
+  if (/^[0-9a-fA-F]{6}$/.test(cleaned)) {
+    r = Number.parseInt(cleaned.slice(0, 2), 16);
+    g = Number.parseInt(cleaned.slice(2, 4), 16);
+    b = Number.parseInt(cleaned.slice(4, 6), 16);
+  } else if (/^[0-9a-fA-F]{3}$/.test(cleaned)) {
+    r = Number.parseInt(cleaned[0] + cleaned[0], 16);
+    g = Number.parseInt(cleaned[1] + cleaned[1], 16);
+    b = Number.parseInt(cleaned[2] + cleaned[2], 16);
+  } else {
+    return 0x38bdf8ff;
+  }
+  return (((r & 0xff) << 24) | ((g & 0xff) << 16) | ((b & 0xff) << 8) | (alpha & 0xff)) >>> 0;
+}

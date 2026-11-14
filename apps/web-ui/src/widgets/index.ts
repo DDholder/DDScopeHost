@@ -3,6 +3,7 @@ export const WIDGETS_READY = true;
 export * from "./types.ts";
 export * from "./WidgetToolbox.tsx";
 export * from "./DashboardCanvas.tsx";
+export * from "./ChannelBindSelect.tsx";
 export * from "./DigitalMeterWidget.tsx";
 export * from "./RadialGaugeWidget.tsx";
 export * from "./StatusLedWidget.tsx";

@@ -15,6 +15,10 @@ import type { DdsfFrameHeaderView, DdsfScopeView } from "../bridge/ddsf-parser.t
 import { DdsfSnapshotKind, TriggerRuntimeStateCode } from "../bridge/ddsf-spec.ts";
 import { MOCK_BASE_HOST_NS } from "../bridge/mock-ddsf-core.ts";
 import { translate, type MessageKey, type UiLocale } from "../i18n/index.ts";
+import {
+  DDSCOPE_POINTER_DROP_EVENT,
+  type PointerDropEventDetail,
+} from "../workspace/pointer-dnd.ts";
 import type { RenderBackendKind, ScopeRenderBackend } from "./backend.ts";
 import { createScopeRenderBackend } from "./create-backend.ts";
 import { ScopeGeometryBuilder } from "./geometry.ts";
@@ -38,7 +42,9 @@ import {
   formatFrequencyHz,
   formatMetricValue,
   formatTimeNs,
+  hexToRgbaNumber,
   rgbaNumberToCss,
+  rgbaNumberToHex,
 } from "./time-format.ts";
 import type {
   ScopeCallbacks,
@@ -99,6 +105,8 @@ const CHIP_TRACE_COLORS = [
   0x22d3eeff,
   0xf97316ff,
   0xe879f9ff,
+  0x84cc16ff,
+  0xfacc15ff,
 ];
 
 function cursorForHit(hit: HudHitTarget): string {
@@ -171,6 +179,7 @@ export function ScopeViewportWidget({
       : TriggerRuntimeStateCode.Armed,
   );
   const [backendKind, setBackendKind] = useState<RenderBackendKind>("webgl2");
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [editingChannelId, setEditingChannelId] = useState<number | null>(null);
 
@@ -185,6 +194,23 @@ export function ScopeViewportWidget({
 
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onPointerDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent<PointerDropEventDetail>).detail;
+      if (!detail || detail.payload.kind !== "channel") return;
+      ev.stopPropagation();
+      setDropActive(false);
+      callbacksRef.current.onDropChannel(
+        configRef.current.scopeId,
+        detail.payload.channelId,
+      );
+    };
+    el.addEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
+    return () => el.removeEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
+  }, []);
 
   const initialFrame = bridgeClient.topicBus.getLatestScopeFrame(config.scopeId);
   const pendingScopeRef = useRef<DdsfScopeView | null>(initialFrame?.scope ?? null);
@@ -373,7 +399,8 @@ export function ScopeViewportWidget({
         dirtyRef.current = true;
 
         const plotW = Math.max(64, w - 82);
-        onCanvasWidthChanged?.(configRef.current.scopeId, plotW);
+        const physPlotW = Math.min(4096, Math.max(128, Math.round(plotW * dpr)));
+        onCanvasWidthChanged?.(configRef.current.scopeId, physPlotW);
       }
     };
 
@@ -910,29 +937,50 @@ export function ScopeViewportWidget({
   }, []);
 
   const handleDragOver = (ev: DragEvent<HTMLDivElement>) => {
-    if (ev.dataTransfer.types.includes("application/x-ddscope-channel")) {
+    const types = Array.from(ev.dataTransfer.types);
+    if (
+      !types.includes("application/x-ddscope-widget") &&
+      (types.includes("application/x-ddscope-channel") || types.includes("text/plain"))
+    ) {
       ev.preventDefault();
       ev.dataTransfer.dropEffect = "copy";
       if (!dropActive) setDropActive(true);
     }
   };
 
-  const handleDragLeave = () => {
-    if (dropActive) setDropActive(false);
+  const handleDragLeave = (ev: DragEvent<HTMLDivElement>) => {
+    if (!ev.currentTarget.contains(ev.relatedTarget as Node | null) && dropActive) {
+      setDropActive(false);
+    }
   };
 
   const handleDrop = (ev: DragEvent<HTMLDivElement>) => {
-    ev.preventDefault();
     setDropActive(false);
+    let droppedChannelId: number | null = null;
     const raw = ev.dataTransfer.getData("application/x-ddscope-channel");
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as { channelId?: number };
-      if (typeof parsed.channelId === "number") {
-        callbacks.onDropChannel(config.scopeId, parsed.channelId);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { channelId?: number };
+        if (typeof parsed.channelId === "number" && Number.isFinite(parsed.channelId)) {
+          droppedChannelId = parsed.channelId;
+        }
+      } catch {
+        // Ignore malformed drop payload
       }
-    } catch {
-      // Ignore malformed drop payload
+    }
+    if (droppedChannelId === null) {
+      const plain = ev.dataTransfer.getData("text/plain").trim();
+      if (plain.startsWith("channel:")) {
+        const num = Number(plain.slice("channel:".length));
+        if (Number.isFinite(num)) droppedChannelId = num;
+      } else if (/^\d+$/.test(plain)) {
+        droppedChannelId = Number(plain);
+      }
+    }
+    if (droppedChannelId !== null) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      callbacks.onDropChannel(config.scopeId, droppedChannelId);
     }
   };
 
@@ -941,8 +989,20 @@ export function ScopeViewportWidget({
   const wheelMode = config.wheelZoomTarget ?? "x";
   const editingTrack =
     editingChannelId !== null
-      ? config.tracks.find((tr) => tr.channelId === editingChannelId && tr.lane === "analog") ?? null
+      ? config.tracks.find((tr) => tr.channelId === editingChannelId) ?? null
       : null;
+
+  const updateTrackProps = (
+    channelId: number,
+    patch: { yScale?: number; yOffset?: number; colorRgba?: number; visible?: boolean },
+  ) => {
+    callbacks.onUpdateScope(config.scopeId, (prev) => ({
+      ...prev,
+      tracks: prev.tracks.map((tr) =>
+        tr.channelId === channelId ? { ...tr, ...patch } : tr,
+      ),
+    }));
+  };
 
   const handleAutoFitY = () => {
     const scopeData = pendingScopeRef.current;
@@ -978,7 +1038,9 @@ export function ScopeViewportWidget({
 
   return (
     <div
+      ref={rootRef}
       className={`scope-widget ${isFocused ? "scope-widget-focused" : ""} ${dropActive ? "scope-widget-drop-active" : ""}`}
+      data-drop-scope-id={config.scopeId}
       data-testid={`scope-widget-${config.scopeId}`}
       onMouseDown={() => onFocusScope?.(config.scopeId)}
       onDragOver={handleDragOver}
@@ -1381,9 +1443,19 @@ export function ScopeViewportWidget({
                   }
                 }}
               >
-                <span
-                  className="scope-ch-dot"
+                <button
+                  type="button"
+                  className={`scope-ch-dot scope-ch-dot-btn ${isEditing ? "active" : ""}`}
                   style={{ backgroundColor: rgbaNumberToCss(trTrack.colorRgba, 1) }}
+                  title={t("scope.channelColorTitle")}
+                  aria-label={t("scope.channelColorTitle")}
+                  data-testid={`ch-color-btn-${config.scopeId}-${trTrack.channelId}`}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    setEditingChannelId((prev) =>
+                      prev === trTrack.channelId ? null : trTrack.channelId,
+                    );
+                  }}
                 />
                 <span className="scope-ch-name">{label}</span>
                 <span
@@ -1453,120 +1525,112 @@ export function ScopeViewportWidget({
           )}
         </div>
 
-        {/* Per-channel independent Scale & Offset editor bar */}
+        {/* Per-channel independent Scale / Offset & Color editor bar */}
         {editingTrack && (
           <div
             className="scope-ch-cond-bar"
             data-testid={`scope-ch-cond-bar-${config.scopeId}-${editingTrack.channelId}`}
           >
             <span className="scope-sublabel">
-              {channelsById[editingTrack.channelId]?.full_path ?? `ch${editingTrack.channelId}`} · {t("scope.channelCondLabel")}
+              {channelsById[editingTrack.channelId]?.full_path ?? `ch${editingTrack.channelId}`} ·{" "}
+              {editingTrack.lane === "analog"
+                ? t("scope.channelCondLabel")
+                : t("scope.channelColorLabel")}
             </span>
-            <label className="scope-inline-num">
-              {t("scope.chScale")}
-              <input
-                type="number"
-                step="0.1"
-                value={editingTrack.yScale}
-                onChange={(ev) => {
-                  const val = Number.parseFloat(ev.target.value);
-                  if (!Number.isFinite(val)) return;
-                  callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                    ...prev,
-                    tracks: prev.tracks.map((tr) =>
-                      tr.channelId === editingTrack.channelId ? { ...tr, yScale: val } : tr,
-                    ),
-                  }));
-                }}
-              />
-            </label>
-            <button
-              type="button"
-              className="scope-btn-xs"
-              onClick={() =>
-                callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                  ...prev,
-                  tracks: prev.tracks.map((tr) =>
-                    tr.channelId === editingTrack.channelId
-                      ? { ...tr, yScale: Number((tr.yScale * 0.5).toFixed(4)) }
-                      : tr,
-                  ),
-                }))
-              }
-            >
-              ×0.5
-            </button>
-            <button
-              type="button"
-              className="scope-btn-xs"
-              onClick={() =>
-                callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                  ...prev,
-                  tracks: prev.tracks.map((tr) =>
-                    tr.channelId === editingTrack.channelId
-                      ? { ...tr, yScale: Number((tr.yScale * 2).toFixed(4)) }
-                      : tr,
-                  ),
-                }))
-              }
-            >
-              ×2
-            </button>
+            {editingTrack.lane === "analog" && (
+              <>
+                <label className="scope-inline-num">
+                  {t("scope.chScale")}
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={editingTrack.yScale}
+                    onChange={(ev) => {
+                      const val = Number.parseFloat(ev.target.value);
+                      if (!Number.isFinite(val)) return;
+                      updateTrackProps(editingTrack.channelId, { yScale: val });
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="scope-btn-xs"
+                  onClick={() =>
+                    updateTrackProps(editingTrack.channelId, {
+                      yScale: Number((editingTrack.yScale * 0.5).toFixed(4)),
+                    })
+                  }
+                >
+                  ×0.5
+                </button>
+                <button
+                  type="button"
+                  className="scope-btn-xs"
+                  onClick={() =>
+                    updateTrackProps(editingTrack.channelId, {
+                      yScale: Number((editingTrack.yScale * 2).toFixed(4)),
+                    })
+                  }
+                >
+                  ×2
+                </button>
 
-            <label className="scope-inline-num">
-              {t("scope.chOffset")}
-              <input
-                type="number"
-                step="1"
-                value={editingTrack.yOffset}
-                onChange={(ev) => {
-                  const val = Number.parseFloat(ev.target.value);
-                  if (!Number.isFinite(val)) return;
-                  callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                    ...prev,
-                    tracks: prev.tracks.map((tr) =>
-                      tr.channelId === editingTrack.channelId ? { ...tr, yOffset: val } : tr,
-                    ),
-                  }));
-                }}
-              />
-            </label>
-            <button
-              type="button"
-              className="scope-btn-xs"
-              onClick={() =>
-                callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                  ...prev,
-                  tracks: prev.tracks.map((tr) =>
-                    tr.channelId === editingTrack.channelId
-                      ? { ...tr, yScale: 1, yOffset: 0 }
-                      : tr,
-                  ),
-                }))
-              }
-            >
-              {t("scope.chReset")}
-            </button>
+                <label className="scope-inline-num">
+                  {t("scope.chOffset")}
+                  <input
+                    type="number"
+                    step="1"
+                    value={editingTrack.yOffset}
+                    onChange={(ev) => {
+                      const val = Number.parseFloat(ev.target.value);
+                      if (!Number.isFinite(val)) return;
+                      updateTrackProps(editingTrack.channelId, { yOffset: val });
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="scope-btn-xs"
+                  onClick={() =>
+                    updateTrackProps(editingTrack.channelId, { yScale: 1, yOffset: 0 })
+                  }
+                >
+                  {t("scope.chReset")}
+                </button>
+              </>
+            )}
 
             <div className="scope-color-swatches">
               {CHIP_TRACE_COLORS.map((c) => (
                 <button
                   key={c}
                   type="button"
-                  className={`scope-color-swatch ${editingTrack.colorRgba === c ? "active" : ""}`}
+                  className={`scope-color-swatch ${(editingTrack.colorRgba >>> 0) === c ? "active" : ""}`}
                   style={{ backgroundColor: rgbaNumberToCss(c, 1) }}
                   aria-label="Trace color"
-                  onClick={() =>
-                    callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                      ...prev,
-                      tracks: prev.tracks.map((tr) =>
-                        tr.channelId === editingTrack.channelId ? { ...tr, colorRgba: c } : tr,
-                      ),
-                    }))
-                  }
+                  data-testid={`ch-swatch-${config.scopeId}-${editingTrack.channelId}-${rgbaNumberToHex(c).slice(1)}`}
+                  onClick={() => updateTrackProps(editingTrack.channelId, { colorRgba: c })}
                 />
               ))}
             </div>
+
+            <label className="scope-custom-color-picker">
+              <span>{t("scope.customColor")}</span>
+              <input
+                type="color"
+                className="scope-color-input"
+                data-testid={`ch-color-input-${config.scopeId}-${editingTrack.channelId}`}
+                value={rgbaNumberToHex(editingTrack.colorRgba)}
+                onChange={(ev) =>
+                  updateTrackProps(editingTrack.channelId, {
+                    colorRgba: hexToRgbaNumber(ev.target.value),
+                  })
+                }
+              />
+              <span className="scope-color-hex">
+                {rgbaNumberToHex(editingTrack.colorRgba).toUpperCase()}
+              </span>
+            </label>
 
             <button
               type="button"

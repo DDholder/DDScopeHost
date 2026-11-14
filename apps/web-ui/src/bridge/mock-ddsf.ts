@@ -1,6 +1,7 @@
 import type {
   ChannelTreeSnapshotDto_Serialize,
   CreateSourceRequestDto_Deserialize,
+  CreateSourceRequestDto_Serialize,
   DownlinkReceiptDto,
   RawRecorderRequestDto_Deserialize,
   ScopeViewportConfigDto_Deserialize,
@@ -292,6 +293,10 @@ export class MockDdsfController {
 
   getChannelTree(): Promise<ChannelTreeSnapshotDto_Serialize> {
     return this.callRpc<ChannelTreeSnapshotDto_Serialize>("getChannelTree");
+  }
+
+  getSourceConfigs(): Promise<CreateSourceRequestDto_Serialize[]> {
+    return this.callRpc<CreateSourceRequestDto_Serialize[]>("getSourceConfigs");
   }
 
   upsertScopeViewport(

@@ -442,6 +442,7 @@ pub struct SourceSession {
     sim_control: Option<SimControlHandle>,
     replay_control: Option<ReplayControlHandle>,
     active_recorder: Option<(PathBuf, Arc<RawByteRecorder>)>,
+    source_config: Option<SourceConfig>,
 }
 
 impl std::fmt::Debug for SourceSession {
@@ -478,6 +479,8 @@ impl SourceSession {
                 "SourceConfig source_id must not be empty".into(),
             ));
         }
+
+        let stored_config = config.clone();
 
         let (transport, sim_control, replay_control): (
             Box<dyn Transport>,
@@ -544,7 +547,7 @@ impl SourceSession {
             } => protocol_registry.create(&codec_id, &json_config)?,
         };
 
-        Self::from_components(
+        let mut sess = Self::from_components(
             SourceSessionComponents {
                 source_id: config.source_id,
                 display_name: config.display_name,
@@ -556,7 +559,9 @@ impl SourceSession {
                 replay_control,
             },
             hub,
-        )
+        )?;
+        sess.source_config = Some(stored_config);
+        Ok(sess)
     }
 
     /// Constructs a [`SourceSession`] from pre-built transport, clock, and codec instances,
@@ -607,6 +612,7 @@ impl SourceSession {
             sim_control: components.sim_control,
             replay_control: components.replay_control,
             active_recorder: None,
+            source_config: None,
         })
     }
 
@@ -679,6 +685,12 @@ impl SourceSession {
     #[inline]
     pub fn raw_recording_path(&self) -> Option<&Path> {
         self.active_recorder.as_ref().map(|(p, _)| p.as_path())
+    }
+
+    /// Returns the original [`SourceConfig`] used to construct this session, if constructed from config.
+    #[inline]
+    pub fn source_config(&self) -> Option<&SourceConfig> {
+        self.source_config.as_ref()
     }
 
     /// Returns the current [`SourceRuntimeState`] of this session.
@@ -1588,6 +1600,22 @@ impl CoreWorkspace {
         let arcs: Vec<_> = self.sources.read().values().cloned().collect();
         let mut out: Vec<SourceSummary> = arcs.into_iter().map(|a| a.lock().summary()).collect();
         out.sort_by(|a, b| a.source_id.as_str().cmp(b.source_id.as_str()));
+        out
+    }
+
+    /// Returns summaries paired with retained creation configurations sorted by [`SourceId`].
+    pub fn list_source_configs(&self) -> Vec<(SourceSummary, SourceConfig)> {
+        let arcs: Vec<_> = self.sources.read().values().cloned().collect();
+        let mut out: Vec<(SourceSummary, SourceConfig)> = arcs
+            .into_iter()
+            .filter_map(|arc| {
+                let sess = arc.lock();
+                sess.source_config()
+                    .cloned()
+                    .map(|cfg| (sess.summary(), cfg))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.source_id.as_str().cmp(b.0.source_id.as_str()));
         out
     }
 
@@ -2850,5 +2878,27 @@ fn process_single_packet(
             ctx.telemetry.worker_error.store(true, Ordering::Release);
             *ctx.telemetry.last_error_msg.lock() = Some(err.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_source_configs_returns_retained_configs_sorted_by_source_id() {
+        let ws = CoreWorkspace::new(tokio::runtime::Handle::current());
+        let cfg_b = SourceConfig::sim("sim_b", SimConfig::default()).with_display_name("Sim B");
+        let cfg_a = SourceConfig::sim("sim_a", SimConfig::default()).with_display_name("Sim A");
+
+        ws.create_source(cfg_b.clone()).expect("create sim_b");
+        ws.create_source(cfg_a.clone()).expect("create sim_a");
+
+        let configs = ws.list_source_configs();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].0.source_id.as_str(), "sim_a");
+        assert_eq!(configs[0].1, cfg_a);
+        assert_eq!(configs[1].0.source_id.as_str(), "sim_b");
+        assert_eq!(configs[1].1, cfg_b);
     }
 }
