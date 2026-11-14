@@ -17,6 +17,13 @@ import {
   type MockDownlinkStats,
   type RuntimeStatus,
 } from "../bridge/index.ts";
+import {
+  detectInitialLocale,
+  getDefaultScopeTitle,
+  persistLocale,
+  translateDefaultScopeTitle,
+  type UiLocale,
+} from "../i18n/index.ts";
 import type {
   ScopeTrackUiBinding,
   ScopeUiConfig,
@@ -65,11 +72,13 @@ export interface WorkspaceStoreState {
   nextScopeId: number;
   canvasWidthsByScope: Record<number, number>;
 
+  locale: UiLocale;
   mockRateHz: 60 | 120;
   sidebarCollapsed: boolean;
   downlinkBarCollapsed: boolean;
   sourceWizardOpen: boolean;
 
+  setLocale: (locale: UiLocale) => void;
   initWorkspace: () => Promise<void>;
   refreshChannelTree: () => Promise<void>;
   setMockRateHz: (rate: 60 | 120) => void;
@@ -158,6 +167,7 @@ function defaultYScaleAndOffset(ch: ChannelNodeDto_Serialize): {
 
 function buildDefaultScopeConfigs(
   channelsById: Record<number, ChannelNodeDto_Serialize>,
+  locale: UiLocale,
 ): Record<number, ScopeUiConfig> {
   const byPath = new Map<string, ChannelNodeDto_Serialize>();
   Object.values(channelsById).forEach((c) => {
@@ -174,7 +184,7 @@ function buildDefaultScopeConfigs(
 
   const scope1: ScopeUiConfig = {
     scopeId: 1,
-    title: "MSO Scope 1 · Motor Live (Roll)",
+    title: getDefaultScopeTitle("scope1", locale),
     timeSpanNs: 20_000_000, // 20 ms (2 ms/div)
     preTriggerRatio: 0.25,
     panOffsetNs: 0,
@@ -207,7 +217,7 @@ function buildDefaultScopeConfigs(
 
   const scope2: ScopeUiConfig = {
     scopeId: 2,
-    title: "MSO Scope 2 · Glitch Capture (Single)",
+    title: getDefaultScopeTitle("scope2", locale),
     timeSpanNs: 10_000_000, // 10 ms (1 ms/div)
     preTriggerRatio: 0.25,
     panOffsetNs: 0,
@@ -279,13 +289,35 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
   nextScopeId: 3,
   canvasWidthsByScope: { 1: 760, 2: 760 },
 
+  locale: detectInitialLocale(),
   mockRateHz: 120,
   sidebarCollapsed: false,
   downlinkBarCollapsed: false,
   sourceWizardOpen: false,
 
+  setLocale: (nextLocale) => {
+    persistLocale(nextLocale);
+    const state = get();
+    const nextScopes: Record<number, ScopeUiConfig> = {};
+    let changed = false;
+    for (const [idStr, sc] of Object.entries(state.scopes)) {
+      const nextTitle = translateDefaultScopeTitle(sc.title, nextLocale);
+      if (nextTitle !== sc.title) {
+        changed = true;
+        nextScopes[Number(idStr)] = { ...sc, title: nextTitle };
+      } else {
+        nextScopes[Number(idStr)] = sc;
+      }
+    }
+    set({
+      locale: nextLocale,
+      ...(changed ? { scopes: nextScopes } : {}),
+    });
+  },
+
   initWorkspace: async () => {
     if (get().initialized) return;
+    persistLocale(get().locale);
     try {
       const status = await fetchEngineStatus();
       bridgeClient.startDataPlane(get().mockRateHz);
@@ -322,7 +354,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
         }
       }
 
-      const defaultScopes = buildDefaultScopeConfigs(chMap);
+      const defaultScopes = buildDefaultScopeConfigs(chMap, get().locale);
       await Promise.all(
         Object.values(defaultScopes).map((sc) =>
           bridgeClient.upsertScopeViewport(toViewportDto(sc, 760)),
@@ -435,7 +467,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
 
     const newScope: ScopeUiConfig = {
       scopeId,
-      title: title ?? `MSO Scope ${scopeId}`,
+      title: title ?? getDefaultScopeTitle("generic", state.locale, scopeId),
       timeSpanNs: 20_000_000,
       preTriggerRatio: 0.25,
       panOffsetNs: 0,

@@ -9,12 +9,14 @@ import {
 } from "dockview";
 import { ScopeViewportWidget, type ScopeCallbacks } from "../scope-engine/index.ts";
 import { useWorkspaceStore } from "./store.ts";
+import { useI18n } from "./use-i18n.ts";
 
 interface ScopePanelParams {
   scopeId: number;
 }
 
 function MsoScopePanel(props: IDockviewPanelProps<ScopePanelParams>) {
+  const { locale, t } = useI18n();
   const scopeId = props.params.scopeId;
   const config = useWorkspaceStore((s) => s.scopes[scopeId]);
   const channelsById = useWorkspaceStore((s) => s.channelsById);
@@ -45,7 +47,7 @@ function MsoScopePanel(props: IDockviewPanelProps<ScopePanelParams>) {
   if (!config) {
     return (
       <div className="scope-panel-empty">
-        Scope #{scopeId} is unavailable.
+        {t("stage.unavailable", { id: scopeId })}
       </div>
     );
   }
@@ -55,6 +57,7 @@ function MsoScopePanel(props: IDockviewPanelProps<ScopePanelParams>) {
       config={config}
       channelsById={channelsById}
       callbacks={callbacks}
+      locale={locale}
       isFocused={focusedScopeId === scopeId}
       onFocusScope={setFocusedScopeId}
       onCanvasWidthChanged={setScopeCanvasWidth}
@@ -63,23 +66,25 @@ function MsoScopePanel(props: IDockviewPanelProps<ScopePanelParams>) {
 }
 
 function WorkspaceWatermark(_props: IWatermarkPanelProps) {
+  const { t } = useI18n();
   const addScope = useWorkspaceStore((s) => s.addScope);
   return (
     <div className="dockview-watermark">
-      <h3>No Active MSO Oscilloscope Panels</h3>
-      <p>Create a new independent MSO oscilloscope viewport or drag channels from the sidebar.</p>
+      <h3>{t("stage.emptyTitle")}</h3>
+      <p>{t("stage.emptyDesc")}</p>
       <button
         type="button"
         className="scope-btn scope-btn-accent"
         onClick={() => addScope()}
       >
-        + Add MSO Scope
+        {t("stage.addScope")}
       </button>
     </div>
   );
 }
 
 export function DockviewStage() {
+  const { t } = useI18n();
   const scopeOrder = useWorkspaceStore((s) => s.scopeOrder);
   const scopes = useWorkspaceStore((s) => s.scopes);
   const addScope = useWorkspaceStore((s) => s.addScope);
@@ -192,26 +197,24 @@ export function DockviewStage() {
             data-testid="add-scope-btn"
             onClick={() => addScope()}
           >
-            + Add MSO Scope
+            {t("stage.addScope")}
           </button>
           <button
             type="button"
             className="scope-btn"
             onClick={() => handleSplitLayout("below")}
           >
-            Split Stacked
+            {t("stage.splitStacked")}
           </button>
           <button
             type="button"
             className="scope-btn"
             onClick={() => handleSplitLayout("right")}
           >
-            Split Side-by-Side
+            {t("stage.splitSideBySide")}
           </button>
         </div>
-        <span className="stage-hint">
-          Drag tabs to split/dock · Scroll on waveform to zoom · Drag channel from tree to bind
-        </span>
+        <span className="stage-hint">{t("stage.hint")}</span>
       </div>
 
       <div className="dockview-container">

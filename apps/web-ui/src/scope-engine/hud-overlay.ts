@@ -7,6 +7,7 @@ import type {
   DdsfTrackBlockView,
 } from "../bridge/ddsf-parser.ts";
 import type { TriggerConditionDto, TriggerSweepModeDto } from "../bridge/bindings.ts";
+import { translate, type UiLocale } from "../i18n/index.ts";
 import type { RenderBackendKind } from "./backend.ts";
 import type { RibbonLabelPlacement } from "./geometry.ts";
 import {
@@ -24,6 +25,7 @@ import {
 } from "./time-format.ts";
 
 export interface ScopeHudState {
+  locale?: UiLocale;
   sweepMode: TriggerSweepModeDto;
   timeSpanNs: number;
   preTriggerRatio: number;
@@ -211,11 +213,12 @@ export function renderScopeHud(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   // 1. Top telemetry & timebase header
+  const locale: UiLocale = state.locale ?? "en";
   ctx.font = '600 11px "JetBrains Mono", "Fira Code", ui-monospace, monospace';
   ctx.textBaseline = "middle";
   const topMidY = plotTop * 0.5;
 
-  const tbText = `${formatTimePerDiv(state.timeSpanNs)} · Span ${formatTimeNs(state.timeSpanNs)}`;
+  const tbText = `${formatTimePerDiv(state.timeSpanNs)} · ${translate(locale, "hud.span")} ${formatTimeNs(state.timeSpanNs)}`;
   ctx.fillStyle = "#cbd5e1";
   ctx.textAlign = "left";
   ctx.fillText(tbText, plotLeft, topMidY);
@@ -398,7 +401,7 @@ export function renderScopeHud(
         ctx.fillText("T", plotRight + 11, clampedTrigY + 0.5);
 
         if (state.draggingHandle === "triggerLevel") {
-          const tip = `Trig ${formatMetricValue(level, targetLane.track.unit)}`;
+          const tip = `${translate(locale, "hud.trig")} ${formatMetricValue(level, targetLane.track.unit)}`;
           const tipW = ctx.measureText(tip).width + 12;
           ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
           ctx.fillRect(plotRight - tipW - 6, clampedTrigY - 19, tipW, 16);

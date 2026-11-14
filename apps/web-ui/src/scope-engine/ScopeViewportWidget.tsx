@@ -13,6 +13,7 @@ import {
 import { bridgeClient } from "../bridge/control-client.ts";
 import type { DdsfScopeView } from "../bridge/ddsf-parser.ts";
 import { TriggerRuntimeStateCode } from "../bridge/ddsf-spec.ts";
+import { translate, type MessageKey, type UiLocale } from "../i18n/index.ts";
 import type { RenderBackendKind, ScopeRenderBackend } from "./backend.ts";
 import { createScopeRenderBackend } from "./create-backend.ts";
 import { ScopeGeometryBuilder } from "./geometry.ts";
@@ -42,41 +43,42 @@ export interface ScopeViewportWidgetProps {
   config: ScopeUiConfig;
   channelsById: ScopeChannelLookup;
   callbacks: ScopeCallbacks;
+  locale?: UiLocale;
   isFocused?: boolean;
   onFocusScope?: (scopeId: number) => void;
   onCanvasWidthChanged?: (scopeId: number, widthPx: number) => void;
 }
 
-const SWEEP_MODES: ReadonlyArray<{ id: TriggerSweepModeDto; label: string }> = [
-  { id: "roll", label: "Roll" },
-  { id: "auto", label: "Auto" },
-  { id: "normal", label: "Normal" },
-  { id: "single", label: "Single" },
+const SWEEP_MODES: ReadonlyArray<{ id: TriggerSweepModeDto; labelKey: MessageKey }> = [
+  { id: "roll", labelKey: "scope.sweep.roll" },
+  { id: "auto", labelKey: "scope.sweep.auto" },
+  { id: "normal", labelKey: "scope.sweep.normal" },
+  { id: "single", labelKey: "scope.sweep.single" },
 ];
 
-const SYNC_GROUP_OPTIONS: ReadonlyArray<{ id: number | null; label: string }> = [
-  { id: null, label: "Sync: Off" },
-  { id: 1, label: "Sync: Group A" },
-  { id: 2, label: "Sync: Group B" },
+const SYNC_GROUP_OPTIONS: ReadonlyArray<{ id: number | null; labelKey: MessageKey }> = [
+  { id: null, labelKey: "scope.syncOff" },
+  { id: 1, labelKey: "scope.syncA" },
+  { id: 2, labelKey: "scope.syncB" },
 ];
 
 function triggerStateLabel(code: number): {
-  text: string;
+  labelKey: MessageKey;
   tone: "roll" | "armed" | "auto" | "trig" | "latched";
 } {
   switch (code) {
     case TriggerRuntimeStateCode.Roll:
-      return { text: "ROLL", tone: "roll" };
+      return { labelKey: "scope.status.roll", tone: "roll" };
     case TriggerRuntimeStateCode.Armed:
-      return { text: "ARMED", tone: "armed" };
+      return { labelKey: "scope.status.armed", tone: "armed" };
     case TriggerRuntimeStateCode.AutoFreerun:
-      return { text: "AUTO", tone: "auto" };
+      return { labelKey: "scope.status.auto", tone: "auto" };
     case TriggerRuntimeStateCode.Triggered:
-      return { text: "TRIG'D", tone: "trig" };
+      return { labelKey: "scope.status.triggered", tone: "trig" };
     case TriggerRuntimeStateCode.LatchedPinned:
-      return { text: "LATCHED · PINNED", tone: "latched" };
+      return { labelKey: "scope.status.latched", tone: "latched" };
     default:
-      return { text: "IDLE", tone: "roll" };
+      return { labelKey: "scope.status.idle", tone: "roll" };
   }
 }
 
@@ -105,10 +107,13 @@ export function ScopeViewportWidget({
   config,
   channelsById,
   callbacks,
+  locale = "en",
   isFocused = false,
   onFocusScope,
   onCanvasWidthChanged,
 }: ScopeViewportWidgetProps) {
+  const t = (key: MessageKey, params?: Record<string, string | number>) =>
+    translate(locale, key, params);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const gpuCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -132,6 +137,9 @@ export function ScopeViewportWidget({
 
   const configRef = useRef(config);
   configRef.current = config;
+
+  const localeRef = useRef<UiLocale>(locale);
+  localeRef.current = locale;
 
   const channelsRef = useRef(channelsById);
   channelsRef.current = channelsById;
@@ -207,7 +215,7 @@ export function ScopeViewportWidget({
 
   useEffect(() => {
     dirtyRef.current = true;
-  }, [config, trackRenderConfigs]);
+  }, [config, trackRenderConfigs, locale]);
 
   // Subscribe to zero-copy DDSF frames for this scope without triggering React re-renders
   useEffect(() => {
@@ -371,6 +379,7 @@ export function ScopeViewportWidget({
 
         if (hudCtx) {
           renderScopeHud(hudCtx, layout, dpr, {
+            locale: localeRef.current,
             sweepMode: cfg.sweepMode,
             timeSpanNs: cfg.timeSpanNs,
             preTriggerRatio: cfg.preTriggerRatio,
@@ -678,7 +687,7 @@ export function ScopeViewportWidget({
       {/* Top Instrument Control Bar */}
       <div className="scope-toolbar">
         <div className="scope-toolbar-group">
-          <div className="scope-segmented" role="group" aria-label="Sweep Mode">
+          <div className="scope-segmented" role="group" aria-label={t("scope.sweepModeAria")}>
             {SWEEP_MODES.map((m) => (
               <button
                 key={m.id}
@@ -692,7 +701,7 @@ export function ScopeViewportWidget({
                   }))
                 }
               >
-                {m.label}
+                {t(m.labelKey)}
               </button>
             ))}
           </div>
@@ -701,7 +710,7 @@ export function ScopeViewportWidget({
             className={`scope-status-pill scope-status-${statusMeta.tone}`}
             data-testid={`scope-status-${config.scopeId}`}
           >
-            {statusMeta.text}
+            {t(statusMeta.labelKey)}
           </span>
 
           {(config.sweepMode === "single" ||
@@ -712,7 +721,7 @@ export function ScopeViewportWidget({
               data-testid={`scope-rearm-${config.scopeId}`}
               onClick={() => callbacks.onRearmScope(config.scopeId)}
             >
-              Re-arm
+              {t("scope.rearm")}
             </button>
           )}
 
@@ -726,14 +735,14 @@ export function ScopeViewportWidget({
               }))
             }
           >
-            {config.paused ? "Resume" : "Pause"}
+            {config.paused ? t("scope.resume") : t("scope.pause")}
           </button>
 
           {config.panOffsetNs !== 0 && (
             <button
               type="button"
               className="scope-btn"
-              title="Reset Pan Offset"
+              title={t("scope.zeroPanTitle")}
               onClick={() =>
                 callbacks.onUpdateScope(config.scopeId, (prev) => ({
                   ...prev,
@@ -741,7 +750,7 @@ export function ScopeViewportWidget({
                 }))
               }
             >
-              Zero Pan
+              {t("scope.zeroPan")}
             </button>
           )}
         </div>
@@ -758,7 +767,7 @@ export function ScopeViewportWidget({
               }))
             }
           >
-            {config.analogLayout === "overlay" ? "Overlay" : "Stacked"}
+            {config.analogLayout === "overlay" ? t("scope.overlay") : t("scope.stacked")}
           </button>
 
           <button
@@ -772,12 +781,12 @@ export function ScopeViewportWidget({
               }))
             }
           >
-            Cursors A/B
+            {t("scope.cursors")}
           </button>
 
           <select
             className="scope-select"
-            aria-label="Sync Group"
+            aria-label={t("scope.syncAria")}
             data-testid={`scope-sync-${config.scopeId}`}
             value={config.syncGroupId === null ? "" : String(config.syncGroupId)}
             onChange={(ev) => {
@@ -791,14 +800,14 @@ export function ScopeViewportWidget({
           >
             {SYNC_GROUP_OPTIONS.map((opt) => (
               <option key={String(opt.id)} value={opt.id === null ? "" : String(opt.id)}>
-                {opt.label}
+                {t(opt.labelKey)}
               </option>
             ))}
           </select>
 
           <select
             className="scope-select"
-            aria-label="Timebase Span"
+            aria-label={t("scope.spanAria")}
             value={String(config.timeSpanNs)}
             onChange={(ev) => {
               const nextSpan = Number(ev.target.value);
@@ -827,7 +836,7 @@ export function ScopeViewportWidget({
               5_000_000_000,
             ].map((span) => (
               <option key={span} value={String(span)}>
-                Span: {formatTimeNs(span)}
+                {t("scope.spanPrefix")}: {formatTimeNs(span)}
               </option>
             ))}
           </select>
@@ -838,10 +847,10 @@ export function ScopeViewportWidget({
       <div className="scope-subbar">
         {config.sweepMode !== "roll" && (
           <div className="scope-trigger-controls">
-            <span className="scope-sublabel">Trig:</span>
+            <span className="scope-sublabel">{t("scope.trigLabel")}</span>
             <select
               className="scope-select-sm"
-              aria-label="Trigger Channel"
+              aria-label={t("scope.trigChannelAria")}
               value={config.trigger ? String(config.trigger.channel_id) : ""}
               onChange={(ev) => {
                 const chId = Number(ev.target.value);
@@ -875,7 +884,7 @@ export function ScopeViewportWidget({
               <>
                 <select
                   className="scope-select-sm"
-                  aria-label="Trigger Slope"
+                  aria-label={t("scope.trigSlopeAria")}
                   value={config.trigger.slope}
                   onChange={(ev) => {
                     const slope = ev.target.value as EdgeSlopeDto;
@@ -888,12 +897,12 @@ export function ScopeViewportWidget({
                     }));
                   }}
                 >
-                  <option value="rising">↑ Rising</option>
-                  <option value="falling">↓ Falling</option>
-                  <option value="either">↕ Either</option>
+                  <option value="rising">{t("scope.slopeRising")}</option>
+                  <option value="falling">{t("scope.slopeFalling")}</option>
+                  <option value="either">{t("scope.slopeEither")}</option>
                 </select>
                 <label className="scope-inline-num">
-                  Lvl
+                  {t("scope.lvl")}
                   <input
                     type="number"
                     step="0.5"
@@ -912,7 +921,7 @@ export function ScopeViewportWidget({
                   />
                 </label>
                 <label className="scope-inline-num">
-                  Hys
+                  {t("scope.hys")}
                   <input
                     type="number"
                     min="0"
@@ -935,7 +944,7 @@ export function ScopeViewportWidget({
 
             {config.trigger?.kind === "state_equals" && (
               <label className="scope-inline-num">
-                State
+                {t("scope.stateCode")}
                 <input
                   type="number"
                   step="1"
@@ -957,42 +966,42 @@ export function ScopeViewportWidget({
         )}
 
         <div className="scope-channel-chips">
-          {config.tracks.map((t) => {
-            const ch = channelsById[t.channelId];
-            const label = ch ? ch.full_path : `ch${t.channelId}`;
+          {config.tracks.map((trTrack) => {
+            const ch = channelsById[trTrack.channelId];
+            const label = ch ? ch.full_path : `ch${trTrack.channelId}`;
             const isActive =
-              t.lane === "analog" &&
-              (config.activeAnalogChannelId === t.channelId ||
-                (config.activeAnalogChannelId === null && analogTracks[0]?.channelId === t.channelId));
+              trTrack.lane === "analog" &&
+              (config.activeAnalogChannelId === trTrack.channelId ||
+                (config.activeAnalogChannelId === null && analogTracks[0]?.channelId === trTrack.channelId));
             return (
               <div
-                key={t.channelId}
-                className={`scope-ch-chip ${!t.visible ? "muted" : ""} ${isActive ? "active" : ""}`}
+                key={trTrack.channelId}
+                className={`scope-ch-chip ${!trTrack.visible ? "muted" : ""} ${isActive ? "active" : ""}`}
                 onClick={() => {
-                  if (t.lane === "analog") {
+                  if (trTrack.lane === "analog") {
                     callbacks.onUpdateScope(config.scopeId, (prev) => ({
                       ...prev,
-                      activeAnalogChannelId: t.channelId,
+                      activeAnalogChannelId: trTrack.channelId,
                     }));
                   }
                 }}
               >
                 <span
                   className="scope-ch-dot"
-                  style={{ backgroundColor: rgbaNumberToCss(t.colorRgba, 1) }}
+                  style={{ backgroundColor: rgbaNumberToCss(trTrack.colorRgba, 1) }}
                 />
                 <span className="scope-ch-name">{label}</span>
-                {t.lane === "analog" && (
+                {trTrack.lane === "analog" && (
                   <span className="scope-ch-scale">
                     <button
                       type="button"
-                      title="Zoom Y In"
+                      title={t("scope.zoomYIn")}
                       onClick={(ev) => {
                         ev.stopPropagation();
                         callbacks.onUpdateScope(config.scopeId, (prev) => ({
                           ...prev,
                           tracks: prev.tracks.map((tr) =>
-                            tr.channelId === t.channelId
+                            tr.channelId === trTrack.channelId
                               ? { ...tr, yScale: clamp(tr.yScale * 0.75, 0.01, 5000) }
                               : tr,
                           ),
@@ -1001,16 +1010,16 @@ export function ScopeViewportWidget({
                     >
                       +
                     </button>
-                    <span>{t.yScale.toFixed(t.yScale >= 10 ? 0 : 1)}/d</span>
+                    <span>{trTrack.yScale.toFixed(trTrack.yScale >= 10 ? 0 : 1)}/d</span>
                     <button
                       type="button"
-                      title="Zoom Y Out"
+                      title={t("scope.zoomYOut")}
                       onClick={(ev) => {
                         ev.stopPropagation();
                         callbacks.onUpdateScope(config.scopeId, (prev) => ({
                           ...prev,
                           tracks: prev.tracks.map((tr) =>
-                            tr.channelId === t.channelId
+                            tr.channelId === trTrack.channelId
                               ? { ...tr, yScale: clamp(tr.yScale * 1.33, 0.01, 5000) }
                               : tr,
                           ),
@@ -1024,28 +1033,28 @@ export function ScopeViewportWidget({
                 <button
                   type="button"
                   className="scope-ch-vis"
-                  title={t.visible ? "Hide Track" : "Show Track"}
+                  title={trTrack.visible ? t("scope.hideTrack") : t("scope.showTrack")}
                   onClick={(ev) => {
                     ev.stopPropagation();
                     callbacks.onUpdateScope(config.scopeId, (prev) => ({
                       ...prev,
                       tracks: prev.tracks.map((tr) =>
-                        tr.channelId === t.channelId ? { ...tr, visible: !tr.visible } : tr,
+                        tr.channelId === trTrack.channelId ? { ...tr, visible: !tr.visible } : tr,
                       ),
                     }));
                   }}
                 >
-                  {t.visible ? "◉" : "○"}
+                  {trTrack.visible ? "◉" : "○"}
                 </button>
                 <button
                   type="button"
                   className="scope-ch-del"
-                  title="Unbind Track"
+                  title={t("scope.unbindTrack")}
                   onClick={(ev) => {
                     ev.stopPropagation();
                     callbacks.onUpdateScope(config.scopeId, (prev) => ({
                       ...prev,
-                      tracks: prev.tracks.filter((tr) => tr.channelId !== t.channelId),
+                      tracks: prev.tracks.filter((tr) => tr.channelId !== trTrack.channelId),
                     }));
                   }}
                 >
@@ -1055,9 +1064,7 @@ export function ScopeViewportWidget({
             );
           })}
           {config.tracks.length === 0 && (
-            <span className="scope-empty-hint">
-              Drag channels from the left Channel Tree here to bind MSO tracks
-            </span>
+            <span className="scope-empty-hint">{t("scope.emptyTracksHint")}</span>
           )}
         </div>
       </div>
@@ -1076,7 +1083,7 @@ export function ScopeViewportWidget({
           onPointerCancel={handlePointerUp}
         />
         {dropActive && (
-          <div className="scope-drop-banner">Drop Channel to Bind MSO Track</div>
+          <div className="scope-drop-banner">{t("scope.dropBanner")}</div>
         )}
       </div>
 
@@ -1098,13 +1105,13 @@ export function ScopeViewportWidget({
           <em>Vrms</em> <strong ref={measVrmsRef}>--</strong>
         </span>
         <span className="scope-meas-item">
-          <em>Mean</em> <strong ref={measMeanRef}>--</strong>
+          <em>{t("scope.meas.mean")}</em> <strong ref={measMeanRef}>--</strong>
         </span>
         <span className="scope-meas-item">
-          <em>Freq</em> <strong ref={measFreqRef}>--</strong>
+          <em>{t("scope.meas.freq")}</em> <strong ref={measFreqRef}>--</strong>
         </span>
         <span className="scope-meas-item">
-          <em>Duty</em> <strong ref={measDutyRef}>--</strong>
+          <em>{t("scope.meas.duty")}</em> <strong ref={measDutyRef}>--</strong>
         </span>
       </div>
     </div>

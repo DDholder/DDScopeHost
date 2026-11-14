@@ -1,11 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { SendDownlinkRequestDto_Deserialize } from "../bridge/bindings.ts";
 import { useWorkspaceStore } from "./store.ts";
+import { useI18n } from "./use-i18n.ts";
 
 type DownlinkPriorityDto = SendDownlinkRequestDto_Deserialize["priority"];
 type ManualPayloadMode = "ascii_text" | "hex_bytes" | "key_value";
 
 export function DownlinkBar() {
+  const { t } = useI18n();
   const collapsed = useWorkspaceStore((s) => s.downlinkBarCollapsed);
   const setCollapsed = useWorkspaceStore((s) => s.setDownlinkBarCollapsed);
   const channelGroups = useWorkspaceStore((s) => s.channelGroups);
@@ -125,7 +127,7 @@ export function DownlinkBar() {
       } else {
         const numVal = kvVal.trim() === "" ? null : Number(kvVal);
         if (numVal !== null && !Number.isFinite(numVal)) {
-          setManualError("KV value must be numeric or empty");
+          setManualError(t("downlink.kvNumericError"));
           return;
         }
         await sendDownlink(
@@ -157,20 +159,20 @@ export function DownlinkBar() {
             data-testid="downlink-expand-btn"
             onClick={() => setCollapsed(false)}
           >
-            ▲ TX Downlink &amp; Coalescer
+            {t("downlink.collapsedBtn")}
           </button>
           <span className="downlink-stat-pill">
-            Sliders:{" "}
+            {t("downlink.sliders")}:{" "}
             <strong data-testid="downlink-slider-count">{sliderEventCount}</strong>
           </span>
           <span className="downlink-stat-pill">
-            Dispatched:{" "}
+            {t("downlink.dispatched")}:{" "}
             <strong data-testid="downlink-dispatched-count">
               {downlinkStats.totalDispatched}
             </strong>
           </span>
           <span className="downlink-stat-pill">
-            Coalesced:{" "}
+            {t("downlink.coalesced")}:{" "}
             <strong data-testid="downlink-coalesced-count">
               {downlinkStats.coalescedOverwrites}
             </strong>
@@ -183,7 +185,7 @@ export function DownlinkBar() {
             data-testid="downlink-inject-glitch-btn"
             onClick={() => void injectGlitch()}
           >
-            ⚡ Inject +80V Glitch
+            {t("downlink.injectGlitch")}
           </button>
         </div>
       </section>
@@ -194,25 +196,25 @@ export function DownlinkBar() {
     <section className="downlink-bar" data-testid="downlink-bar">
       <div className="downlink-header">
         <div className="downlink-header-left">
-          <span className="downlink-title">Full-Duplex TX Downlink &amp; Coalescer</span>
+          <span className="downlink-title">{t("downlink.title")}</span>
           <span className="downlink-stat-pill">
-            Sliders:{" "}
+            {t("downlink.sliders")}:{" "}
             <strong data-testid="downlink-slider-count">{sliderEventCount}</strong>
           </span>
           <span className="downlink-stat-pill">
-            Dispatched:{" "}
+            {t("downlink.dispatched")}:{" "}
             <strong data-testid="downlink-dispatched-count">
               {downlinkStats.totalDispatched}
             </strong>
           </span>
           <span className="downlink-stat-pill pill-coalesce">
-            Coalesced:{" "}
+            {t("downlink.coalesced")}:{" "}
             <strong data-testid="downlink-coalesced-count">
               {downlinkStats.coalescedOverwrites}
             </strong>
           </span>
           <span className="downlink-stat-pill">
-            Queue:{" "}
+            {t("downlink.queue")}:{" "}
             <strong data-testid="downlink-queue-depth">
               {downlinkStats.pendingQueueDepth}
             </strong>
@@ -226,13 +228,13 @@ export function DownlinkBar() {
             data-testid="downlink-inject-glitch-btn"
             onClick={() => void injectGlitch()}
           >
-            ⚡ Inject +80V Glitch
+            {t("downlink.injectGlitch")}
           </button>
           <button
             type="button"
             className="icon-btn"
             data-testid="downlink-collapse-btn"
-            title="Collapse TX Downlink Bar"
+            title={t("downlink.collapseTitle")}
             onClick={() => setCollapsed(true)}
           >
             ▼
@@ -245,7 +247,7 @@ export function DownlinkBar() {
         <div className="downlink-card downlink-sliders-card">
           <div className="downlink-target-row">
             <label className="downlink-inline-field">
-              <span>Target</span>
+              <span>{t("downlink.target")}</span>
               <select
                 className="scope-select"
                 value={targetSource}
@@ -259,24 +261,24 @@ export function DownlinkBar() {
               </select>
             </label>
             <label className="downlink-inline-field">
-              <span>Priority</span>
+              <span>{t("downlink.priority")}</span>
               <select
                 className="scope-select"
                 value={priority}
                 onChange={(e) => setPriority(e.target.value as DownlinkPriorityDto)}
               >
-                <option value="normal">Normal (Coalesce Key / FIFO)</option>
-                <option value="high">High (Preempt Immediate)</option>
+                <option value="normal">{t("downlink.prioNormal")}</option>
+                <option value="high">{t("downlink.prioHigh")}</option>
               </select>
             </label>
             <button
               type="button"
               className="scope-btn scope-btn-accent"
               data-testid="burst-coalesce-btn"
-              title="Send 10 rapid keyed updates to verify Latest-Value-Wins coalescing"
+              title={t("downlink.burstTitle")}
               onClick={() => void handleBurstCoalesce()}
             >
-              Burst 10x Drag Test
+              {t("downlink.burstBtn")}
             </button>
           </div>
 
@@ -318,9 +320,9 @@ export function DownlinkBar() {
               data-testid="manual-tx-mode"
               onChange={(e) => setManualMode(e.target.value as ManualPayloadMode)}
             >
-              <option value="ascii_text">ASCII</option>
-              <option value="hex_bytes">HEX Bytes</option>
-              <option value="key_value">Key = Value</option>
+              <option value="ascii_text">{t("downlink.modeAscii")}</option>
+              <option value="hex_bytes">{t("downlink.modeHex")}</option>
+              <option value="key_value">{t("downlink.modeKv")}</option>
             </select>
 
             {manualMode === "ascii_text" && (
@@ -331,7 +333,7 @@ export function DownlinkBar() {
                   value={asciiText}
                   data-testid="manual-tx-ascii-input"
                   onChange={(e) => setAsciiText(e.target.value)}
-                  placeholder="ASCII command..."
+                  placeholder={t("downlink.asciiPlaceholder")}
                 />
                 <label className="downlink-nl-check">
                   <input
@@ -362,14 +364,14 @@ export function DownlinkBar() {
                   className="downlink-input downlink-input-key"
                   value={kvKey}
                   onChange={(e) => setKvKey(e.target.value)}
-                  placeholder="key"
+                  placeholder={t("downlink.keyPlaceholder")}
                 />
                 <input
                   type="text"
                   className="downlink-input downlink-input-val"
                   value={kvVal}
                   onChange={(e) => setKvVal(e.target.value)}
-                  placeholder="value"
+                  placeholder={t("downlink.valPlaceholder")}
                 />
               </>
             )}
@@ -379,21 +381,17 @@ export function DownlinkBar() {
               className="scope-btn scope-btn-accent"
               data-testid="manual-tx-send-btn"
             >
-              Send TX
+              {t("downlink.sendTx")}
             </button>
           </div>
           {manualError && <div className="downlink-error">{manualError}</div>}
-          <div className="downlink-hint">
-            Coalescing key overwrites stale queued commands in-place under TxCoalescer (&lt; 90 ms window).
-          </div>
+          <div className="downlink-hint">{t("downlink.hint")}</div>
         </form>
 
         {/* Right: TX Receipt Log */}
         <div className="downlink-card downlink-log-card" data-testid="downlink-tx-log">
           {txLog.length === 0 ? (
-            <div className="downlink-log-empty">
-              Drag sliders or click Send TX to inspect coalescing &amp; TX receipts.
-            </div>
+            <div className="downlink-log-empty">{t("downlink.logEmpty")}</div>
           ) : (
             <div className="downlink-log-list">
               {txLog.slice(0, 8).map((entry) => (
@@ -402,7 +400,7 @@ export function DownlinkBar() {
                   <span className="log-src">{entry.sourceId}</span>
                   <span className="log-msg">{entry.summary}</span>
                   {entry.coalesced && (
-                    <span className="log-coalesced-badge">COALESCED</span>
+                    <span className="log-coalesced-badge">{t("downlink.coalescedBadge")}</span>
                   )}
                   <span className="log-res">{entry.resultKind}</span>
                 </div>

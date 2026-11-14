@@ -10,6 +10,7 @@ import type {
 } from "../bridge/bindings.ts";
 import { bridgeClient } from "../bridge/control-client.ts";
 import { useWorkspaceStore } from "./store.ts";
+import { useI18n } from "./use-i18n.ts";
 
 type WizardTransportKind =
   | "sim"
@@ -31,6 +32,7 @@ type WizardProtocolCodec =
   | "fixed_schema_binary";
 
 export function SourceWizardModal() {
+  const { t } = useI18n();
   const open = useWorkspaceStore((s) => s.sourceWizardOpen);
   const setOpen = useWorkspaceStore((s) => s.setSourceWizardOpen);
   const createSource = useWorkspaceStore((s) => s.createSource);
@@ -78,7 +80,7 @@ export function SourceWizardModal() {
     if (!open) return;
     const count = channelGroups.length;
     setSourceId(`src${count}`);
-    setDisplayName(`Source #${count}`);
+    setDisplayName(t("wizard.defaultName", { index: count }));
     setErrorMsg(null);
     bridgeClient
       .listSerialPorts()
@@ -89,7 +91,7 @@ export function SourceWizardModal() {
         }
       })
       .catch(() => {});
-  }, [open, channelGroups.length]);
+  }, [open, channelGroups.length, t]);
 
   if (!open) return null;
 
@@ -97,7 +99,7 @@ export function SourceWizardModal() {
     ev.preventDefault();
     const trimmedId = sourceId.trim();
     if (!trimmedId) {
-      setErrorMsg("Source ID is required");
+      setErrorMsg(t("wizard.errSourceId"));
       return;
     }
 
@@ -237,10 +239,10 @@ export function SourceWizardModal() {
   };
 
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Create Data Source">
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={t("wizard.ariaLabel")}>
       <div className="modal-panel">
         <div className="modal-header">
-          <h2>Add Multi-Modal Data Source</h2>
+          <h2>{t("wizard.title")}</h2>
           <button type="button" className="icon-btn" onClick={() => setOpen(false)}>
             ×
           </button>
@@ -248,7 +250,7 @@ export function SourceWizardModal() {
         <form onSubmit={handleSubmit} className="wizard-form">
           <div className="wizard-grid">
             <label className="wizard-field">
-              <span>Source ID</span>
+              <span>{t("wizard.sourceId")}</span>
               <input
                 type="text"
                 value={sourceId}
@@ -258,7 +260,7 @@ export function SourceWizardModal() {
               />
             </label>
             <label className="wizard-field">
-              <span>Display Name</span>
+              <span>{t("wizard.displayName")}</span>
               <input
                 type="text"
                 value={displayName}
@@ -269,29 +271,29 @@ export function SourceWizardModal() {
 
           <div className="wizard-grid">
             <label className="wizard-field">
-              <span>Transport</span>
+              <span>{t("wizard.transport")}</span>
               <select
                 value={transportKind}
                 onChange={(e) => setTransportKind(e.target.value as WizardTransportKind)}
                 data-testid="wizard-transport-kind"
               >
-                <option value="sim">SimSignalTransport (High-Speed Generator)</option>
-                <option value="serial">Serial UART / USB-CDC (up to 12 Mbps)</option>
-                <option value="udp">UDP Socket (Unicast / Multicast)</option>
-                <option value="tcp_client">TCP Client (Auto-Reconnect)</option>
-                <option value="tcp_server">TCP Server</option>
-                <option value="raw_file_replay">RawFileReplay (.bin / .ddraw)</option>
+                <option value="sim">{t("wizard.transport.sim")}</option>
+                <option value="serial">{t("wizard.transport.serial")}</option>
+                <option value="udp">{t("wizard.transport.udp")}</option>
+                <option value="tcp_client">{t("wizard.transport.tcpClient")}</option>
+                <option value="tcp_server">{t("wizard.transport.tcpServer")}</option>
+                <option value="raw_file_replay">{t("wizard.transport.replay")}</option>
               </select>
             </label>
             <label className="wizard-field">
-              <span>Clock Engine</span>
+              <span>{t("wizard.clock")}</span>
               <select
                 value={clockMode}
                 onChange={(e) => setClockMode(e.target.value as WizardClockMode)}
               >
-                <option value="tier2_software_pll">Tier 2: 2nd-Order Software PLL</option>
-                <option value="tier1_hardware_counter">Tier 1: Hardware Tick Drift Anchor</option>
-                <option value="tier3_host_arrival">Tier 3: Host Monotonic Clock</option>
+                <option value="tier2_software_pll">{t("wizard.clock.tier2")}</option>
+                <option value="tier1_hardware_counter">{t("wizard.clock.tier1")}</option>
+                <option value="tier3_host_arrival">{t("wizard.clock.tier3")}</option>
               </select>
             </label>
           </div>
@@ -299,7 +301,7 @@ export function SourceWizardModal() {
           {transportKind === "sim" && (
             <div className="wizard-grid">
               <label className="wizard-field">
-                <span>Sample Rate (Hz)</span>
+                <span>{t("wizard.simRate")}</span>
                 <input
                   type="number"
                   min={1000}
@@ -310,7 +312,7 @@ export function SourceWizardModal() {
                 />
               </label>
               <label className="wizard-field">
-                <span>Analog Channels</span>
+                <span>{t("wizard.simChannels")}</span>
                 <input
                   type="number"
                   min={1}
@@ -325,7 +327,7 @@ export function SourceWizardModal() {
                   checked={simGlitch}
                   onChange={(e) => setSimGlitch(e.target.checked)}
                 />
-                <span>Inject Single-Sample Glitch</span>
+                <span>{t("wizard.simGlitch")}</span>
               </label>
             </div>
           )}
@@ -333,7 +335,7 @@ export function SourceWizardModal() {
           {transportKind === "serial" && (
             <div className="wizard-grid">
               <label className="wizard-field">
-                <span>Serial Port</span>
+                <span>{t("wizard.serialPort")}</span>
                 <select value={portName} onChange={(e) => setPortName(e.target.value)}>
                   {serialPorts.length === 0 && <option value="COM3">COM3</option>}
                   {serialPorts.map((p) => (
@@ -344,7 +346,7 @@ export function SourceWizardModal() {
                 </select>
               </label>
               <label className="wizard-field">
-                <span>Baud Rate</span>
+                <span>{t("wizard.baudRate")}</span>
                 <input
                   type="number"
                   value={baudRate}
@@ -352,25 +354,25 @@ export function SourceWizardModal() {
                 />
               </label>
               <label className="wizard-field">
-                <span>Parity / Flow</span>
+                <span>{t("wizard.parityFlow")}</span>
                 <div className="wizard-inline-pair">
                   <select value={parity} onChange={(e) => setParity(e.target.value as SerialParityDto)}>
-                    <option value="none">None</option>
-                    <option value="odd">Odd</option>
-                    <option value="even">Even</option>
+                    <option value="none">{t("wizard.parityNone")}</option>
+                    <option value="odd">{t("wizard.parityOdd")}</option>
+                    <option value="even">{t("wizard.parityEven")}</option>
                   </select>
                   <select
                     value={stopBits}
                     onChange={(e) => setStopBits(e.target.value as SerialStopBitsDto)}
                   >
-                    <option value="one">1 Stop</option>
-                    <option value="two">2 Stop</option>
+                    <option value="one">{t("wizard.stop1")}</option>
+                    <option value="two">{t("wizard.stop2")}</option>
                   </select>
                   <select
                     value={flowControl}
                     onChange={(e) => setFlowControl(e.target.value as SerialFlowControlDto)}
                   >
-                    <option value="none">No Flow</option>
+                    <option value="none">{t("wizard.flowNone")}</option>
                     <option value="hardware_rts_cts">RTS/CTS</option>
                     <option value="software_xon_xoff">XON/XOFF</option>
                   </select>
@@ -381,7 +383,7 @@ export function SourceWizardModal() {
 
           {transportKind === "udp" && (
             <label className="wizard-field">
-              <span>UDP Bind Address</span>
+              <span>{t("wizard.udpBind")}</span>
               <input
                 type="text"
                 value={udpBindAddr}
@@ -392,7 +394,9 @@ export function SourceWizardModal() {
 
           {(transportKind === "tcp_client" || transportKind === "tcp_server") && (
             <label className="wizard-field">
-              <span>{transportKind === "tcp_client" ? "Remote Host:Port" : "Listen Bind:Port"}</span>
+              <span>
+                {transportKind === "tcp_client" ? t("wizard.tcpRemote") : t("wizard.tcpListen")}
+              </span>
               <input type="text" value={tcpAddr} onChange={(e) => setTcpAddr(e.target.value)} />
             </label>
           )}
@@ -400,7 +404,7 @@ export function SourceWizardModal() {
           {transportKind === "raw_file_replay" && (
             <div className="wizard-grid">
               <label className="wizard-field">
-                <span>Capture File Path</span>
+                <span>{t("wizard.replayPath")}</span>
                 <input
                   type="text"
                   value={replayPath}
@@ -408,7 +412,7 @@ export function SourceWizardModal() {
                 />
               </label>
               <label className="wizard-field">
-                <span>Playback Speed</span>
+                <span>{t("wizard.replaySpeed")}</span>
                 <input
                   type="number"
                   min={0.1}
@@ -424,7 +428,7 @@ export function SourceWizardModal() {
                   checked={replayFullSpeed}
                   onChange={(e) => setReplayFullSpeed(e.target.checked)}
                 />
-                <span>Offline Full-Speed Mmap</span>
+                <span>{t("wizard.replayFullSpeed")}</span>
               </label>
               <label className="wizard-check">
                 <input
@@ -432,28 +436,28 @@ export function SourceWizardModal() {
                   checked={replayLoop}
                   onChange={(e) => setReplayLoop(e.target.checked)}
                 />
-                <span>Loop File</span>
+                <span>{t("wizard.replayLoop")}</span>
               </label>
             </div>
           )}
 
           <div className="wizard-grid">
             <label className="wizard-field">
-              <span>Protocol Codec</span>
+              <span>{t("wizard.codec")}</span>
               <select
                 value={protocolCodec}
                 onChange={(e) => setProtocolCodec(e.target.value as WizardProtocolCodec)}
               >
-                <option value="sim_preset">SimPreset (Analog + Logic + State)</option>
-                <option value="just_float">JustFloat (VOFA+ 00 00 80 7F)</option>
-                <option value="fire_water">FireWater (SIMD CSV)</option>
-                <option value="fixed_schema_binary">FixedSchemaBinary (Mixed Struct)</option>
+                <option value="sim_preset">{t("wizard.codec.sim")}</option>
+                <option value="just_float">{t("wizard.codec.justFloat")}</option>
+                <option value="fire_water">{t("wizard.codec.fireWater")}</option>
+                <option value="fixed_schema_binary">{t("wizard.codec.fixedSchema")}</option>
               </select>
             </label>
 
             {clockMode === "tier2_software_pll" && (
               <label className="wizard-field">
-                <span>PLL Nominal Sample Rate (Hz)</span>
+                <span>{t("wizard.pllRate")}</span>
                 <input
                   type="number"
                   value={nominalRateHz}
@@ -464,7 +468,7 @@ export function SourceWizardModal() {
 
             {clockMode === "tier1_hardware_counter" && (
               <label className="wizard-field">
-                <span>Hardware Tick Clock (Hz)</span>
+                <span>{t("wizard.hwTick")}</span>
                 <input
                   type="number"
                   value={hwTickHz}
@@ -476,7 +480,7 @@ export function SourceWizardModal() {
 
           {(protocolCodec === "just_float" || protocolCodec === "fire_water") && (
             <label className="wizard-field">
-              <span>Channel Names (comma separated)</span>
+              <span>{t("wizard.channelNames")}</span>
               <input
                 type="text"
                 value={channelNamesText}
@@ -491,14 +495,14 @@ export function SourceWizardModal() {
               checked={autoStart}
               onChange={(e) => setAutoStart(e.target.checked)}
             />
-            <span>Auto-Start Acquisition Immediately</span>
+            <span>{t("wizard.autoStart")}</span>
           </label>
 
           {errorMsg && <div className="wizard-error">{errorMsg}</div>}
 
           <div className="modal-actions">
             <button type="button" className="scope-btn" onClick={() => setOpen(false)}>
-              Cancel
+              {t("wizard.cancel")}
             </button>
             <button
               type="submit"
@@ -506,7 +510,7 @@ export function SourceWizardModal() {
               disabled={submitting}
               data-testid="wizard-submit-btn"
             >
-              {submitting ? "Creating..." : "Create Source"}
+              {submitting ? t("wizard.creating") : t("wizard.create")}
             </button>
           </div>
         </form>
