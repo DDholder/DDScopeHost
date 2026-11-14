@@ -16,11 +16,8 @@ export function WorkspaceShell() {
   const runtimeStatus = useWorkspaceStore((s) => s.runtimeStatus);
   const dataPlaneMetrics = useWorkspaceStore((s) => s.dataPlaneMetrics);
   const quota = useWorkspaceStore((s) => s.quota);
-  const mockRateHz = useWorkspaceStore((s) => s.mockRateHz);
   const scopes = useWorkspaceStore((s) => s.scopes);
   const initWorkspace = useWorkspaceStore((s) => s.initWorkspace);
-  const setMockRateHz = useWorkspaceStore((s) => s.setMockRateHz);
-  const injectGlitch = useWorkspaceStore((s) => s.injectGlitch);
   const rearmScope = useWorkspaceStore((s) => s.rearmScope);
   const exportProjectConfig = useWorkspaceStore((s) => s.exportProjectConfig);
   const importProjectConfig = useWorkspaceStore((s) => s.importProjectConfig);
@@ -223,35 +220,6 @@ export function WorkspaceShell() {
               {t("topbar.seq", { seq: dataPlaneMetrics.frameSeq })}
             </span>
           </span>
-
-          <div className="topbar-rate-switch" role="group" aria-label="Mock Tick Rate">
-            <button
-              type="button"
-              className={`scope-seg-btn ${mockRateHz === 60 ? "active" : ""}`}
-              data-testid="rate-60-btn"
-              onClick={() => setMockRateHz(60)}
-            >
-              60Hz
-            </button>
-            <button
-              type="button"
-              className={`scope-seg-btn ${mockRateHz === 120 ? "active" : ""}`}
-              data-testid="rate-120-btn"
-              onClick={() => setMockRateHz(120)}
-            >
-              120Hz
-            </button>
-          </div>
-
-          <button
-            type="button"
-            className="scope-btn scope-btn-warn"
-            data-testid="topbar-glitch-btn"
-            title={t("topbar.glitchTitle")}
-            onClick={() => void injectGlitch()}
-          >
-            {t("topbar.glitchBtn")}
-          </button>
 
           <span className={`telemetry-pill ${isQuotaWarn ? "pill-warn" : ""}`}>
             {t("topbar.ram")}:{" "}

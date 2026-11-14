@@ -15,7 +15,6 @@ export function DownlinkBar() {
   const sliderEventCount = useWorkspaceStore((s) => s.sliderEventCount);
   const txLog = useWorkspaceStore((s) => s.txLog);
   const sendDownlink = useWorkspaceStore((s) => s.sendDownlink);
-  const injectGlitch = useWorkspaceStore((s) => s.injectGlitch);
 
   const downlinkConfig = useWorkspaceStore((s) => s.downlinkConfig);
   const updateDownlinkConfig = useWorkspaceStore((s) => s.updateDownlinkConfig);
@@ -177,16 +176,6 @@ export function DownlinkBar() {
             </strong>
           </span>
         </div>
-        <div className="downlink-collapsed-right">
-          <button
-            type="button"
-            className="scope-btn scope-btn-warn"
-            data-testid="downlink-inject-glitch-btn"
-            onClick={() => void injectGlitch()}
-          >
-            {t("downlink.injectGlitch")}
-          </button>
-        </div>
       </section>
     );
   }
@@ -221,14 +210,6 @@ export function DownlinkBar() {
         </div>
 
         <div className="downlink-header-right">
-          <button
-            type="button"
-            className="scope-btn scope-btn-warn"
-            data-testid="downlink-inject-glitch-btn"
-            onClick={() => void injectGlitch()}
-          >
-            {t("downlink.injectGlitch")}
-          </button>
           <button
             type="button"
             className="icon-btn"
