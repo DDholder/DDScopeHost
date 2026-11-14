@@ -1745,6 +1745,543 @@ pub fn extract_chunks_digital_edges(
     Ok((init_level.unwrap_or(0), edges))
 }
 
+#[derive(Copy, Clone, Default)]
+struct DigitalColBucket {
+    count: u32,
+    first_ts: TimestampNs,
+    last_ts: TimestampNs,
+}
+
+impl DigitalColBucket {
+    #[inline]
+    fn record_run(&mut self, count: u32, first_ts: TimestampNs, last_ts: TimestampNs) {
+        if count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            self.first_ts = first_ts;
+            self.last_ts = last_ts;
+        } else {
+            if first_ts < self.first_ts {
+                self.first_ts = first_ts;
+            }
+            if last_ts > self.last_ts {
+                self.last_ts = last_ts;
+            }
+        }
+        self.count = self.count.saturating_add(count);
+    }
+}
+
+/// Pixel-column digital transition decimation accumulator preserving exact edge parity
+/// (`count % 2`) and `[first_ts, last_ts]` bounds per column in $O(W_{\text{px}} \log C)$ time.
+pub(crate) struct DigitalEdgeAccumulator {
+    t_min: TimestampNs,
+    span_u128: u128,
+    w: usize,
+    buckets: Vec<DigitalColBucket>,
+}
+
+impl DigitalEdgeAccumulator {
+    #[inline]
+    pub(crate) fn new(t_min: TimestampNs, t_max: TimestampNs, w_px: usize) -> Self {
+        let w = w_px.max(1);
+        Self {
+            t_min,
+            span_u128: (t_max - t_min) as u128,
+            w,
+            buckets: vec![DigitalColBucket::default(); w],
+        }
+    }
+
+    #[inline]
+    fn ts_to_col(&self, ts: TimestampNs) -> usize {
+        if ts <= self.t_min {
+            return 0;
+        }
+        let dt = (ts - self.t_min) as u128;
+        let raw = (dt * (self.w as u128)) / self.span_u128;
+        (raw as usize).min(self.w - 1)
+    }
+
+    #[inline]
+    fn col_end_ns(&self, col: usize) -> TimestampNs {
+        if col + 1 >= self.w {
+            return TimestampNs::MAX;
+        }
+        let num = ((col as u128) + 1) * self.span_u128 - 1;
+        let max_dt = (num / (self.w as u128)) as u64;
+        self.t_min.saturating_add(max_dt)
+    }
+
+    #[inline]
+    pub(crate) fn feed_edge(&mut self, ts: TimestampNs) {
+        let col = self.ts_to_col(ts);
+        self.buckets[col].record_run(1, ts, ts);
+    }
+
+    pub(crate) fn feed_scalar_chunk(
+        &mut self,
+        sc: &ScalarDataChunk,
+        prev_level: &mut Option<bool>,
+        init_level: &mut Option<u8>,
+    ) -> Result<(), CoreError> {
+        let NativeScalarColumn::Bool(bv) = &sc.values else {
+            return Err(CoreError::Storage(
+                "scalar column is not Bool for digital edge viewport extraction".into(),
+            ));
+        };
+        if bv.is_empty() {
+            return Ok(());
+        }
+        let len = bv.len();
+        let Some(c_start) = sc.timestamps.get_ns(0) else {
+            return Ok(());
+        };
+        let Some(c_end) = sc.timestamps.get_ns(len - 1) else {
+            return Ok(());
+        };
+        let t_max = self.t_min.saturating_add(self.span_u128 as u64);
+        if c_end <= self.t_min || c_start > t_max {
+            return Ok(());
+        }
+
+        let fully_inside = c_start > self.t_min && c_end <= t_max;
+        let (first_gt, end_le) = if fully_inside {
+            (0usize, len)
+        } else {
+            (
+                ts_col_partition_point(&sc.timestamps, len, |t| t <= self.t_min),
+                ts_col_partition_point(&sc.timestamps, len, |t| t <= t_max),
+            )
+        };
+
+        if first_gt >= end_le {
+            if end_le > 0 {
+                let last_lvl = bv.get(end_le - 1);
+                *prev_level = last_lvl;
+                if init_level.is_none() {
+                    *init_level = last_lvl.map(u8::from);
+                }
+            }
+            return Ok(());
+        }
+
+        let min_edge_idx = if let Some(prev) = *prev_level {
+            if first_gt == 0 && bv.get(0) != Some(prev) {
+                if let Some(t0) = sc.timestamps.get_ns(0) {
+                    self.feed_edge(t0);
+                }
+            }
+            first_gt.max(1)
+        } else {
+            let lvl0 = bv.get(first_gt).unwrap_or(false);
+            *init_level = Some(u8::from(lvl0));
+            first_gt + 1
+        };
+
+        let edge_slice = if min_edge_idx <= 1 && end_le == len {
+            bv.edge_indices.as_slice()
+        } else {
+            let e0 = bv
+                .edge_indices
+                .partition_point(|&e| (e as usize) < min_edge_idx);
+            let e1 = bv.edge_indices.partition_point(|&e| (e as usize) < end_le);
+            &bv.edge_indices[e0..e1]
+        };
+
+        if !edge_slice.is_empty() {
+            let t_first = sc.timestamps.get_ns(edge_slice[0] as usize).unwrap_or(0);
+            let t_last = sc
+                .timestamps
+                .get_ns(*edge_slice.last().unwrap() as usize)
+                .unwrap_or(t_first);
+            let c_lo = self.ts_to_col(t_first);
+            let c_hi = self.ts_to_col(t_last);
+            if c_lo == c_hi {
+                self.buckets[c_lo].record_run(edge_slice.len() as u32, t_first, t_last);
+            } else {
+                let num_cols = c_hi - c_lo + 1;
+                if edge_slice.len() <= num_cols.saturating_mul(8) {
+                    for &edge_idx in edge_slice {
+                        if let Some(ts) = sc.timestamps.get_ns(edge_idx as usize) {
+                            self.feed_edge(ts);
+                        }
+                    }
+                } else {
+                    let mut rem = edge_slice;
+                    while !rem.is_empty() {
+                        let t0 = sc.timestamps.get_ns(rem[0] as usize).unwrap_or(self.t_min);
+                        let col = self.ts_to_col(t0);
+                        let col_end = self.col_end_ns(col);
+                        let tail_ts = sc
+                            .timestamps
+                            .get_ns(*rem.last().unwrap() as usize)
+                            .unwrap_or(t0);
+                        let split = if col >= c_hi || tail_ts <= col_end {
+                            rem.len()
+                        } else {
+                            rem.partition_point(|&e| {
+                                sc.timestamps.get_ns(e as usize).unwrap_or(t0) <= col_end
+                            })
+                        }
+                        .max(1);
+                        let t_end = sc
+                            .timestamps
+                            .get_ns(rem[split - 1] as usize)
+                            .unwrap_or(t0);
+                        self.buckets[col].record_run(split as u32, t0, t_end);
+                        rem = &rem[split..];
+                    }
+                }
+            }
+        }
+
+        *prev_level = bv.get(end_le - 1);
+        Ok(())
+    }
+
+    pub(crate) fn feed_active_chunk(
+        &mut self,
+        active: &ActiveScalarChunk,
+        scale: &LinearScale,
+        prev_level: &mut Option<bool>,
+        init_level: &mut Option<u8>,
+    ) {
+        if active.is_empty() {
+            return;
+        }
+        let t_max = self.t_min.saturating_add(self.span_u128 as u64);
+        let act_ts = active.timestamps();
+        let first_gt = act_ts.partition_point(|&t| t <= self.t_min);
+        let end_le = act_ts.partition_point(|&t| t <= t_max);
+        for i in first_gt..end_le {
+            if let Some((ts, val)) = active.get_sample_as_f64(i, scale) {
+                let lvl = val >= 0.5;
+                if let Some(prev) = *prev_level {
+                    if lvl != prev {
+                        self.feed_edge(ts);
+                    }
+                } else if init_level.is_none() {
+                    *init_level = Some(u8::from(lvl));
+                }
+                *prev_level = Some(lvl);
+            }
+        }
+    }
+
+    pub(crate) fn finish(self, init_level: Option<u8>) -> (u8, Vec<f32>) {
+        let span = self.span_u128 as f64;
+        let mut edges = Vec::with_capacity((self.w * 2).min(8192));
+        for bucket in &self.buckets {
+            if bucket.count == 0 {
+                continue;
+            }
+            let x0 = ((bucket.first_ts.saturating_sub(self.t_min) as f64) / span) as f32;
+            let x1 = ((bucket.last_ts.saturating_sub(self.t_min) as f64) / span) as f32;
+            match bucket.count {
+                1 => edges.push(x0),
+                2 => {
+                    edges.push(x0);
+                    edges.push(x1);
+                }
+                c if c % 2 == 1 => {
+                    edges.push(x0);
+                    edges.push(0.5 * (x0 + x1));
+                    edges.push(x1);
+                }
+                _ => {
+                    let dx = x1 - x0;
+                    edges.push(x0);
+                    edges.push(x0 + dx / 3.0);
+                    edges.push(x0 + (2.0 * dx) / 3.0);
+                    edges.push(x1);
+                }
+            }
+        }
+        (init_level.unwrap_or(0), edges)
+    }
+}
+
+/// Extracts viewport-decimated digital logic transition edges `(init_level, edge_x_norm)` over
+/// `(t_min, t_max]` across `w_px` columns from sealed boolean `DataChunk`s.
+///
+/// Exact edges are returned verbatim when candidate edges <= `4 * w_px`. For macro-timebase spans,
+/// dense columns are decimated to at most 4 edges per column while strictly preserving transition
+/// parity (`count % 2`) and single-sample glitch bounds.
+pub fn extract_chunks_digital_edges_viewport(
+    chunks: &[Arc<DataChunk>],
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    w_px: usize,
+) -> Result<(u8, Vec<f32>), CoreError> {
+    if t_max <= t_min {
+        return Err(CoreError::Storage(
+            "t_max must be greater than t_min".into(),
+        ));
+    }
+    let w = w_px.max(1);
+    let mut upper_bound_edges = 0usize;
+    for chunk in chunks {
+        let DataChunk::Scalar(sc) = chunk.as_ref() else {
+            return Err(CoreError::Storage(
+                "pinned chunk is not a Scalar/DigitalBool chunk".into(),
+            ));
+        };
+        let NativeScalarColumn::Bool(bv) = &sc.values else {
+            return Err(CoreError::Storage(
+                "pinned chunk scalar column is not Bool".into(),
+            ));
+        };
+        if bv.is_empty() {
+            continue;
+        }
+        let Some(c_start) = sc.timestamps.get_ns(0) else {
+            continue;
+        };
+        let Some(c_end) = sc.timestamps.get_ns(bv.len() - 1) else {
+            continue;
+        };
+        if c_end <= t_min {
+            continue;
+        }
+        if c_start > t_max {
+            break;
+        }
+        upper_bound_edges = upper_bound_edges.saturating_add(bv.edge_indices.len() + 1);
+    }
+
+    if upper_bound_edges <= w.saturating_mul(4) {
+        return extract_chunks_digital_edges(chunks, t_min, t_max);
+    }
+
+    let mut init_level: Option<u8> = None;
+    let mut prev_level: Option<bool> = None;
+
+    for chunk in chunks.iter().rev() {
+        let DataChunk::Scalar(sc) = chunk.as_ref() else {
+            return Err(CoreError::Storage(
+                "pinned chunk is not a Scalar/DigitalBool chunk".into(),
+            ));
+        };
+        let NativeScalarColumn::Bool(bv) = &sc.values else {
+            return Err(CoreError::Storage(
+                "pinned chunk scalar column is not Bool".into(),
+            ));
+        };
+        if bv.is_empty() {
+            continue;
+        }
+        if let Some(c_start) = sc.timestamps.get_ns(0) {
+            if c_start <= t_min {
+                let le_count = ts_col_partition_point(&sc.timestamps, bv.len(), |t| t <= t_min);
+                if le_count > 0 {
+                    let lvl = bv.get(le_count - 1).unwrap_or(false);
+                    init_level = Some(u8::from(lvl));
+                    prev_level = Some(lvl);
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut acc = DigitalEdgeAccumulator::new(t_min, t_max, w);
+    for chunk in chunks {
+        let DataChunk::Scalar(sc) = chunk.as_ref() else {
+            return Err(CoreError::Storage(
+                "pinned chunk is not a Scalar/DigitalBool chunk".into(),
+            ));
+        };
+        acc.feed_scalar_chunk(sc, &mut prev_level, &mut init_level)?;
+    }
+
+    Ok(acc.finish(init_level))
+}
+
+/// Extracts viewport-decimated digital edges directly from a [`NativeScalarSeries`].
+pub(crate) fn extract_series_digital_edges_viewport(
+    series: &NativeScalarSeries,
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    w_px: usize,
+) -> Result<(u8, Vec<f32>), CoreError> {
+    let w = w_px.max(1);
+    let sealed = series.sealed_chunks();
+    let start_chunk = sealed.partition_point(|c| c.t_end_ns <= t_min);
+    let end_chunk = sealed.partition_point(|c| c.t_start_ns <= t_max);
+
+    let mut upper_bound = 0usize;
+    for handle in sealed
+        .iter()
+        .skip(start_chunk)
+        .take(end_chunk.saturating_sub(start_chunk))
+    {
+        if let ChunkStorageRef::InMemory(arc_chunk) = &handle.storage {
+            if let DataChunk::Scalar(sc) = arc_chunk.as_ref() {
+                if let NativeScalarColumn::Bool(bv) = &sc.values {
+                    upper_bound = upper_bound.saturating_add(bv.edge_indices.len() + 1);
+                }
+            }
+        }
+    }
+
+    let active = series.active_chunk();
+    if !active.is_empty() {
+        let act_ts = active.timestamps();
+        let first_gt = act_ts.partition_point(|&t| t <= t_min);
+        let end_le = act_ts.partition_point(|&t| t <= t_max);
+        upper_bound = upper_bound.saturating_add(end_le.saturating_sub(first_gt));
+    }
+
+    if upper_bound <= w.saturating_mul(4) {
+        return Ok(extract_series_digital_edges_exact(series, t_min, t_max));
+    }
+
+    let mut init_level: Option<u8> = None;
+    let mut prev_level: Option<bool> = None;
+    if let Some((idx, ts, val)) = series.get_sample_by_timestamp(t_min) {
+        if ts <= t_min {
+            let lvl = val >= 0.5;
+            init_level = Some(u8::from(lvl));
+            prev_level = Some(lvl);
+        } else if idx > series.evicted_samples() {
+            if let Some((prev_ts, prev_val)) = series.get_sample_by_index(idx - 1) {
+                if prev_ts <= t_min {
+                    let lvl = prev_val >= 0.5;
+                    init_level = Some(u8::from(lvl));
+                    prev_level = Some(lvl);
+                }
+            }
+        }
+    }
+
+    let mut acc = DigitalEdgeAccumulator::new(t_min, t_max, w);
+    for handle in sealed
+        .iter()
+        .skip(start_chunk)
+        .take(end_chunk.saturating_sub(start_chunk))
+    {
+        if let ChunkStorageRef::InMemory(arc_chunk) = &handle.storage {
+            if let DataChunk::Scalar(sc) = arc_chunk.as_ref() {
+                acc.feed_scalar_chunk(sc, &mut prev_level, &mut init_level)?;
+            }
+        }
+    }
+    acc.feed_active_chunk(active, &series.scale(), &mut prev_level, &mut init_level);
+    Ok(acc.finish(init_level))
+}
+
+pub(crate) fn extract_series_digital_edges_exact(
+    series: &NativeScalarSeries,
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+) -> (u8, Vec<f32>) {
+    let span = (t_max - t_min) as f64;
+    let mut edges = Vec::new();
+    let mut init_level: Option<u8> = None;
+    let mut prev_level: Option<bool> = None;
+
+    if let Some((idx, ts, val)) = series.get_sample_by_timestamp(t_min) {
+        if ts <= t_min {
+            let lvl = val >= 0.5;
+            init_level = Some(u8::from(lvl));
+            prev_level = Some(lvl);
+        } else if idx > series.evicted_samples() {
+            if let Some((prev_ts, prev_val)) = series.get_sample_by_index(idx - 1) {
+                if prev_ts <= t_min {
+                    let lvl = prev_val >= 0.5;
+                    init_level = Some(u8::from(lvl));
+                    prev_level = Some(lvl);
+                }
+            }
+        }
+    }
+
+    let sealed = series.sealed_chunks();
+    let start_chunk = sealed.partition_point(|c| c.t_end_ns <= t_min);
+    let end_chunk = sealed.partition_point(|c| c.t_start_ns <= t_max);
+
+    for handle in sealed
+        .iter()
+        .skip(start_chunk)
+        .take(end_chunk.saturating_sub(start_chunk))
+    {
+        if let ChunkStorageRef::InMemory(arc_chunk) = &handle.storage {
+            if let DataChunk::Scalar(sc) = arc_chunk.as_ref() {
+                if let NativeScalarColumn::Bool(bv) = &sc.values {
+                    if bv.is_empty() {
+                        continue;
+                    }
+                    let first_gt = ts_col_partition_point(&sc.timestamps, bv.len(), |t| t <= t_min);
+                    let end_le = ts_col_partition_point(&sc.timestamps, bv.len(), |t| t <= t_max);
+
+                    if first_gt >= end_le {
+                        if end_le > 0 {
+                            prev_level = bv.get(end_le - 1);
+                            if init_level.is_none() {
+                                init_level = prev_level.map(u8::from);
+                            }
+                        }
+                        continue;
+                    }
+
+                    if prev_level.is_none() {
+                        let lvl0 = bv.get(first_gt).unwrap_or(false);
+                        init_level = Some(u8::from(lvl0));
+                        for &edge_idx in &bv.edge_indices {
+                            let idx = edge_idx as usize;
+                            if idx > first_gt && idx < end_le {
+                                if let Some(ts) = sc.timestamps.get_ns(idx) {
+                                    edges.push(((ts - t_min) as f64 / span) as f32);
+                                }
+                            }
+                        }
+                    } else if let Some(prev) = prev_level {
+                        if first_gt == 0 && bv.get(0) != Some(prev) {
+                            if let Some(t0) = sc.timestamps.get_ns(0) {
+                                edges.push(((t0 - t_min) as f64 / span) as f32);
+                            }
+                        }
+                        let min_edge_idx = first_gt.max(1);
+                        for &edge_idx in &bv.edge_indices {
+                            let idx = edge_idx as usize;
+                            if idx >= min_edge_idx && idx < end_le {
+                                if let Some(ts) = sc.timestamps.get_ns(idx) {
+                                    edges.push(((ts - t_min) as f64 / span) as f32);
+                                }
+                            }
+                        }
+                    }
+
+                    prev_level = bv.get(end_le - 1);
+                }
+            }
+        }
+    }
+
+    let active = series.active_chunk();
+    if !active.is_empty() {
+        let act_ts = active.timestamps();
+        let first_gt = act_ts.partition_point(|&t| t <= t_min);
+        let end_le = act_ts.partition_point(|&t| t <= t_max);
+        for i in first_gt..end_le {
+            if let Some((ts, val)) = active.get_sample_as_f64(i, &series.scale()) {
+                let lvl = val >= 0.5;
+                if let Some(prev) = prev_level {
+                    if lvl != prev {
+                        edges.push(((ts - t_min) as f64 / span) as f32);
+                    }
+                } else if init_level.is_none() {
+                    init_level = Some(u8::from(lvl));
+                }
+                prev_level = Some(lvl);
+            }
+        }
+    }
+
+    (init_level.unwrap_or(0), edges)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

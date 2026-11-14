@@ -1229,6 +1229,10 @@ impl Transport for SerialTransport {
         }
     }
 
+    fn live_state(&self) -> Option<TransportState> {
+        Some(self.state())
+    }
+
     fn start(
         &mut self,
         rx_sink: PacketSender,
@@ -1250,6 +1254,7 @@ impl Transport for SerialTransport {
             let mut tx_consumer = TxStreamConsumer::new(tx_rx);
             let mut rx_buf = vec![0u8; DEFAULT_SERIAL_READ_CHUNK_BYTES];
             let reconnect_delay = Duration::from_millis(config.reconnect_delay_ms.max(1));
+            let mut connected_sessions = 0u64;
 
             loop {
                 if *shutdown_rx.borrow() {
@@ -1271,6 +1276,10 @@ impl Transport for SerialTransport {
 
                 let mut streams = match opened {
                     Ok(streams) => {
+                        if connected_sessions > 0 {
+                            emitter.mark_discontinuity();
+                        }
+                        connected_sessions += 1;
                         state.set(TransportState::Running);
                         streams
                     }

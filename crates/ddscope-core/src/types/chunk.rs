@@ -1421,6 +1421,85 @@ impl EventDataChunk {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Clears stored events in-place without releasing backing buffer capacity.
+    pub fn clear(&mut self) {
+        match self {
+            Self::StateTransitions {
+                timestamps_ns,
+                state_codes,
+            } => {
+                timestamps_ns.clear();
+                state_codes.clear();
+            }
+            Self::TextRecords {
+                timestamps_ns,
+                messages,
+            } => {
+                timestamps_ns.clear();
+                messages.clear();
+            }
+        }
+    }
+
+    /// Creates a tightly sized copy of this chunk for sealing partial active buffers
+    /// without retaining unused pre-allocated `CHUNK_LEN` capacity in memory quota accounting.
+    pub fn clone_shrunk(&self) -> Self {
+        match self {
+            Self::StateTransitions {
+                timestamps_ns,
+                state_codes,
+            } => {
+                let mut ts = AlignedVec::with_capacity(timestamps_ns.len());
+                ts.extend_from_slice(timestamps_ns.as_slice());
+                let mut codes = AlignedVec::with_capacity(state_codes.len());
+                codes.extend_from_slice(state_codes.as_slice());
+                Self::StateTransitions {
+                    timestamps_ns: ts,
+                    state_codes: codes,
+                }
+            }
+            Self::TextRecords {
+                timestamps_ns,
+                messages,
+            } => {
+                let mut ts = AlignedVec::with_capacity(timestamps_ns.len());
+                ts.extend_from_slice(timestamps_ns.as_slice());
+                Self::TextRecords {
+                    timestamps_ns: ts,
+                    messages: messages.clone(),
+                }
+            }
+        }
+    }
+
+    /// Returns approximate byte footprint for sealing quota reservation checks.
+    #[inline]
+    pub fn estimated_sealed_byte_footprint(&self) -> usize {
+        match self {
+            Self::StateTransitions {
+                timestamps_ns,
+                state_codes,
+            } => {
+                let ts_bytes = (timestamps_ns.len() * size_of::<u64>()).div_ceil(CACHE_LINE_BYTES)
+                    * CACHE_LINE_BYTES;
+                let code_bytes = (state_codes.len() * size_of::<i32>())
+                    .div_ceil(CACHE_LINE_BYTES)
+                    * CACHE_LINE_BYTES;
+                ts_bytes + code_bytes
+            }
+            Self::TextRecords {
+                timestamps_ns,
+                messages,
+            } => {
+                let ts_bytes = (timestamps_ns.len() * size_of::<u64>()).div_ceil(CACHE_LINE_BYTES)
+                    * CACHE_LINE_BYTES;
+                let str_bytes: usize =
+                    messages.iter().map(|s| s.len() + size_of::<Arc<str>>()).sum();
+                ts_bytes + str_bytes
+            }
+        }
+    }
 }
 
 /// Unified sealed data chunk across all three channel modalities.

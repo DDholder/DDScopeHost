@@ -837,6 +837,7 @@ fn run_offline_replay(
             } else {
                 0
             };
+            let mut pending_discontinuity = false;
 
             loop {
                 if *shutdown_rx.borrow() {
@@ -844,11 +845,13 @@ fn run_offline_replay(
                 }
                 if let Some(ratio) = control.take_seek_if_changed(&mut observed_seek_epoch) {
                     offset = seek_raw_offset(total_len, ratio);
+                    pending_discontinuity = true;
                 }
                 if offset >= total_len {
                     control.set_progress(1.0);
                     if control.loop_playback() {
                         offset = 0;
+                        pending_discontinuity = true;
                         control.set_progress(0.0);
                         continue;
                     }
@@ -860,6 +863,7 @@ fn run_offline_replay(
                     bytes: data.slice(offset..end),
                     host_recv_ns: host_monotonic_ns(),
                     source_tag: source_tag.clone(),
+                    stream_discontinuity: std::mem::take(&mut pending_discontinuity),
                 };
                 if !emit_blocking_interruptible(&rx_sink, &shutdown_rx, &metrics, &control, packet)?
                 {
@@ -890,6 +894,7 @@ fn run_offline_replay(
             } else {
                 0
             };
+            let mut pending_discontinuity = false;
 
             loop {
                 if *shutdown_rx.borrow() {
@@ -897,11 +902,13 @@ fn run_offline_replay(
                 }
                 if let Some(ratio) = control.take_seek_if_changed(&mut observed_seek_epoch) {
                     idx = seek_ddraw_index(&entries, total_payload_bytes, ratio);
+                    pending_discontinuity = true;
                 }
                 if idx >= entries.len() {
                     control.set_progress(1.0);
                     if control.loop_playback() {
                         idx = 0;
+                        pending_discontinuity = true;
                         loop_offset_ns = loop_offset_ns.saturating_add(loop_span_ns);
                         control.set_progress(0.0);
                         continue;
@@ -914,6 +921,7 @@ fn run_offline_replay(
                     bytes: data.slice(entry.offset..entry.offset + entry.len),
                     host_recv_ns: entry.timestamp_ns.saturating_add(loop_offset_ns),
                     source_tag: source_tag.clone(),
+                    stream_discontinuity: std::mem::take(&mut pending_discontinuity),
                 };
                 if !emit_blocking_interruptible(&rx_sink, &shutdown_rx, &metrics, &control, packet)?
                 {
@@ -966,6 +974,7 @@ async fn run_paced_replay(
             let mut anchor_wall = Instant::now();
             let mut anchor_bytes: u64 = 0;
             let mut last_speed = control.playback_speed();
+            let mut pending_discontinuity = false;
 
             loop {
                 if *shutdown_rx.borrow() {
@@ -979,6 +988,7 @@ async fn run_paced_replay(
                     }
                     if let Some(ratio) = control.take_seek_if_changed(&mut observed_seek_epoch) {
                         offset = seek_raw_offset(total_len, ratio);
+                        pending_discontinuity = true;
                     }
                     anchor_wall = Instant::now();
                     anchor_bytes = 0;
@@ -988,6 +998,7 @@ async fn run_paced_replay(
 
                 if let Some(ratio) = control.take_seek_if_changed(&mut observed_seek_epoch) {
                     offset = seek_raw_offset(total_len, ratio);
+                    pending_discontinuity = true;
                     anchor_wall = Instant::now();
                     anchor_bytes = 0;
                 }
@@ -996,6 +1007,7 @@ async fn run_paced_replay(
                     control.set_progress(1.0);
                     if control.loop_playback() {
                         offset = 0;
+                        pending_discontinuity = true;
                         control.set_progress(0.0);
                         anchor_wall = Instant::now();
                         anchor_bytes = 0;
@@ -1021,6 +1033,7 @@ async fn run_paced_replay(
                     bytes: data.slice(offset..end),
                     host_recv_ns: host_monotonic_ns(),
                     source_tag: source_tag.clone(),
+                    stream_discontinuity: std::mem::take(&mut pending_discontinuity),
                 };
                 if !emit_async_interruptible(
                     &rx_sink,
@@ -1073,6 +1086,7 @@ async fn run_paced_replay(
             let mut anchor_wall = Instant::now();
             let mut anchor_file_ts = entries.get(idx).map_or(0, |e| e.timestamp_ns);
             let mut last_speed = control.playback_speed();
+            let mut pending_discontinuity = false;
 
             loop {
                 if *shutdown_rx.borrow() {
@@ -1086,6 +1100,7 @@ async fn run_paced_replay(
                     }
                     if let Some(ratio) = control.take_seek_if_changed(&mut observed_seek_epoch) {
                         idx = seek_ddraw_index(&entries, total_payload_bytes, ratio);
+                        pending_discontinuity = true;
                     }
                     anchor_wall = Instant::now();
                     anchor_file_ts = entries.get(idx).map_or(0, |e| e.timestamp_ns);
@@ -1095,6 +1110,7 @@ async fn run_paced_replay(
 
                 if let Some(ratio) = control.take_seek_if_changed(&mut observed_seek_epoch) {
                     idx = seek_ddraw_index(&entries, total_payload_bytes, ratio);
+                    pending_discontinuity = true;
                     anchor_wall = Instant::now();
                     anchor_file_ts = entries.get(idx).map_or(0, |e| e.timestamp_ns);
                 }
@@ -1103,6 +1119,7 @@ async fn run_paced_replay(
                     control.set_progress(1.0);
                     if control.loop_playback() {
                         idx = 0;
+                        pending_discontinuity = true;
                         control.set_progress(0.0);
                         anchor_wall = Instant::now();
                         anchor_file_ts = entries[0].timestamp_ns;
@@ -1123,6 +1140,7 @@ async fn run_paced_replay(
                     bytes: data.slice(entry.offset..entry.offset + entry.len),
                     host_recv_ns: host_monotonic_ns(),
                     source_tag: source_tag.clone(),
+                    stream_discontinuity: std::mem::take(&mut pending_discontinuity),
                 };
                 if !emit_async_interruptible(
                     &rx_sink,

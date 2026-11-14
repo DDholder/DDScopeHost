@@ -28,9 +28,7 @@ export function WorkspaceShell() {
 
   const handleReleaseAllPins = () => {
     Object.values(scopes).forEach((sc) => {
-      if (sc.sweepMode === "single" || sc.sweepMode === "normal") {
-        rearmScope(sc.scopeId);
-      }
+      rearmScope(sc.scopeId);
     });
   };
 

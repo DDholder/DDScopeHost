@@ -487,6 +487,30 @@ impl PinnedGuard {
     ) -> Result<(u8, Vec<f32>), CoreError> {
         crate::storage::extract_chunks_digital_edges(&self.chunks, t_min, t_max)
     }
+
+    /// Extracts viewport-decimated digital transition edges across `w_px` columns directly
+    /// from these pinned boolean chunks, preserving parity and single-sample glitches.
+    pub fn extract_digital_edges_viewport(
+        &self,
+        t_min: TimestampNs,
+        t_max: TimestampNs,
+        w_px: usize,
+    ) -> Result<(u8, Vec<f32>), CoreError> {
+        crate::storage::extract_chunks_digital_edges_viewport(&self.chunks, t_min, t_max, w_px)
+    }
+
+    /// Extracts normalized state-machine ribbons directly from these pinned event chunks.
+    pub fn extract_state_ribbons<F>(
+        &self,
+        t_min: TimestampNs,
+        t_max: TimestampNs,
+        color_for_state: F,
+    ) -> Result<Vec<crate::scope::ddsf::DdsfStateRibbon>, CoreError>
+    where
+        F: FnMut(i32) -> u32,
+    {
+        crate::storage::extract_chunks_state_ribbons(&self.chunks, t_min, t_max, color_for_state)
+    }
 }
 
 impl Drop for PinnedGuard {

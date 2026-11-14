@@ -64,6 +64,64 @@ enum Commands {
         #[arg(long)]
         channels: Option<u8>,
     },
+    /// Run sustained mixed-signal high-throughput soak & steady-state memory stability gate.
+    Soak {
+        /// Number of simulated mixed-signal sources.
+        #[arg(long, default_value_t = 2)]
+        sources: usize,
+        /// Target aggregate sample rate in points/sec across all analog + digital channels.
+        #[arg(long, default_value_t = 5_200_000)]
+        rate: u64,
+        /// Frame extraction & DDSF v1 packing cadence in Hz.
+        #[arg(long, default_value_t = 120)]
+        fps: u32,
+        /// Steady-state soak measurement duration in seconds.
+        #[arg(long, default_value_t = 10.0)]
+        duration_secs: f64,
+        /// Global ring-buffer memory quota in MiB.
+        #[arg(long, default_value_t = 32)]
+        quota_mib: usize,
+        /// Verify full DoD glitch latch, 10,000x zoom retention, and rearm pin release.
+        #[arg(long, default_value_t = false)]
+        verify_dod: bool,
+        /// Optional path to write the machine-readable JSON soak report.
+        #[arg(long)]
+        json_out: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SoakReport {
+    sources: usize,
+    total_channels: usize,
+    per_source_rate_hz: f64,
+    target_pts_per_sec: u64,
+    fps: u32,
+    duration_secs: f64,
+    pts_delta: u64,
+    rows_delta: u64,
+    achieved_pts_per_sec: f64,
+    dropped_packets: u64,
+    decode_errors: u64,
+    frames_packed: usize,
+    pack_p50_us: f64,
+    pack_p99_us: f64,
+    pack_budget_us: f64,
+    quota_limit_bytes: usize,
+    quota_peak_bytes: usize,
+    steady_mem_samples: usize,
+    steady_mem_mean_bytes: f64,
+    steady_mem_min_bytes: usize,
+    steady_mem_max_bytes: usize,
+    steady_mem_fluctuation_pct: f64,
+    evicted_samples_total: u64,
+    verify_dod: bool,
+    glitch_latched: bool,
+    glitch_pinned: bool,
+    pinned_bytes: usize,
+    zoomed_ch3_max: Option<f32>,
+    rearmed_pinned_bytes: usize,
+    passed: bool,
 }
 
 #[derive(Debug)]
@@ -210,6 +268,65 @@ fn main() {
             if let Err(err) = run_replay_verify(Path::new(&input), &codec, channels) {
                 eprintln!("Replay verification failed for `{input}`: {err}");
                 std::process::exit(1);
+            }
+        }
+        Commands::Soak {
+            sources,
+            rate,
+            fps,
+            duration_secs,
+            quota_mib,
+            verify_dod,
+            json_out,
+        } => {
+            if sources == 0
+                || rate < 1_000
+                || !(1..=240).contains(&fps)
+                || !duration_secs.is_finite()
+                || duration_secs < 0.2
+                || quota_mib < 8
+            {
+                eprintln!(
+                    "Invalid soak parameters: require --sources >= 1, --rate >= 1000, \
+                     --fps in 1..=240, --duration-secs >= 0.2, --quota-mib >= 8"
+                );
+                std::process::exit(2);
+            }
+
+            match run_soak(sources, rate, fps, duration_secs, quota_mib, verify_dod) {
+                Ok(report) => {
+                    print_soak_report(&report);
+                    if let Some(ref out_path) = json_out {
+                        if let Some(parent) = out_path.parent() {
+                            if !parent.as_os_str().is_empty() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                        }
+                        match serde_json::to_string_pretty(&report) {
+                            Ok(json_str) => {
+                                if let Err(err) = std::fs::write(out_path, json_str) {
+                                    eprintln!(
+                                        "Failed to write JSON soak report to `{}`: {err}",
+                                        out_path.display()
+                                    );
+                                    std::process::exit(1);
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("Failed to serialize JSON soak report: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    if !report.passed {
+                        eprintln!("SOAK GATE FAILED!");
+                        std::process::exit(1);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Soak execution error: {err}");
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -497,6 +614,364 @@ fn print_bench_report(r: &BenchReport) {
         "  glitch_zoom: zoom_span_ns={} ns, ch3_max={:?} V, quota_used={}/{} bytes",
         r.zoom_span_ns, r.zoomed_ch3_max, r.quota_used_bytes, r.quota_limit_bytes
     );
+}
+
+fn run_soak(
+    sources: usize,
+    target_rate: u64,
+    fps: u32,
+    duration_secs: f64,
+    quota_mib: usize,
+    verify_dod: bool,
+) -> CoreResult<SoakReport> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(CoreError::Io)?;
+
+    let quota_bytes = quota_mib.saturating_mul(1024 * 1024);
+    let workspace = CoreWorkspace::with_quota_bytes(rt.handle().clone(), quota_bytes);
+    // SimPreset registers 4 analog + 3 bool dense channels = 7 high-rate channels per source.
+    let per_source_rate_hz =
+        (((target_rate as f64) / ((sources * 7) as f64)) * 1.35).clamp(1_000.0, 10_000_000.0);
+
+    let mut source_ids = Vec::with_capacity(sources);
+    for idx in 0..sources {
+        let id = SourceId::new(format!("sim{idx}"));
+        let sim_cfg = SimConfig {
+            sample_rate_hz: per_source_rate_hz,
+            analog_channels: 4,
+            enable_glitch: false,
+            glitch_amplitude: 80.0,
+            wire_format: SimWireFormat::SimPreset,
+            paced: true,
+            ..SimConfig::default()
+        };
+        let preset_cfg = SimPresetConfig {
+            source_id: id.as_str().to_string(),
+            analog_channels: 4,
+            ..SimPresetConfig::default()
+        };
+        let src_cfg = SourceConfig::new(
+            id.clone(),
+            SourceTransportConfig::Sim(sim_cfg),
+            ClockMode::Tier1HardwareCounter {
+                tick_hz: per_source_rate_hz,
+                counter_bits: 32,
+            },
+            SourceProtocolConfig::SimPreset(preset_cfg),
+        );
+        workspace.create_source(src_cfg)?;
+        source_ids.push(id);
+    }
+
+    let sim0_id = &source_ids[0];
+    let sim0_ch0 = resolve_ch_id(&workspace, sim0_id, "ch0")?;
+    let sim0_ch3 = resolve_ch_id(&workspace, sim0_id, "ch3")?;
+    let sim0_pwm = resolve_ch_id(&workspace, sim0_id, "pwm_a")?;
+    let sim0_fault = resolve_ch_id(&workspace, sim0_id, "fault_pin")?;
+    let sim0_state = resolve_ch_id(&workspace, sim0_id, "ctrl_state")?;
+
+    let scope1_ctrl = ScopeControllerConfig {
+        scope_id: ScopeId(1),
+        title: Some("MSO Scope 1 (Glitch Catcher)".into()),
+        canvas_width_px: 1280,
+        time_span_ns: 20_000_000,
+        pre_trigger_ratio: 0.5,
+        pan_offset_ns: 0,
+        sweep_mode: if verify_dod {
+            TriggerSweepMode::Single
+        } else {
+            TriggerSweepMode::Roll
+        },
+        auto_timeout_ns: 100_000_000,
+        trigger: if verify_dod {
+            Some(TriggerCondition::Edge {
+                channel: sim0_ch3,
+                level: 60.0,
+                hysteresis: 2.0,
+                slope: EdgeSlope::Rising,
+            })
+        } else {
+            None
+        },
+        sync_group_id: None,
+        paused: false,
+    };
+    workspace.upsert_scope(
+        ScopeConfig::new(ScopeId(1), scope1_ctrl)
+            .with_title("MSO Scope 1 (Glitch Catcher)")
+            .with_tracks(vec![
+                ScopeTrackBinding::analog(sim0_ch0),
+                ScopeTrackBinding::analog(sim0_ch3),
+                ScopeTrackBinding::digital(sim0_pwm),
+                ScopeTrackBinding::digital(sim0_fault),
+                ScopeTrackBinding::state_ribbon(sim0_state),
+            ])
+            .with_width_px(1280)
+            .with_auto_pin_on_latch(verify_dod),
+    )?;
+
+    let mut roll_tracks = vec![
+        ScopeTrackBinding::analog(sim0_ch0),
+        ScopeTrackBinding::analog(sim0_ch3),
+        ScopeTrackBinding::digital(sim0_pwm),
+        ScopeTrackBinding::state_ribbon(sim0_state),
+    ];
+    if let Some(sim1_id) = source_ids.get(1) {
+        roll_tracks.push(ScopeTrackBinding::analog(resolve_ch_id(
+            &workspace, sim1_id, "ch0",
+        )?));
+        roll_tracks.push(ScopeTrackBinding::digital(resolve_ch_id(
+            &workspace, sim1_id, "pwm_a",
+        )?));
+    }
+
+    workspace.upsert_scope(
+        ScopeConfig::new(
+            ScopeId(2),
+            ScopeControllerConfig {
+                scope_id: ScopeId(2),
+                title: Some("MSO Scope 2 (Roll Monitor)".into()),
+                canvas_width_px: 1280,
+                time_span_ns: 20_000_000,
+                pre_trigger_ratio: 0.5,
+                pan_offset_ns: 0,
+                sweep_mode: TriggerSweepMode::Roll,
+                auto_timeout_ns: 100_000_000,
+                trigger: None,
+                sync_group_id: None,
+                paused: false,
+            },
+        )
+        .with_title("MSO Scope 2 (Roll Monitor)")
+        .with_tracks(roll_tracks)
+        .with_width_px(1280),
+    )?;
+
+    for id in &source_ids {
+        workspace.start_source(id)?;
+    }
+
+    // Warm up (~150 ms) so every source stabilizes and Scope 1 TriggerEngine primes ArmedLow.
+    let warmup_start = Instant::now();
+    loop {
+        workspace.step_and_pack_ddsf_with(host_monotonic_ns(), validate_ddsf_frame)??;
+        let sim0_samples = workspace
+            .find_channel(sim0_id, "ch3")
+            .map_or(0, |e| e.total_samples());
+        let elapsed = warmup_start.elapsed();
+        if (elapsed >= Duration::from_millis(150) && sim0_samples >= 64)
+            || elapsed >= Duration::from_millis(600)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(8));
+    }
+
+    let (pts_start, _, total_channels) = tree_totals(&workspace.channel_tree());
+    let rows_start: u64 = workspace
+        .telemetry_snapshot()
+        .sources
+        .iter()
+        .map(|s| s.total_decoded_samples)
+        .sum();
+    let t_measure = Instant::now();
+
+    if verify_dod {
+        let _ = workspace.send_downlink(
+            sim0_id,
+            &DownlinkRequest::from_ascii("GLITCH", true, TxPriority::High),
+        )?;
+    }
+
+    let measure_dur = Duration::from_secs_f64(duration_secs);
+    let tick_interval = Duration::from_secs_f64(1.0 / (fps as f64));
+    let mut pack_latencies_ns =
+        Vec::with_capacity(((duration_secs * (fps as f64) * 1.1) as usize).max(32));
+    let mut saturated_mem_samples = Vec::new();
+    let mut quota_peak_bytes = 0usize;
+    let mut fallback_sent = false;
+    let mut next_tick = Instant::now() + tick_interval;
+
+    while t_measure.elapsed() < measure_dur {
+        workspace.step_and_pack_ddsf_with(host_monotonic_ns(), validate_ddsf_frame)??;
+        let snap = workspace.telemetry_snapshot();
+        pack_latencies_ns.push(snap.last_frame_pack_ns);
+        quota_peak_bytes = quota_peak_bytes.max(snap.quota.allocated_bytes);
+
+        let (_, ev_so_far, _) = tree_totals(&workspace.channel_tree());
+        if ev_so_far > 0 && snap.quota.allocated_bytes >= (snap.quota.quota_bytes * 3) / 4 {
+            saturated_mem_samples.push(snap.quota.allocated_bytes);
+        }
+
+        if verify_dod && !fallback_sent && t_measure.elapsed() >= Duration::from_millis(150) {
+            let s1 = workspace.scope_summary(&ScopeId(1))?;
+            if s1.runtime_state != TriggerRuntimeState::LatchedPinned {
+                let _ = workspace.send_downlink(
+                    sim0_id,
+                    &DownlinkRequest::from_ascii("GLITCH", true, TxPriority::High),
+                )?;
+            }
+            fallback_sent = true;
+        }
+
+        let now = Instant::now();
+        if next_tick > now {
+            let remaining = measure_dur.saturating_sub(t_measure.elapsed());
+            let sleep_for = (next_tick - now).min(remaining);
+            if !sleep_for.is_zero() {
+                std::thread::sleep(sleep_for);
+            }
+        }
+        next_tick = (next_tick + tick_interval).max(Instant::now() - tick_interval);
+    }
+
+    workspace.step_and_pack_ddsf_with(host_monotonic_ns(), validate_ddsf_frame)??;
+    let measure_elapsed = t_measure.elapsed().as_secs_f64().max(1e-9);
+    let (pts_end, evicted_samples_total, _) = tree_totals(&workspace.channel_tree());
+    let telemetry = workspace.telemetry_snapshot();
+    pack_latencies_ns.push(telemetry.last_frame_pack_ns);
+    quota_peak_bytes = quota_peak_bytes.max(telemetry.quota.allocated_bytes);
+
+    let rows_end: u64 = telemetry.sources.iter().map(|s| s.total_decoded_samples).sum();
+    let pts_delta = pts_end.saturating_sub(pts_start);
+    let rows_delta = rows_end.saturating_sub(rows_start);
+    let achieved_pts_per_sec = pts_delta as f64 / measure_elapsed;
+    let dropped_packets: u64 = telemetry.sources.iter().map(|s| s.dropped_packets).sum();
+    let decode_errors: u64 = telemetry.sources.iter().map(|s| s.decode_errors).sum();
+
+    let scope1_summary = workspace.scope_summary(&ScopeId(1))?;
+    let glitch_latched = scope1_summary.runtime_state == TriggerRuntimeState::LatchedPinned;
+    let glitch_pinned = scope1_summary.is_pinned;
+    let pinned_bytes = scope1_summary.pinned_bytes;
+
+    let mut zoomed_ch3_max = None;
+    let mut rearmed_pinned_bytes = pinned_bytes;
+    if verify_dod {
+        let zoom_span_ns = ((8.0 * 1_000_000_000.0 / per_source_rate_hz) as u64).max(2_000);
+        workspace.set_scope_viewport(&ScopeId(1), zoom_span_ns, 0, Some(1280))?;
+        zoomed_ch3_max =
+            workspace.pack_ddsf_frame_with(host_monotonic_ns(), |bytes| -> CoreResult<Option<f32>> {
+                extract_track_max(bytes, 1, sim0_ch3.0)
+            })??;
+        workspace.rearm_scope(&ScopeId(1))?;
+        rearmed_pinned_bytes = workspace.quota_stats().pinned_bytes;
+    }
+
+    let quota_limit_bytes = telemetry.quota.quota_bytes;
+    rt.block_on(workspace.shutdown())?;
+
+    pack_latencies_ns.sort_unstable();
+    let pack_p50_us = percentile_sorted_ns(&pack_latencies_ns, 0.50) / 1_000.0;
+    let pack_p99_us = percentile_sorted_ns(&pack_latencies_ns, 0.99) / 1_000.0;
+    let pack_budget_us = if cfg!(debug_assertions) {
+        15_000.0
+    } else {
+        500.0
+    };
+
+    let (steady_mem_mean_bytes, steady_mem_min_bytes, steady_mem_max_bytes, steady_mem_fluctuation_pct) =
+        if saturated_mem_samples.is_empty() {
+            (0.0, 0, 0, 0.0)
+        } else {
+            // Skip initial 2 transition samples right at saturation boundary.
+            let slice = if saturated_mem_samples.len() > 8 {
+                &saturated_mem_samples[2..]
+            } else {
+                &saturated_mem_samples[..]
+            };
+            let min_b = *slice.iter().min().unwrap();
+            let max_b = *slice.iter().max().unwrap();
+            let mean_b = slice.iter().map(|&b| b as f64).sum::<f64>() / (slice.len() as f64);
+            let fluct = if mean_b > 0.0 {
+                ((max_b.saturating_sub(min_b) as f64) / (2.0 * mean_b)) * 100.0
+            } else {
+                0.0
+            };
+            (mean_b, min_b, max_b, fluct)
+        };
+
+    let base_passed = achieved_pts_per_sec >= target_rate as f64
+        && dropped_packets == 0
+        && decode_errors == 0
+        && pack_p99_us < pack_budget_us
+        && quota_peak_bytes <= quota_limit_bytes
+        && steady_mem_fluctuation_pct <= 5.0;
+    let dod_passed = !verify_dod
+        || (glitch_latched
+            && glitch_pinned
+            && zoomed_ch3_max.is_some_and(|m| m > 85.0)
+            && rearmed_pinned_bytes == 0);
+
+    Ok(SoakReport {
+        sources,
+        total_channels,
+        per_source_rate_hz,
+        target_pts_per_sec: target_rate,
+        fps,
+        duration_secs: measure_elapsed,
+        pts_delta,
+        rows_delta,
+        achieved_pts_per_sec,
+        dropped_packets,
+        decode_errors,
+        frames_packed: pack_latencies_ns.len(),
+        pack_p50_us,
+        pack_p99_us,
+        pack_budget_us,
+        quota_limit_bytes,
+        quota_peak_bytes,
+        steady_mem_samples: saturated_mem_samples.len(),
+        steady_mem_mean_bytes,
+        steady_mem_min_bytes,
+        steady_mem_max_bytes,
+        steady_mem_fluctuation_pct,
+        evicted_samples_total,
+        verify_dod,
+        glitch_latched,
+        glitch_pinned,
+        pinned_bytes,
+        zoomed_ch3_max,
+        rearmed_pinned_bytes,
+        passed: base_passed && dod_passed,
+    })
+}
+
+fn print_soak_report(r: &SoakReport) {
+    println!("DDScopeHost M5 Soak Report (passed={})", r.passed);
+    println!(
+        "  sources={} total_channels={} per_source_rate_hz={:.0} fps={} duration={:.3}s",
+        r.sources, r.total_channels, r.per_source_rate_hz, r.fps, r.duration_secs
+    );
+    println!(
+        "  throughput: {:.0} pts/s (target >= {} pts/s), rows_delta={}, pts_delta={}",
+        r.achieved_pts_per_sec, r.target_pts_per_sec, r.rows_delta, r.pts_delta
+    );
+    println!(
+        "  reliability: dropped_packets={}, decode_errors={}",
+        r.dropped_packets, r.decode_errors
+    );
+    println!(
+        "  ddsf_pack: frames={}, p50={:.2} us, p99={:.2} us (budget < {:.0} us)",
+        r.frames_packed, r.pack_p50_us, r.pack_p99_us, r.pack_budget_us
+    );
+    println!(
+        "  memory: peak={}/{} B, steady_samples={}, steady_range=[{}..{}], fluctuation=±{:.2}% (limit <= ±5.0%), evicted_total={}",
+        r.quota_peak_bytes,
+        r.quota_limit_bytes,
+        r.steady_mem_samples,
+        r.steady_mem_min_bytes,
+        r.steady_mem_max_bytes,
+        r.steady_mem_fluctuation_pct,
+        r.evicted_samples_total
+    );
+    if r.verify_dod {
+        println!(
+            "  dod_check: latched={}, pinned={}, pinned_bytes={}, zoomed_ch3_max={:?} V, rearmed_pinned_bytes={}",
+            r.glitch_latched, r.glitch_pinned, r.pinned_bytes, r.zoomed_ch3_max, r.rearmed_pinned_bytes
+        );
+    }
 }
 
 fn run_replay_verify(path: &Path, codec_arg: &str, channels_hint: Option<u8>) -> CoreResult<()> {

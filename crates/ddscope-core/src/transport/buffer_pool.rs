@@ -244,6 +244,7 @@ impl PacketBufferPool {
             bytes,
             host_recv_ns,
             source_tag,
+            stream_discontinuity: false,
         })
     }
 
@@ -260,6 +261,7 @@ impl PacketBufferPool {
                 bytes: Bytes::new(),
                 host_recv_ns,
                 source_tag,
+                stream_discontinuity: false,
             };
         }
         self.acquire_buf(data.len()).extend_from_slice(data);

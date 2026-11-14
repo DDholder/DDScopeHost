@@ -42,6 +42,10 @@ test("translate performs parameter interpolation for both locales", () => {
   assert.equal(translate("zh-CN", "topbar.seq", { seq: 42 }), "帧 #42");
   assert.equal(translate("en", "sidebar.bindTitle", { id: 3 }), "Bind to Scope 3");
   assert.equal(translate("zh-CN", "sidebar.bindTitle", { id: 3 }), "绑定到示波器 3");
+  assert.equal(translate("en", "sidebar.state.connecting"), "connecting");
+  assert.equal(translate("zh-CN", "sidebar.state.connecting"), "连接中");
+  assert.equal(translate("en", "sidebar.state.reconnecting"), "reconnecting");
+  assert.equal(translate("zh-CN", "sidebar.state.reconnecting"), "重连中");
 });
 
 test("default scope titles round-trip across zh-CN and en while preserving custom titles", () => {

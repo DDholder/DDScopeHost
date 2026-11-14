@@ -439,6 +439,12 @@ select {
   box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
 }
 
+.source-dot.state-connecting,
+.source-dot.state-reconnecting {
+  background: #facc15;
+  box-shadow: 0 0 6px rgba(250, 204, 21, 0.65);
+}
+
 .source-dot.state-error {
   background: var(--danger);
 }

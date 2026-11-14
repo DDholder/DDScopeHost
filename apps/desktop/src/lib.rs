@@ -90,16 +90,17 @@ pub fn run() {
             );
             app.manage(rt_ctrl.clone());
 
-            #[cfg(debug_assertions)]
             if let Ok(raw_ms) = std::env::var("DDSCOPE_SMOKE_EXIT_MS") {
                 if let Ok(ms) = raw_ms.parse::<u64>() {
-                    let handle = app.handle().clone();
-                    let smoke_ctrl = Arc::clone(&rt_ctrl);
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(ms));
-                        smoke_ctrl.shutdown_blocking();
-                        handle.exit(0);
-                    });
+                    if ms > 0 {
+                        let handle = app.handle().clone();
+                        let smoke_ctrl = Arc::clone(&rt_ctrl);
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                            smoke_ctrl.shutdown_blocking();
+                            handle.exit(0);
+                        });
+                    }
                 }
             }
 

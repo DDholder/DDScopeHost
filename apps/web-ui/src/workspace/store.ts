@@ -786,6 +786,7 @@ export function createWorkspaceStore(
     rearmScope: (scopeId) => {
       get().updateScope(scopeId, (prev) => ({
         ...prev,
+        paused: false,
         panOffsetNs: 0,
       }));
       client.rearmScope(scopeId).catch(() => {});

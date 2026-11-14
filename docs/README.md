@@ -27,6 +27,11 @@
    - `DDSF v1` 64 字节对齐二进制内存布局规范、三级混合时钟/二阶软件 PLL、64 叉 M4 金字塔与 `Chunk Pinning` 实现细则
    - **契约先行双端解耦策略**、M0 ~ M5 六阶段划分、**四轨串并联开发主流程图（含关键路径标注）**与 WBS 依赖关系详表
 
+5. **[05-phase1-m5-acceptance-report.md](./05-phase1-m5-acceptance-report.md) — Phase 1 M5 极限性能压测、边缘异常加固与 MVP 验收报告**
+   - Gate 4 总览结论、M5 边缘异常加固清单（热插拔与时钟重启恢复、Windows UDP `10054` 容错、宏观数字边沿防漏抽取、多通道 Pinning 公平淘汰与前端状态闭环）
+   - Phase 1 MVP 四大 DoD 验收矩阵、`ddscope-cli soak` 30 秒 Release 压测实测数据与 30 分钟长稳复核命令
+   - 全量测试门禁统计、桌面端 Release 冒烟结果与 Windows `.msi` / `-setup.exe` 安装包构建产物路径
+
 ---
 
 ## 核心架构决策速查表（ADR Summary）

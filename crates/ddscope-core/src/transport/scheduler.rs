@@ -281,6 +281,7 @@ pub struct RxPacketEmitter {
     backpressure: RxBackpressurePolicy,
     metrics: Arc<TransportMetrics>,
     raw_tap: SharedRawTap,
+    pending_discontinuity: AtomicBool,
 }
 
 impl std::fmt::Debug for RxPacketEmitter {
@@ -323,7 +324,15 @@ impl RxPacketEmitter {
             backpressure,
             metrics,
             raw_tap,
+            pending_discontinuity: AtomicBool::new(false),
         }
+    }
+
+    /// Marks the next emitted packet as following a reconnect or stream discontinuity so
+    /// downstream protocol framing and clock synchronization cleanly reset and re-anchor.
+    #[inline]
+    pub fn mark_discontinuity(&self) {
+        self.pending_discontinuity.store(true, Ordering::Release);
     }
 
     /// Returns an immutable reference to the underlying [`PacketBufferPool`].
@@ -354,7 +363,13 @@ impl RxPacketEmitter {
     ///
     /// Returns `Ok(true)` if delivered, `Ok(false)` if dropped under `DropNewest`, or
     /// `Err(CoreError::ChannelClosed)` if the consumer receiver has been dropped.
-    pub fn emit_packet(&self, packet: RawPacket) -> CoreResult<bool> {
+    pub fn emit_packet(&self, mut packet: RawPacket) -> CoreResult<bool> {
+        let was_pending = self.pending_discontinuity.swap(false, Ordering::AcqRel);
+        if was_pending {
+            packet.stream_discontinuity = true;
+        }
+        let restore_discontinuity = packet.stream_discontinuity;
+
         let guard = self.raw_tap.load();
         if let Some(ref tap) = **guard {
             tap.on_raw_bytes(RawTapDirection::Rx, packet.host_recv_ns, &packet.bytes);
@@ -368,6 +383,9 @@ impl RxPacketEmitter {
                     Ok(true)
                 }
                 Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    if restore_discontinuity {
+                        self.pending_discontinuity.store(true, Ordering::Release);
+                    }
                     self.metrics.record_rx_drop();
                     Ok(false)
                 }
@@ -514,6 +532,12 @@ impl TransportScheduler {
     /// Returns the current [`TransportState`].
     #[inline]
     pub fn state(&self) -> TransportState {
+        if self.is_running() {
+            if let Some(live) = self.transport.live_state() {
+                self.metrics.set_state(live);
+                return live;
+            }
+        }
         self.metrics.state()
     }
 
@@ -534,6 +558,11 @@ impl TransportScheduler {
     /// Returns a snapshot of current transport metrics.
     #[inline]
     pub fn metrics_snapshot(&self) -> TransportMetricsSnapshot {
+        if self.is_running() {
+            if let Some(live) = self.transport.live_state() {
+                self.metrics.set_state(live);
+            }
+        }
         self.metrics.snapshot()
     }
 
@@ -593,7 +622,11 @@ impl TransportScheduler {
             }
         };
 
-        self.metrics.set_state(TransportState::Running);
+        let init_state = self
+            .transport
+            .live_state()
+            .unwrap_or(TransportState::Running);
+        self.metrics.set_state(init_state);
 
         let pump_queue = self.tx_queue.clone();
         let pump_metrics = Arc::clone(&self.metrics);

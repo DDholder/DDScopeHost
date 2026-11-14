@@ -18,8 +18,8 @@ use crate::storage::{
 };
 use crate::types::{
     AxisMeta, ChannelDescriptor, ChannelId, ChannelKind, ChannelPath, ChunkStorageRef, CoreError,
-    CoreResult, DataChunk, DecodedBatch, DecodedColumnBuf, EventDataChunk, EventSchemaKind,
-    LinearScale, NativeScalarColumn, ScalarSlice, ScalarType, SourceId, TimestampNs,
+    CoreResult, DataChunk, DecodedBatch, DecodedColumnBuf, EventSchemaKind,
+    LinearScale, ScalarSlice, ScalarType, SourceId, TimestampNs,
 };
 
 /// Multi-modal per-channel time-series storage container (`Scalar`, `Frame`, or `Event`).
@@ -118,6 +118,7 @@ impl ChannelEntry {
             },
             ChannelKind::Event { .. } => {
                 let mut series = EventSeries::new(id);
+                series.set_quota_manager(Arc::clone(quota_mgr));
                 for listener in listeners {
                     series.register_listener(Arc::clone(listener));
                 }
@@ -439,7 +440,7 @@ impl ChannelEntry {
         }
     }
 
-    /// Pins sealed chunks overlapping `[t_start_ns, t_end_ns]` for this scalar channel.
+    /// Pins sealed chunks overlapping `[t_start_ns, t_end_ns]` for this scalar or event channel.
     pub fn pin_range(
         &self,
         t_start_ns: TimestampNs,
@@ -447,19 +448,19 @@ impl ChannelEntry {
     ) -> CoreResult<PinnedGuard> {
         match &self.store {
             ChannelStore::Scalar(lock) => lock.write().pin_range(t_start_ns, t_end_ns),
-            _ => Err(CoreError::Storage(format!(
+            ChannelStore::Event(lock) => lock.write().pin_range(t_start_ns, t_end_ns),
+            ChannelStore::Frame { .. } => Err(CoreError::Storage(format!(
                 "channel `{}` ({}) does not support chunk pinning",
                 self.path, self.id
             ))),
         }
     }
 
-    /// Extracts normalized digital logic transition edges `(init_level, edge_x_norm)` over `[t_min, t_max]`.
-    pub fn extract_digital_edges(
+    fn validated_bool_series(
         &self,
         t_min: TimestampNs,
         t_max: TimestampNs,
-    ) -> CoreResult<(u8, Vec<f32>)> {
+    ) -> CoreResult<parking_lot::RwLockReadGuard<'_, NativeScalarSeries>> {
         if t_max <= t_min {
             return Err(CoreError::Storage(
                 "t_max must be greater than t_min".into(),
@@ -482,112 +483,33 @@ impl ChannelEntry {
                 series.scalar_type()
             )));
         }
+        Ok(series)
+    }
 
-        let span = (t_max - t_min) as f64;
-        let mut edges = Vec::new();
-        let mut init_level: Option<u8> = None;
-        let mut prev_level: Option<bool> = None;
+    /// Extracts normalized digital logic transition edges `(init_level, edge_x_norm)` over `[t_min, t_max]`.
+    pub fn extract_digital_edges(
+        &self,
+        t_min: TimestampNs,
+        t_max: TimestampNs,
+    ) -> CoreResult<(u8, Vec<f32>)> {
+        let series = self.validated_bool_series(t_min, t_max)?;
+        Ok(crate::storage::scalar_series::extract_series_digital_edges_exact(
+            &series, t_min, t_max,
+        ))
+    }
 
-        // Check sample at or immediately preceding t_min for initial ZOH level
-        if let Some((idx, ts, val)) = series.get_sample_by_timestamp(t_min) {
-            if ts <= t_min {
-                let lvl = val >= 0.5;
-                init_level = Some(u8::from(lvl));
-                prev_level = Some(lvl);
-            } else if idx > series.evicted_samples() {
-                if let Some((prev_ts, prev_val)) = series.get_sample_by_index(idx - 1) {
-                    if prev_ts <= t_min {
-                        let lvl = prev_val >= 0.5;
-                        init_level = Some(u8::from(lvl));
-                        prev_level = Some(lvl);
-                    }
-                }
-            }
-        }
-
-        let sealed = series.sealed_chunks();
-        let start_chunk = sealed.partition_point(|c| c.t_end_ns <= t_min);
-        let end_chunk = sealed.partition_point(|c| c.t_start_ns <= t_max);
-
-        for handle in sealed
-            .iter()
-            .skip(start_chunk)
-            .take(end_chunk.saturating_sub(start_chunk))
-        {
-            if let ChunkStorageRef::InMemory(arc_chunk) = &handle.storage {
-                if let DataChunk::Scalar(sc) = arc_chunk.as_ref() {
-                    if let NativeScalarColumn::Bool(bv) = &sc.values {
-                        if bv.is_empty() {
-                            continue;
-                        }
-                        let first_gt = ts_partition_point(&sc.timestamps, bv.len(), |t| t <= t_min);
-                        let end_le = ts_partition_point(&sc.timestamps, bv.len(), |t| t <= t_max);
-
-                        if first_gt >= end_le {
-                            if end_le > 0 {
-                                prev_level = bv.get(end_le - 1);
-                                if init_level.is_none() {
-                                    init_level = prev_level.map(u8::from);
-                                }
-                            }
-                            continue;
-                        }
-
-                        if prev_level.is_none() {
-                            let lvl0 = bv.get(first_gt).unwrap_or(false);
-                            init_level = Some(u8::from(lvl0));
-                            for &edge_idx in &bv.edge_indices {
-                                let idx = edge_idx as usize;
-                                if idx > first_gt && idx < end_le {
-                                    if let Some(ts) = sc.timestamps.get_ns(idx) {
-                                        edges.push(((ts - t_min) as f64 / span) as f32);
-                                    }
-                                }
-                            }
-                        } else if let Some(prev) = prev_level {
-                            if first_gt == 0 && bv.get(0) != Some(prev) {
-                                if let Some(t0) = sc.timestamps.get_ns(0) {
-                                    edges.push(((t0 - t_min) as f64 / span) as f32);
-                                }
-                            }
-                            let min_edge_idx = first_gt.max(1);
-                            for &edge_idx in &bv.edge_indices {
-                                let idx = edge_idx as usize;
-                                if idx >= min_edge_idx && idx < end_le {
-                                    if let Some(ts) = sc.timestamps.get_ns(idx) {
-                                        edges.push(((ts - t_min) as f64 / span) as f32);
-                                    }
-                                }
-                            }
-                        }
-
-                        prev_level = bv.get(end_le - 1);
-                    }
-                }
-            }
-        }
-
-        let active = series.active_chunk();
-        if !active.is_empty() {
-            let act_ts = active.timestamps();
-            let first_gt = act_ts.partition_point(|&t| t <= t_min);
-            let end_le = act_ts.partition_point(|&t| t <= t_max);
-            for i in first_gt..end_le {
-                if let Some((ts, val)) = active.get_sample_as_f64(i, &series.scale()) {
-                    let lvl = val >= 0.5;
-                    if let Some(prev) = prev_level {
-                        if lvl != prev {
-                            edges.push(((ts - t_min) as f64 / span) as f32);
-                        }
-                    } else if init_level.is_none() {
-                        init_level = Some(u8::from(lvl));
-                    }
-                    prev_level = Some(lvl);
-                }
-            }
-        }
-
-        Ok((init_level.unwrap_or(0), edges))
+    /// Extracts viewport-decimated digital logic transition edges across `w_px` columns over
+    /// `(t_min, t_max]`, preserving edge parity and single-sample glitches in $O(W_{\text{px}} \log C)$.
+    pub fn extract_digital_edges_viewport(
+        &self,
+        t_min: TimestampNs,
+        t_max: TimestampNs,
+        w_px: usize,
+    ) -> CoreResult<(u8, Vec<f32>)> {
+        let series = self.validated_bool_series(t_min, t_max)?;
+        crate::storage::scalar_series::extract_series_digital_edges_viewport(
+            &series, t_min, t_max, w_px,
+        )
     }
 
     /// Extracts normalized [`DdsfStateRibbon`] segments across `[t_min, t_max]` for an event channel.
@@ -615,93 +537,41 @@ impl ChannelEntry {
             return Ok(Vec::new());
         }
 
-        let span = (t_max - t_min) as f64;
         let mut transitions: Vec<(TimestampNs, i32)> = Vec::new();
+        let sealed = series.sealed_chunks();
+        let start_chunk = sealed.partition_point(|c| c.t_end_ns < t_min);
+        let end_chunk = sealed.partition_point(|c| c.t_start_ns <= t_max);
 
-        for handle in series.sealed_chunks() {
-            if handle.t_end_ns < t_min || handle.t_start_ns > t_max {
-                continue;
-            }
+        for handle in &sealed[start_chunk..end_chunk] {
             if let Some(arc_chunk) = handle.storage.as_in_memory() {
-                if let DataChunk::Event(EventDataChunk::StateTransitions {
-                    timestamps_ns,
-                    state_codes,
-                }) = arc_chunk.as_ref()
-                {
-                    let ts_slice = timestamps_ns.as_slice();
-                    let code_slice = state_codes.as_slice();
-                    let s = ts_slice.partition_point(|&t| t <= t_min);
-                    let e = ts_slice.partition_point(|&t| t <= t_max);
-                    for i in s..e {
-                        transitions.push((ts_slice[i], code_slice[i]));
-                    }
+                if let DataChunk::Event(ev) = arc_chunk.as_ref() {
+                    crate::storage::event_series::collect_event_transitions_in_window(
+                        ev,
+                        t_min,
+                        t_max,
+                        &mut transitions,
+                    );
                 }
             }
         }
 
-        if let EventDataChunk::StateTransitions {
-            timestamps_ns,
-            state_codes,
-        } = series.active_chunk()
-        {
-            let ts_slice = timestamps_ns.as_slice();
-            let code_slice = state_codes.as_slice();
-            let s = ts_slice.partition_point(|&t| t <= t_min);
-            let e = ts_slice.partition_point(|&t| t <= t_max);
-            for i in s..e {
-                transitions.push((ts_slice[i], code_slice[i]));
-            }
-        }
+        crate::storage::event_series::collect_event_transitions_in_window(
+            series.active_chunk(),
+            t_min,
+            t_max,
+            &mut transitions,
+        );
 
-        let mut ribbons = Vec::new();
-        let mut current_state = series.get_state_at(t_min);
-        let mut seg_start_x = 0.0_f32;
-
-        if current_state.is_none() {
-            if let Some(&(first_ts, first_code)) = transitions.first() {
-                seg_start_x = (((first_ts - t_min) as f64) / span).clamp(0.0, 1.0) as f32;
-                current_state = Some(first_code);
-            } else {
-                return Ok(ribbons);
-            }
-        }
-
-        for &(ts, code) in &transitions {
-            let x = (((ts - t_min) as f64) / span).clamp(0.0, 1.0) as f32;
-            if let Some(active_code) = current_state {
-                if code != active_code {
-                    if x > seg_start_x {
-                        ribbons.push(DdsfStateRibbon {
-                            x0_norm: seg_start_x,
-                            x1_norm: x,
-                            state_id: active_code,
-                            color_idx: self.color_index_for_state(active_code),
-                        });
-                    }
-                    seg_start_x = x;
-                    current_state = Some(code);
-                }
-            } else {
-                seg_start_x = x;
-                current_state = Some(code);
-            }
-        }
-
-        if let Some(active_code) = current_state {
-            if 1.0 > seg_start_x || ribbons.is_empty() {
-                ribbons.push(DdsfStateRibbon {
-                    x0_norm: seg_start_x,
-                    x1_norm: 1.0,
-                    state_id: active_code,
-                    color_idx: self.color_index_for_state(active_code),
-                });
-            }
-        }
-
-        Ok(ribbons)
+        Ok(crate::storage::event_series::build_state_ribbons_from_transitions(
+            series.get_state_at(t_min),
+            &transitions,
+            t_min,
+            t_max,
+            |code| self.color_index_for_state(code),
+        ))
     }
 
-    fn color_index_for_state(&self, state_code: i32) -> u32 {
+    pub(crate) fn color_index_for_state(&self, state_code: i32) -> u32 {
         if let ChannelKind::Event {
             schema: EventSchemaKind::StateMachine { labels },
         } = &self.descriptor.kind
@@ -716,9 +586,16 @@ impl ChannelEntry {
     }
 
     fn release_unpinned_chunks(&self) {
-        if let ChannelStore::Scalar(lock) = &self.store {
-            let mut series = lock.write();
-            while series.evict_oldest().is_some() {}
+        match &self.store {
+            ChannelStore::Scalar(lock) => {
+                let mut series = lock.write();
+                while series.evict_oldest().is_some() {}
+            }
+            ChannelStore::Event(lock) => {
+                let mut series = lock.write();
+                while series.evict_oldest().is_some() {}
+            }
+            ChannelStore::Frame { .. } => {}
         }
     }
 }
@@ -961,7 +838,7 @@ impl ChannelHub {
         Ok(count)
     }
 
-    /// Appends a batch of state transitions to channel `id`.
+    /// Appends a batch of state transitions to channel `id` and enforces global memory quota.
     pub fn append_state_events(
         &self,
         id: ChannelId,
@@ -971,7 +848,11 @@ impl ChannelHub {
         let entry = self
             .get(id)
             .ok_or_else(|| CoreError::ChannelNotFound(id.to_string()))?;
-        entry.append_state_events(ts_ns, states)
+        let count = entry.append_state_events(ts_ns, states)?;
+        if self.quota_mgr.is_over_quota() {
+            self.enforce_global_quota();
+        }
+        Ok(count)
     }
 
     /// High-throughput zero-lookup batch ingestion used by [`SourceSession`](crate::workspace::SourceSession) workers.
@@ -1038,7 +919,7 @@ impl ChannelHub {
         entries.into_iter().map(|(_, snap)| snap).collect()
     }
 
-    /// Evicts the globally oldest unpinned sealed chunks across all scalar channels
+    /// Evicts the globally oldest unpinned sealed chunks across all scalar and event channels
     /// whenever total allocated bytes exceed the quota ceiling.
     ///
     /// If all channels' oldest front chunks are currently pinned while newer unpinned chunks
@@ -1046,58 +927,26 @@ impl ChannelHub {
     /// in memory by its `PinnedGuard`) so newer unpinned chunks can continue evicting.
     pub fn enforce_global_quota(&self) {
         while self.quota_mgr.is_over_quota() {
-            let mut oldest_unpinned: Option<(TimestampNs, Arc<ChannelEntry>)> = None;
-            let mut oldest_pinned_rollover: Option<(TimestampNs, Arc<ChannelEntry>)> = None;
+            let mut oldest_candidate: Option<(TimestampNs, bool, Arc<ChannelEntry>)> = None;
 
             for item in self.channels.iter() {
                 let entry = item.value();
-                if let ChannelStore::Scalar(lock) = &entry.store {
-                    let series = lock.read();
-                    let sealed = series.sealed_chunks();
-                    if let Some(front) = sealed.front() {
-                        if let ChunkStorageRef::InMemory(arc_chunk) = &front.storage {
-                            let ts = front.t_start_ns;
-                            if Arc::strong_count(arc_chunk) == 1 {
-                                let is_older = match &oldest_unpinned {
-                                    None => true,
-                                    Some((best_ts, _)) => ts < *best_ts,
-                                };
-                                if is_older {
-                                    oldest_unpinned = Some((ts, Arc::clone(entry)));
-                                }
-                            } else if sealed.len() > 1
-                                && sealed.iter().any(|h| {
-                                    matches!(
-                                        &h.storage,
-                                        ChunkStorageRef::InMemory(a) if Arc::strong_count(a) == 1
-                                    )
-                                })
-                            {
-                                let is_older = match &oldest_pinned_rollover {
-                                    None => true,
-                                    Some((best_ts, _)) => ts < *best_ts,
-                                };
-                                if is_older {
-                                    oldest_pinned_rollover = Some((ts, Arc::clone(entry)));
-                                }
-                            }
-                        }
+                if let Some((oldest_unpinned_ts, front_unpinned)) =
+                    inspect_oldest_sealed(&entry.store)
+                {
+                    let is_older = match &oldest_candidate {
+                        None => true,
+                        Some((best_ts, _, _)) => oldest_unpinned_ts < *best_ts,
+                    };
+                    if is_older {
+                        oldest_candidate =
+                            Some((oldest_unpinned_ts, front_unpinned, Arc::clone(entry)));
                     }
                 }
             }
 
-            if let Some((_, target_entry)) = oldest_unpinned {
-                let evicted = target_entry
-                    .with_scalar_write(|s| s.evict_oldest_unpinned())
-                    .flatten();
-                if evicted.is_none() {
-                    break;
-                }
-            } else if let Some((_, rollover_entry)) = oldest_pinned_rollover {
-                let popped = rollover_entry
-                    .with_scalar_write(|s| s.evict_oldest())
-                    .flatten();
-                if popped.is_none() {
+            if let Some((_, front_unpinned, target_entry)) = oldest_candidate {
+                if evict_entry_sealed_front(&target_entry, front_unpinned).is_none() {
                     break;
                 }
             } else {
@@ -1107,27 +956,62 @@ impl ChannelHub {
     }
 }
 
-#[inline]
-fn ts_partition_point(
-    ts_col: &crate::types::TimestampColumn,
-    len: usize,
-    pred: impl Fn(TimestampNs) -> bool,
-) -> usize {
-    let mut left = 0usize;
-    let mut right = len;
-    while left < right {
-        let mid = left + (right - left) / 2;
-        if let Some(ts) = ts_col.get_ns(mid) {
-            if pred(ts) {
-                left = mid + 1;
-            } else {
-                right = mid;
-            }
-        } else {
-            right = mid;
-        }
+fn inspect_oldest_sealed(store: &ChannelStore) -> Option<(TimestampNs, bool)> {
+    #[inline]
+    fn is_unpinned(h: &crate::types::ChunkHandle) -> bool {
+        matches!(
+            &h.storage,
+            ChunkStorageRef::InMemory(arc_chunk) if Arc::strong_count(arc_chunk) == 1
+        )
     }
-    left
+
+    fn find_oldest_unpinned<'a>(
+        mut iter: impl Iterator<Item = &'a crate::types::ChunkHandle>,
+    ) -> Option<(TimestampNs, bool)> {
+        let first = iter.next()?;
+        if is_unpinned(first) {
+            return Some((first.t_start_ns, true));
+        }
+        iter.find(|h| is_unpinned(h))
+            .map(|h| (h.t_start_ns, false))
+    }
+
+    match store {
+        ChannelStore::Scalar(lock) => {
+            let series = lock.read();
+            find_oldest_unpinned(series.sealed_chunks().iter())
+        }
+        ChannelStore::Event(lock) => {
+            let series = lock.read();
+            find_oldest_unpinned(series.sealed_chunks().iter())
+        }
+        ChannelStore::Frame { .. } => None,
+    }
+}
+
+fn evict_entry_sealed_front(
+    entry: &ChannelEntry,
+    unpinned_only: bool,
+) -> Option<crate::types::ChunkHandle> {
+    match &entry.store {
+        ChannelStore::Scalar(lock) => {
+            let mut s = lock.write();
+            if unpinned_only {
+                s.evict_oldest_unpinned()
+            } else {
+                s.evict_oldest()
+            }
+        }
+        ChannelStore::Event(lock) => {
+            let mut s = lock.write();
+            if unpinned_only {
+                s.evict_oldest_unpinned()
+            } else {
+                s.evict_oldest()
+            }
+        }
+        ChannelStore::Frame { .. } => None,
+    }
 }
 
 fn validate_existing_entry(

@@ -2191,7 +2191,7 @@ fn pin_scope_range(
         let Some(entry) = hub.get(cid) else {
             continue;
         };
-        if !matches!(entry.store(), ChannelStore::Scalar(_)) {
+        if matches!(entry.store(), ChannelStore::Frame { .. }) {
             continue;
         }
         // Pin new range first while holding any prior partial guard so pin_count never
@@ -2533,7 +2533,10 @@ fn scan_event_trigger(
     };
     let events = events_lock.read();
     let total = events.total_samples();
-    let cur = scope.last_scan_abs_sample.unwrap_or(0);
+    let evicted = events.evicted_samples();
+    let cur = scope
+        .last_scan_abs_sample
+        .map_or(evicted, |prev| prev.max(evicted));
     if cur >= total {
         return false;
     }
@@ -2626,15 +2629,15 @@ fn extract_scope_viewport(
             }
             ScopeLaneKind::Digital => {
                 let mut res = if let Some(guard) = pinned_guard {
-                    guard.extract_digital_edges(t_min, t_max)
+                    guard.extract_digital_edges_viewport(t_min, t_max, w_px)
                 } else if let Some(ref e) = entry {
-                    e.extract_digital_edges(t_min, t_max)
+                    e.extract_digital_edges_viewport(t_min, t_max, w_px)
                 } else {
                     continue;
                 };
                 if pinned_guard.is_some() && res.as_ref().is_ok_and(|(_, edges)| edges.is_empty()) {
                     if let Some(ref e) = entry {
-                        if let Ok(live) = e.extract_digital_edges(t_min, t_max) {
+                        if let Ok(live) = e.extract_digital_edges_viewport(t_min, t_max, w_px) {
                             if !live.1.is_empty() {
                                 res = Ok(live);
                             }
@@ -2650,13 +2653,31 @@ fn extract_scope_viewport(
                 }
             }
             ScopeLaneKind::StateRibbon => {
-                if let Some(ref e) = entry {
-                    if let Ok(ribbons) = e.extract_state_ribbons(t_min, t_max) {
-                        tracks.push(TrackPayload::new_state_ribbons(
-                            binding.channel_id.0,
-                            ribbons,
-                        ));
+                let mut ribbons_opt = None;
+                if let Some(guard) = pinned_guard {
+                    let color_fn = |code: i32| {
+                        entry
+                            .as_ref()
+                            .map_or_else(|| code.max(0) as u32, |e| e.color_index_for_state(code))
+                    };
+                    if let Ok(r) = guard.extract_state_ribbons(t_min, t_max, color_fn) {
+                        if !r.is_empty() {
+                            ribbons_opt = Some(r);
+                        }
                     }
+                }
+                if ribbons_opt.is_none() {
+                    if let Some(ref e) = entry {
+                        if let Ok(r) = e.extract_state_ribbons(t_min, t_max) {
+                            ribbons_opt = Some(r);
+                        }
+                    }
+                }
+                if let Some(ribbons) = ribbons_opt {
+                    tracks.push(TrackPayload::new_state_ribbons(
+                        binding.channel_id.0,
+                        ribbons,
+                    ));
                 }
             }
         }
@@ -2745,12 +2766,17 @@ fn process_single_packet(
         }
     }
 
-    if ctx.telemetry.has_prev_raw_recv.load(Ordering::Acquire) {
+    let discontinuity = if pkt.stream_discontinuity {
+        true
+    } else if ctx.telemetry.has_prev_raw_recv.load(Ordering::Acquire) {
         let prev_raw = ctx.telemetry.prev_raw_recv_ns.load(Ordering::Relaxed);
-        if raw_recv_ns.saturating_add(1_000_000) < prev_raw {
-            ctx.codec.lock().reset_state();
-            ctx.clock.lock().reanchor_preserve_monotonic();
-        }
+        raw_recv_ns.saturating_add(1_000_000) < prev_raw
+    } else {
+        false
+    };
+    if discontinuity {
+        ctx.codec.lock().reset_state();
+        ctx.clock.lock().reanchor_preserve_monotonic();
     }
     ctx.telemetry
         .prev_raw_recv_ns

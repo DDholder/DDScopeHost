@@ -65,6 +65,18 @@ pub struct RawPacket {
     pub bytes: Bytes,
     pub host_recv_ns: TimestampNs,
     pub source_tag: Option<Arc<str>>,
+    /// Signals that this packet starts after a transport reconnect, seek, or stream reset,
+    /// instructing downstream protocol/clock workers to flush framing buffers and re-anchor.
+    pub stream_discontinuity: bool,
+}
+
+impl RawPacket {
+    /// Marks whether this packet immediately follows a transport reconnect or stream discontinuity.
+    #[inline]
+    pub fn with_discontinuity(mut self, discontinuity: bool) -> Self {
+        self.stream_discontinuity = discontinuity;
+        self
+    }
 }
 
 /// Priority lane for outbound frames submitted to a transport's TX queue.
@@ -185,6 +197,11 @@ pub type ShutdownReceiver = watch::Receiver<bool>;
 pub trait Transport: Send {
     /// Returns static capability flags for this transport instance.
     fn capabilities(&self) -> TransportCaps;
+
+    /// Returns live connection state for transports with internal supervision/reconnect loops.
+    fn live_state(&self) -> Option<TransportState> {
+        None
+    }
 
     /// Spawns the transport's async IO loop, forwarding RX packets to `rx_sink`
     /// and draining outbound frames from `tx_rx` until `shutdown_rx` signals `true`.

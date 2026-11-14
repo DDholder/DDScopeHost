@@ -167,11 +167,19 @@ export function ScopeViewportWidget({
     startCssX: number;
     startCssY: number;
     initialPanNs: number;
+    /** Analog channel whose vertical offset follows the drag (null = horizontal only). */
+    yChannelId: number | null;
+    initialYOffset: number;
+    /** Value units per CSS pixel for the dragged analog lane. */
+    yUnitsPerPx: number;
   }>({
     target: "none",
     startCssX: 0,
     startCssY: 0,
     initialPanNs: 0,
+    yChannelId: null,
+    initialYOffset: 0,
+    yUnitsPerPx: 0,
   });
 
   // Track render frame timing for FPS & 99% frame-time telemetry
@@ -516,12 +524,37 @@ export function ScopeViewportWidget({
 
     if (target === "none") return;
 
+    // Resolve which analog lane (if any) should follow vertical drags.
+    let yChannelId: number | null = null;
+    let initialYOffset = 0;
+    let yUnitsPerPx = 0;
+    if (target === "plot" || target === "yGutter") {
+      const lanes = layout.analogSubLanes;
+      const region = layout.analogRegion;
+      const inAnalogRegion = cssY >= region.y && cssY <= region.y + region.height;
+      if (lanes.length > 0 && (inAnalogRegion || target === "yGutter")) {
+        const isOverlay = lanes.every((l) => l.rect === region);
+        const lane = isOverlay
+          ? (lanes.find((l) => l.track.channelId === cfg.activeAnalogChannelId) ?? lanes[0])
+          : (lanes.find((l) => cssY >= l.rect.y && cssY <= l.rect.y + l.rect.height) ??
+            lanes.find((l) => l.track.channelId === cfg.activeAnalogChannelId) ??
+            lanes[0]);
+        yChannelId = lane.track.channelId;
+        initialYOffset = lane.track.yOffset;
+        // 8 vertical divisions span the lane height (see analogValueToY).
+        yUnitsPerPx = (8 * Math.max(1e-6, lane.track.yScale)) / Math.max(1, lane.rect.height);
+      }
+    }
+
     hudCanvas.setPointerCapture(ev.pointerId);
     dragStateRef.current = {
       target,
       startCssX: cssX,
       startCssY: cssY,
       initialPanNs: cfg.panOffsetNs,
+      yChannelId,
+      initialYOffset,
+      yUnitsPerPx,
     };
     dirtyRef.current = true;
   }, [onFocusScope]);
@@ -614,16 +647,41 @@ export function ScopeViewportWidget({
       return;
     }
 
+    if (dragging.target === "yGutter") {
+      if (dragging.yChannelId === null) return;
+      hudCanvas.style.cursor = "ns-resize";
+      const yChannelId = dragging.yChannelId;
+      const nextYOffset =
+        dragging.initialYOffset + (cssY - dragging.startCssY) * dragging.yUnitsPerPx;
+      callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => ({
+        ...prev,
+        tracks: prev.tracks.map((t) =>
+          t.channelId === yChannelId ? { ...t, yOffset: nextYOffset } : t,
+        ),
+      }));
+      return;
+    }
+
     if (dragging.target === "plot") {
       hudCanvas.style.cursor = "grabbing";
       const dxPx = cssX - dragging.startCssX;
+      const dyPx = cssY - dragging.startCssY;
       const dNs = -(dxPx / Math.max(1, layout.plotWidth)) * cfg.timeSpanNs;
       const nextPanNs = Math.round(dragging.initialPanNs + dNs);
+      const yChannelId = dragging.yChannelId;
+      // Dragging down moves the trace down => raise the vertical center value.
+      const nextYOffset = dragging.initialYOffset + dyPx * dragging.yUnitsPerPx;
       callbacksRef.current.onUpdateScope(cfg.scopeId, (prev) => ({
         ...prev,
         panOffsetNs: nextPanNs,
+        tracks:
+          yChannelId === null
+            ? prev.tracks
+            : prev.tracks.map((t) =>
+                t.channelId === yChannelId ? { ...t, yOffset: nextYOffset } : t,
+              ),
       }));
-      if (cfg.syncGroupId !== null) {
+      if (cfg.syncGroupId !== null && nextPanNs !== cfg.panOffsetNs) {
         callbacksRef.current.onSyncGroupBroadcast(cfg.syncGroupId, cfg.scopeId, {
           panOffsetNs: nextPanNs,
         });

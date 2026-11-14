@@ -177,3 +177,43 @@ fn cli_replay_verify_accepts_valid_ddraw_and_rejects_corrupted_crc() {
         "expected CRC32 failure message in stderr, got: {bad_stderr}"
     );
 }
+
+#[test]
+fn cli_soak_verifies_dod_and_writes_json_report() {
+    let report_file = TempCaptureFile::new("soak_report", "json");
+    let out = Command::new(cli_bin())
+        .args([
+            "soak",
+            "--sources",
+            "2",
+            "--rate",
+            "200000",
+            "--fps",
+            "60",
+            "--duration-secs",
+            "0.8",
+            "--quota-mib",
+            "16",
+            "--verify-dod",
+            "--json-out",
+            report_file.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "soak failed ({:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(stdout.contains("DDScopeHost M5 Soak Report (passed=true)"));
+    assert!(stdout.contains("dropped_packets=0, decode_errors=0"));
+    assert!(stdout.contains("latched=true, pinned=true"));
+    assert!(stdout.contains("rearmed_pinned_bytes=0"));
+
+    let json_text = std::fs::read_to_string(report_file.path()).expect("read soak JSON");
+    assert!(json_text.contains("\"passed\": true"));
+    assert!(json_text.contains("\"dropped_packets\": 0"));
+}

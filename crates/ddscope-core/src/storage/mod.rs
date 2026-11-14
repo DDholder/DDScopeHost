@@ -6,7 +6,7 @@ pub mod m4;
 pub mod quota;
 pub mod scalar_series;
 
-pub use event_series::EventSeries;
+pub use event_series::{extract_chunks_state_ribbons, EventSeries};
 pub use hub::{ChannelEntry, ChannelHub, ChannelStore};
 pub use m4::{
     aggregate_buckets_to_columns, compute_track_stats_from_columns, compute_track_stats_from_raw,
@@ -19,8 +19,9 @@ pub use quota::{
     PINNED_QUOTA_MAX_FRACTION, WARNING_THRESHOLD_FRACTION,
 };
 pub use scalar_series::{
-    extract_chunks_digital_edges, query_chunks_m4_viewport, query_chunks_m4_viewport_with_stats,
-    ActiveScalarChunk, NativeScalarSeries,
+    extract_chunks_digital_edges, extract_chunks_digital_edges_viewport,
+    query_chunks_m4_viewport, query_chunks_m4_viewport_with_stats, ActiveScalarChunk,
+    NativeScalarSeries,
 };
 
 pub use crate::types::{ChunkHandle, ChunkStorageRef, DataChunk, M4Bucket, MmapChunkLocator};

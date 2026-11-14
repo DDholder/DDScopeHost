@@ -31,6 +31,10 @@ function sourceStateKey(state: string): MessageKey {
   switch (state) {
     case "running":
       return "sidebar.state.running";
+    case "connecting":
+      return "sidebar.state.connecting";
+    case "reconnecting":
+      return "sidebar.state.reconnecting";
     case "completed":
       return "sidebar.state.completed";
     case "error":
@@ -205,7 +209,10 @@ export function ChannelTreeSidebar() {
         {filteredGroups.map((grp) => {
           const src = grp.source;
           const tel = telemetryBySource[src.source_id];
-          const isRunning = src.state === "running";
+          const isRunning =
+            src.state === "running" ||
+            src.state === "connecting" ||
+            src.state === "reconnecting";
           const isRecording = Boolean(src.raw_recording_path);
 
           return (

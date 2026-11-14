@@ -192,3 +192,101 @@ test("evaluateTrackValueAtNorm & time/frequency formatters", () => {
   assert.equal(formatTimePerDiv(20_000_000), "2.00 ms/div");
   assert.equal(formatFrequencyHz(20_000), "20.00 kHz");
 });
+
+test("emitDigitalEdges handles dense viewport-decimated bursts, isolated glitches, and terminal parity", () => {
+  const digitalOnly: ScopeTrackRenderConfig[] = [
+    {
+      channelId: 105,
+      label: "sim0/pwm_a",
+      unit: null,
+      lane: "digital",
+      visible: true,
+      yScale: 1,
+      yOffset: 0,
+      colorRgba: 0x22d3eeff,
+      stateLabels: [],
+    },
+  ];
+  const layout = computeMsoLayout(1280, 240, digitalOnly, "overlay");
+  const dRect = layout.digitalLanes[0].rect;
+  const dPad = Math.max(3, dRect.height * 0.18);
+  const yHigh = dRect.y + dPad;
+  const yLow = dRect.y + dRect.height - dPad;
+
+  // Case A: Dense 2560-edge PWM burst in [0.05..0.55] + 1-sample glitch at [0.80, 0.8001] -> even parity, ends LOW (0).
+  const evenEdges: number[] = [];
+  for (let i = 0; i < 2560; i += 1) {
+    evenEdges.push(0.05 + (i / 2560) * 0.5);
+  }
+  evenEdges.push(0.8, 0.8001);
+
+  const builder = new DdsfFrameBuilder();
+  const packAndBuild = (edges: number[]) => {
+    const frameBuf = builder.pack({
+      frameSeq: 2,
+      hostNowNs: 200_000_000,
+      scopes: [
+        {
+          scopeId: 1,
+          triggerState: TriggerRuntimeStateCode.Roll,
+          mode: 0,
+          winTStartNs: 0,
+          winTSpanNs: 20_000_000_000,
+          subpixelOffsetNs: 0,
+          tracks: [
+            {
+              channelId: 105,
+              blockKind: DdsfBlockKind.DigitalEdges,
+              digitalInitLevel: 0,
+              edges,
+            },
+          ],
+        },
+      ],
+      snapshots: [],
+    });
+    const frame = parseDdsfFrame(frameBuf);
+    const geomBuilder = new ScopeGeometryBuilder();
+    return geomBuilder.build(layout, 1, frame.scopes[0], digitalOnly);
+  };
+
+  const evenGeom = packAndBuild(evenEdges);
+  assert.equal(evenGeom.vertices.length, evenGeom.totalVertexCount * FLOATS_PER_VERTEX);
+
+  const tailMinX = layout.plotLeft + 0.82 * layout.plotWidth;
+  let evenHatch = 0;
+  let glitchStrokeNear08 = 0;
+  const tailYsEven: number[] = [];
+  for (let i = evenGeom.gridVertexCount; i < evenGeom.totalVertexCount; i += 1) {
+    const base = i * FLOATS_PER_VERTEX;
+    const vx = evenGeom.vertices[base];
+    const vy = evenGeom.vertices[base + 1];
+    const mode = evenGeom.vertices[base + 10];
+    if (mode === VERTEX_MODE_DENSE_HATCH) evenHatch += 1;
+    if (Math.abs(vx - (layout.plotLeft + 0.8 * layout.plotWidth)) <= 2.5) {
+      glitchStrokeNear08 += 1;
+    }
+    if (vx >= tailMinX) tailYsEven.push(vy);
+  }
+  assert.ok(evenHatch >= 6, `expected dense hatch band vertices, got ${evenHatch}`);
+  assert.ok(glitchStrokeNear08 >= 6, "expected visible vertical stroke at isolated 1-sample glitch");
+  assert.ok(tailYsEven.length > 0);
+  // Final segment is LOW (0), so all vertices in tail sit strictly near yLow (not yHigh fill/stroke).
+  for (const vy of tailYsEven) {
+    assert.ok(Math.abs(vy - yLow) <= 2.0, `expected even-parity tail near yLow=${yLow}, got ${vy}`);
+  }
+
+  // Case B: Odd number of dense edges (2559) -> terminal parity ends HIGH (1).
+  const oddGeom = packAndBuild(evenEdges.slice(0, 2559));
+  let hasHighTailFill = false;
+  for (let i = oddGeom.gridVertexCount; i < oddGeom.totalVertexCount; i += 1) {
+    const base = i * FLOATS_PER_VERTEX;
+    const vx = oddGeom.vertices[base];
+    const vy = oddGeom.vertices[base + 1];
+    if (vx >= tailMinX && Math.abs(vy - yHigh) <= 2.0) {
+      hasHighTailFill = true;
+      break;
+    }
+  }
+  assert.equal(hasHighTailFill, true, "expected odd-parity tail to hold HIGH level near yHigh");
+});

@@ -210,7 +210,19 @@ impl UdpSocketHandle for OsUdpSocketHandle {
         &'a self,
         buf: &'a mut [u8],
     ) -> Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>> {
-        Box::pin(self.socket.recv_from(buf))
+        Box::pin(async move {
+            loop {
+                match self.socket.recv_from(&mut *buf).await {
+                    // On Windows, unconnected OS UDP sockets report ICMP Port Unreachable
+                    // from prior `send_to` attempts as WSAECONNRESET (os error 10054).
+                    // Swallow this transient datagram error so RX keeps running cleanly.
+                    Err(err) if err.kind() == io::ErrorKind::ConnectionReset => {
+                        tokio::task::yield_now().await;
+                    }
+                    other => return other,
+                }
+            }
+        })
     }
 
     fn send_to<'a>(
@@ -604,6 +616,10 @@ impl Transport for UdpTransport {
             supports_raw_record: true,
             supports_auto_reconnect: false,
         }
+    }
+
+    fn live_state(&self) -> Option<TransportState> {
+        Some(self.state())
     }
 
     fn start(
@@ -1198,6 +1214,10 @@ impl Transport for TcpClientTransport {
         }
     }
 
+    fn live_state(&self) -> Option<TransportState> {
+        Some(self.state())
+    }
+
     fn start(
         &mut self,
         rx_sink: PacketSender,
@@ -1219,6 +1239,7 @@ impl Transport for TcpClientTransport {
             let mut tx_consumer = TxStreamConsumer::new(tx_rx);
             let mut rx_buf = vec![0u8; DEFAULT_TCP_READ_CHUNK_BYTES];
             let reconnect_delay = Duration::from_millis(config.reconnect_delay_ms.max(1));
+            let mut connected_sessions = 0u64;
 
             loop {
                 if *shutdown_rx.borrow() {
@@ -1240,6 +1261,10 @@ impl Transport for TcpClientTransport {
 
                 let mut stream = match connected {
                     Ok(s) => {
+                        if connected_sessions > 0 {
+                            emitter.mark_discontinuity();
+                        }
+                        connected_sessions += 1;
                         state.set(TransportState::Running);
                         s
                     }
@@ -1414,6 +1439,10 @@ impl Transport for TcpServerTransport {
             supports_raw_record: true,
             supports_auto_reconnect: false,
         }
+    }
+
+    fn live_state(&self) -> Option<TransportState> {
+        Some(self.state())
     }
 
     fn start(

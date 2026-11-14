@@ -629,16 +629,58 @@ impl ScopeController {
         self.current_window = Some(updated);
     }
 
+    /// Recomputes `current_window` after a zoom/pan change while keeping the *same acquisition
+    /// anchor* the previous window was built from.
+    ///
+    /// Triggered windows stay anchored on their trigger timestamp. Untriggered windows
+    /// (Auto free-run, paused Roll, ...) keep their previous right-edge anchor instead of
+    /// jumping to `latest_sample_time_ns`, so interactive panning/zooming translates the
+    /// displayed waveform coherently with the time axis.
+    fn refresh_window_preserving_anchor(&mut self, old_span_ns: u64, old_pan_ns: i64) {
+        let Some(prev) = self.current_window else {
+            return;
+        };
+        if prev.trigger_timestamp_ns.is_some() || prev.win_t_start_ns == 0 {
+            // Trigger-anchored windows (or windows whose start was clamped at 0 and therefore
+            // cannot reconstruct their anchor) use the regular recompute path.
+            self.refresh_window_for_view_change();
+            return;
+        }
+        let span = self.config.time_span_ns;
+        let anchor_end =
+            (prev.win_t_start_ns as i128) - (old_pan_ns as i128) + (old_span_ns as i128);
+        let win_start = (anchor_end - (span as i128) + (self.config.pan_offset_ns as i128))
+            .clamp(0, u64::MAX as i128) as u64;
+        self.current_window = Some(ScopeViewportWindow {
+            mode: self.config.sweep_mode,
+            win_t_start_ns: win_start,
+            win_t_span_ns: span,
+            ..prev
+        });
+    }
+
+    /// Returns the timestamp up to which samples must be acquired before a capture triggered at
+    /// `hit_ts` can complete, accounting for positive horizontal pan (post-trigger delay).
+    #[inline]
+    fn post_trigger_target_end(&self, hit_ts: TimestampNs) -> TimestampNs {
+        let pre_span = (self.pre_trigger_ratio() * self.config.time_span_ns as f64).round() as u64;
+        let post_span = self.config.time_span_ns.saturating_sub(pre_span);
+        let pan_delay = self.config.pan_offset_ns.max(0) as u64;
+        hit_ts.saturating_add(post_span).saturating_add(pan_delay)
+    }
+
     /// Updates the horizontal time span in nanoseconds.
     pub fn set_time_span_ns(&mut self, span_ns: u64) {
+        let (old_span, old_pan) = (self.config.time_span_ns, self.config.pan_offset_ns);
         self.config.time_span_ns = span_ns.max(1000);
-        self.refresh_window_for_view_change();
+        self.refresh_window_preserving_anchor(old_span, old_pan);
     }
 
     /// Updates the horizontal pan offset in nanoseconds.
     pub fn set_pan_offset_ns(&mut self, offset_ns: i64) {
+        let (old_span, old_pan) = (self.config.time_span_ns, self.config.pan_offset_ns);
         self.config.pan_offset_ns = offset_ns;
-        self.refresh_window_for_view_change();
+        self.refresh_window_preserving_anchor(old_span, old_pan);
     }
 
     /// Updates the full controller configuration, dynamically updating sweep modes and triggers.
@@ -652,6 +694,7 @@ impl ScopeController {
 
         let old_mode = self.config.sweep_mode;
         let old_trigger = self.config.trigger;
+        let (old_span, old_pan) = (self.config.time_span_ns, self.config.pan_offset_ns);
 
         self.config = config;
 
@@ -662,7 +705,7 @@ impl ScopeController {
         if self.config.sweep_mode != old_mode {
             self.set_sweep_mode(self.config.sweep_mode);
         } else {
-            self.refresh_window_for_view_change();
+            self.refresh_window_preserving_anchor(old_span, old_pan);
         }
     }
 
@@ -749,10 +792,7 @@ impl ScopeController {
             return ScopeStepOutcome::Rolling { window };
         }
 
-        let pre_ratio = self.pre_trigger_ratio();
-        let pre_span = (pre_ratio * self.config.time_span_ns as f64).round() as u64;
-        let post_span = self.config.time_span_ns.saturating_sub(pre_span);
-        let target_end = hit.timestamp_ns.saturating_add(post_span);
+        let target_end = self.post_trigger_target_end(hit.timestamp_ns);
 
         if self.latest_sample_time_ns >= target_end {
             let window = self.compute_triggered_window(&hit);
@@ -839,10 +879,7 @@ impl ScopeController {
         }
 
         if let Some(hit) = hit_opt {
-            let pre_ratio = self.pre_trigger_ratio();
-            let pre_span = (pre_ratio * self.config.time_span_ns as f64).round() as u64;
-            let post_span = self.config.time_span_ns.saturating_sub(pre_span);
-            let target_end = hit.timestamp_ns.saturating_add(post_span);
+            let target_end = self.post_trigger_target_end(hit.timestamp_ns);
 
             if self.latest_sample_time_ns >= target_end {
                 let window = self.compute_triggered_window(&hit);
@@ -941,10 +978,7 @@ impl ScopeController {
         }
 
         if let Some(hit) = hit_opt {
-            let pre_ratio = self.pre_trigger_ratio();
-            let pre_span = (pre_ratio * self.config.time_span_ns as f64).round() as u64;
-            let post_span = self.config.time_span_ns.saturating_sub(pre_span);
-            let target_end = hit.timestamp_ns.saturating_add(post_span);
+            let target_end = self.post_trigger_target_end(hit.timestamp_ns);
 
             if self.latest_sample_time_ns >= target_end {
                 let window = self.compute_triggered_window(&hit);
@@ -1677,6 +1711,44 @@ mod tests {
         }
         assert_eq!(ctrl.current_state(), TriggerRuntimeState::LatchedPinned);
         assert!(ctrl.is_pinned());
+    }
+
+    #[test]
+    fn test_untriggered_window_pan_preserves_anchor() {
+        let config = ScopeControllerConfig {
+            sweep_mode: TriggerSweepMode::Roll,
+            time_span_ns: 10_000,
+            ..Default::default()
+        };
+        let mut ctrl = ScopeController::new(config);
+        let _ = ctrl.process_scalar_sample(ChannelId(1), 50_000, 1.0);
+        assert_eq!(ctrl.current_window().unwrap().win_t_start_ns, 40_000);
+
+        // Pause, then newer samples must not re-anchor the window on pan.
+        ctrl.set_paused(true);
+        let _ = ctrl.process_scalar_sample(ChannelId(1), 90_000, 1.0);
+        ctrl.set_pan_offset_ns(-3_000);
+        assert_eq!(ctrl.current_window().unwrap().win_t_start_ns, 37_000);
+        ctrl.set_pan_offset_ns(2_000);
+        assert_eq!(ctrl.current_window().unwrap().win_t_start_ns, 42_000);
+
+        // Zoom keeps the right-edge anchor (50_000 + pan).
+        ctrl.set_time_span_ns(4_000);
+        assert_eq!(ctrl.current_window().unwrap().win_t_start_ns, 48_000);
+    }
+
+    #[test]
+    fn test_positive_pan_extends_post_trigger_wait() {
+        let config = ScopeControllerConfig {
+            sweep_mode: TriggerSweepMode::Normal,
+            time_span_ns: 10_000,
+            pre_trigger_ratio: 0.5,
+            pan_offset_ns: 3_000,
+            ..Default::default()
+        };
+        let ctrl = ScopeController::new(config);
+        // post span 5_000 + pan delay 3_000
+        assert_eq!(ctrl.post_trigger_target_end(100_000), 108_000);
     }
 
     #[test]

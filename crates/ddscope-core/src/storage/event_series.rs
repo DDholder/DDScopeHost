@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use crate::storage::{WatermarkEvent, WatermarkListener};
+use crate::scope::ddsf::DdsfStateRibbon;
+use crate::storage::{MemoryQuotaManager, PinnedGuard, WatermarkEvent, WatermarkListener};
 use crate::types::{
     ChannelId, ChunkHandle, ChunkStorageRef, CoreError, DataChunk, EventDataChunk, TimestampNs, CHUNK_LEN,
 };
@@ -15,8 +16,11 @@ pub struct EventSeries {
     active_chunk: EventDataChunk,
     sealed_chunks: Vec<ChunkHandle>,
     chunk_offsets: Vec<u64>,
+    next_chunk_seq: u64,
     total_sealed: u64,
+    evicted_samples: u64,
     total_samples: u64,
+    quota_manager: Option<Arc<MemoryQuotaManager>>,
     listeners: Vec<Arc<dyn WatermarkListener>>,
 }
 
@@ -28,10 +32,24 @@ impl EventSeries {
             active_chunk: EventDataChunk::new_state_transitions(CHUNK_LEN),
             sealed_chunks: Vec::new(),
             chunk_offsets: Vec::new(),
+            next_chunk_seq: 0,
             total_sealed: 0,
+            evicted_samples: 0,
             total_samples: 0,
+            quota_manager: None,
             listeners: Vec::new(),
         }
+    }
+
+    /// Attaches a shared [`MemoryQuotaManager`] to enforce bounded ring-buffer eviction and pinning.
+    pub fn set_quota_manager(&mut self, quota: Arc<MemoryQuotaManager>) {
+        self.quota_manager = Some(quota);
+    }
+
+    /// Returns the number of oldest samples permanently evicted from sealed history.
+    #[inline]
+    pub fn evicted_samples(&self) -> u64 {
+        self.evicted_samples
     }
 
     /// Returns the associated channel ID.
@@ -216,13 +234,22 @@ impl EventSeries {
         };
 
         let sample_count = self.active_chunk.len() as u32;
-        let sealed_payload = std::mem::replace(
-            &mut self.active_chunk,
-            EventDataChunk::new_state_transitions(CHUNK_LEN),
-        );
+        let sealed_payload = if self.active_chunk.len() >= CHUNK_LEN {
+            std::mem::replace(
+                &mut self.active_chunk,
+                EventDataChunk::new_state_transitions(CHUNK_LEN),
+            )
+        } else {
+            let shrunk = self.active_chunk.clone_shrunk();
+            self.active_chunk.clear();
+            shrunk
+        };
+
+        let chunk_seq = self.next_chunk_seq;
+        self.next_chunk_seq += 1;
 
         let handle = ChunkHandle {
-            chunk_seq: self.sealed_chunks.len() as u64,
+            chunk_seq,
             t_start_ns,
             t_end_ns,
             sample_count,
@@ -232,6 +259,16 @@ impl EventSeries {
         self.chunk_offsets.push(self.total_sealed);
         self.total_sealed += sample_count as u64;
         self.sealed_chunks.push(handle.clone());
+
+        if let Some(quota) = self.quota_manager.clone() {
+            quota.record_allocation(handle.storage.resident_bytes());
+            while quota.is_over_quota() && self.sealed_chunks.len() > 1 {
+                if self.evict_oldest_unpinned().is_none() {
+                    break;
+                }
+            }
+        }
+
         Ok(Some(handle))
     }
 
@@ -239,6 +276,179 @@ impl EventSeries {
     /// even if sample count is less than `CHUNK_LEN`.
     pub fn seal_active(&mut self) -> Result<Option<ChunkHandle>, CoreError> {
         self.seal_active_internal()
+    }
+
+    /// Evicts the oldest unpinned sealed chunk (`Arc::strong_count == 1`) if any exists.
+    pub fn evict_oldest_unpinned(&mut self) -> Option<ChunkHandle> {
+        self.evict_oldest_internal(true)
+    }
+
+    /// Unconditionally pops the oldest sealed chunk during continuous buffer rollover.
+    pub fn evict_oldest(&mut self) -> Option<ChunkHandle> {
+        self.evict_oldest_internal(false)
+    }
+
+    fn evict_oldest_internal(&mut self, only_if_unpinned: bool) -> Option<ChunkHandle> {
+        if self.sealed_chunks.is_empty() {
+            return None;
+        }
+        if only_if_unpinned {
+            let oldest = self.sealed_chunks.first()?;
+            if let ChunkStorageRef::InMemory(arc) = &oldest.storage {
+                if Arc::strong_count(arc) > 1 {
+                    return None;
+                }
+            }
+        }
+
+        let handle = self.sealed_chunks.remove(0);
+        self.evicted_samples += handle.sample_count as u64;
+        if !self.chunk_offsets.is_empty() {
+            self.chunk_offsets.remove(0);
+        }
+
+        if let ChunkStorageRef::InMemory(arc) = &handle.storage {
+            if Arc::strong_count(arc) == 1 {
+                if let Some(quota) = &self.quota_manager {
+                    quota.record_deallocation(handle.storage.resident_bytes());
+                }
+            }
+        }
+
+        Some(handle)
+    }
+
+    /// Pins sealed chunks covering `[t_start_ns, t_end_ns]` (plus the preceding ZOH chunk when needed
+    /// to resolve the initial state at `t_start_ns`).
+    pub fn pin_range(
+        &mut self,
+        t_start_ns: TimestampNs,
+        t_end_ns: TimestampNs,
+    ) -> Result<PinnedGuard, CoreError> {
+        if t_start_ns > t_end_ns {
+            return Err(CoreError::Storage(format!(
+                "invalid pin_range: t_start_ns ({t_start_ns}) > t_end_ns ({t_end_ns})"
+            )));
+        }
+
+        let quota = match &self.quota_manager {
+            Some(q) => Arc::clone(q),
+            None => {
+                return Err(CoreError::Storage(
+                    "cannot pin_range: no MemoryQuotaManager configured for event series".into(),
+                ));
+            }
+        };
+
+        let start_idx = self.sealed_chunks.partition_point(|c| c.t_end_ns < t_start_ns);
+        let end_idx = self.sealed_chunks.partition_point(|c| c.t_start_ns <= t_end_ns);
+        let include_zoh_pre = start_idx > 0
+            && (start_idx == end_idx
+                || self
+                    .sealed_chunks
+                    .get(start_idx)
+                    .is_some_and(|c| c.t_start_ns > t_start_ns));
+        let eff_start = if include_zoh_pre {
+            start_idx - 1
+        } else {
+            start_idx
+        };
+
+        let mut estimated_bytes = 0usize;
+        for idx in eff_start..end_idx {
+            estimated_bytes += self.sealed_chunks[idx].storage.resident_bytes();
+        }
+
+        let mut seal_active_for_pin = false;
+        if !self.active_chunk.is_empty() {
+            let (act_start, act_end) = match &self.active_chunk {
+                EventDataChunk::StateTransitions { timestamps_ns, .. } => (
+                    *timestamps_ns.first().unwrap(),
+                    *timestamps_ns.last().unwrap(),
+                ),
+                EventDataChunk::TextRecords { timestamps_ns, .. } => (
+                    *timestamps_ns.first().unwrap(),
+                    *timestamps_ns.last().unwrap(),
+                ),
+            };
+            if t_end_ns >= act_start && (t_start_ns <= act_end || end_idx == self.sealed_chunks.len()) {
+                seal_active_for_pin = true;
+                estimated_bytes += self.active_chunk.estimated_sealed_byte_footprint();
+            }
+        }
+
+        if eff_start >= end_idx && !seal_active_for_pin {
+            return Err(CoreError::Storage(format!(
+                "no sealed chunks found overlapping [{t_start_ns}, {t_end_ns}]"
+            )));
+        }
+
+        quota.try_pin(estimated_bytes).map_err(CoreError::from)?;
+
+        if seal_active_for_pin {
+            if let Err(err) = self.seal_active_internal() {
+                quota.release_pin(estimated_bytes);
+                return Err(err);
+            }
+        }
+
+        let raw_final_start = self.sealed_chunks.partition_point(|c| c.t_end_ns < t_start_ns);
+        let final_end = self.sealed_chunks.partition_point(|c| c.t_start_ns <= t_end_ns);
+        let include_final_zoh = raw_final_start > 0
+            && (raw_final_start == final_end
+                || self
+                    .sealed_chunks
+                    .get(raw_final_start)
+                    .is_some_and(|c| c.t_start_ns > t_start_ns));
+        let final_start = if include_final_zoh {
+            raw_final_start - 1
+        } else {
+            raw_final_start
+        };
+
+        if final_start >= final_end {
+            quota.release_pin(estimated_bytes);
+            return Err(CoreError::Storage(format!(
+                "no sealed chunks found overlapping [{t_start_ns}, {t_end_ns}]"
+            )));
+        }
+
+        let mut chunks = Vec::with_capacity(final_end - final_start);
+        let mut actual_bytes = 0usize;
+
+        for idx in final_start..final_end {
+            let handle = &self.sealed_chunks[idx];
+            match &handle.storage {
+                ChunkStorageRef::InMemory(arc_chunk) => {
+                    chunks.push(Arc::clone(arc_chunk));
+                    actual_bytes += arc_chunk.byte_footprint();
+                }
+                ChunkStorageRef::MmapSlice(_) => {
+                    quota.release_pin(estimated_bytes);
+                    return Err(CoreError::Storage(
+                        "cannot pin event chunk backed by mmap slice".into(),
+                    ));
+                }
+            }
+        }
+
+        if actual_bytes > estimated_bytes {
+            let diff = actual_bytes - estimated_bytes;
+            if let Err(err) = quota.try_pin(diff) {
+                quota.release_pin(estimated_bytes);
+                return Err(CoreError::from(err));
+            }
+        } else if actual_bytes < estimated_bytes {
+            let diff = estimated_bytes - actual_bytes;
+            quota.release_pin(diff);
+        }
+
+        Ok(PinnedGuard::new(
+            self.channel_id,
+            chunks,
+            actual_bytes,
+            quota,
+        ))
     }
 
     /// Retrieves the active state code at timestamp `ts_ns` under zero-order hold.
@@ -269,7 +479,7 @@ impl EventSeries {
 
     /// Retrieves the transition timestamp and state code at global sample `index`.
     pub fn get_transition_by_index(&self, index: u64) -> Option<(TimestampNs, i32)> {
-        if index >= self.total_samples {
+        if index >= self.total_samples || index < self.evicted_samples {
             return None;
         }
 
@@ -292,6 +502,131 @@ impl EventSeries {
 
         None
     }
+}
+
+/// Extracts normalized [`DdsfStateRibbon`] segments across `[t_min, t_max]` directly from a
+/// chronological slice of sealed event `DataChunk`s (e.g., held by a `PinnedGuard`).
+pub fn extract_chunks_state_ribbons<F>(
+    chunks: &[Arc<DataChunk>],
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    color_for_state: F,
+) -> Result<Vec<DdsfStateRibbon>, CoreError>
+where
+    F: FnMut(i32) -> u32,
+{
+    if t_max <= t_min {
+        return Err(CoreError::Storage(
+            "t_max must be greater than t_min".into(),
+        ));
+    }
+    if chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut current_state: Option<i32> = None;
+    let mut transitions: Vec<(TimestampNs, i32)> = Vec::new();
+    for chunk in chunks {
+        let DataChunk::Event(ev) = chunk.as_ref() else {
+            return Err(CoreError::Storage(
+                "pinned chunk is not an Event chunk".into(),
+            ));
+        };
+        if let Some(st) = ev.get_state_at(t_min) {
+            current_state = Some(st);
+        }
+        collect_event_transitions_in_window(ev, t_min, t_max, &mut transitions);
+    }
+
+    Ok(build_state_ribbons_from_transitions(
+        current_state,
+        &transitions,
+        t_min,
+        t_max,
+        color_for_state,
+    ))
+}
+
+/// Appends state transitions strictly inside `(t_min, t_max]` from one event chunk.
+pub(crate) fn collect_event_transitions_in_window(
+    ev: &EventDataChunk,
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    out: &mut Vec<(TimestampNs, i32)>,
+) {
+    if let EventDataChunk::StateTransitions {
+        timestamps_ns,
+        state_codes,
+    } = ev
+    {
+        let ts_slice = timestamps_ns.as_slice();
+        let code_slice = state_codes.as_slice();
+        let s = ts_slice.partition_point(|&t| t <= t_min);
+        let e = ts_slice.partition_point(|&t| t <= t_max);
+        for i in s..e {
+            out.push((ts_slice[i], code_slice[i]));
+        }
+    }
+}
+
+/// Shared state-ribbon builder converting `(initial_state, in_window_transitions)` into normalized ribbons.
+pub(crate) fn build_state_ribbons_from_transitions<F>(
+    initial_state: Option<i32>,
+    transitions: &[(TimestampNs, i32)],
+    t_min: TimestampNs,
+    t_max: TimestampNs,
+    mut color_for_state: F,
+) -> Vec<DdsfStateRibbon>
+where
+    F: FnMut(i32) -> u32,
+{
+    let span = (t_max - t_min) as f64;
+    let mut ribbons = Vec::new();
+    let mut current_state = initial_state;
+    let mut seg_start_x = 0.0_f32;
+
+    if current_state.is_none() {
+        if let Some(&(first_ts, first_code)) = transitions.first() {
+            seg_start_x = (((first_ts - t_min) as f64) / span).clamp(0.0, 1.0) as f32;
+            current_state = Some(first_code);
+        } else {
+            return ribbons;
+        }
+    }
+
+    for &(ts, code) in transitions {
+        let x = (((ts - t_min) as f64) / span).clamp(0.0, 1.0) as f32;
+        if let Some(active_code) = current_state {
+            if code != active_code {
+                if x > seg_start_x {
+                    ribbons.push(DdsfStateRibbon {
+                        x0_norm: seg_start_x,
+                        x1_norm: x,
+                        state_id: active_code,
+                        color_idx: color_for_state(active_code),
+                    });
+                }
+                seg_start_x = x;
+                current_state = Some(code);
+            }
+        } else {
+            seg_start_x = x;
+            current_state = Some(code);
+        }
+    }
+
+    if let Some(active_code) = current_state {
+        if 1.0 > seg_start_x || ribbons.is_empty() {
+            ribbons.push(DdsfStateRibbon {
+                x0_norm: seg_start_x,
+                x1_norm: 1.0,
+                state_id: active_code,
+                color_idx: color_for_state(active_code),
+            });
+        }
+    }
+
+    ribbons
 }
 
 #[cfg(test)]
