@@ -591,8 +591,18 @@ impl SampleSynthesizer {
             .unwrap_or(SimWaveformKind::Motor3PhasePreset)
     }
 
+    #[cfg(test)]
     #[inline(always)]
     fn synthesize_sample(&mut self, sample_rate_hz: f64) -> (u32, u8, u8) {
+        self.synthesize_sample_with_manual(sample_rate_hz, true)
+    }
+
+    #[inline(always)]
+    fn synthesize_sample_with_manual(
+        &mut self,
+        sample_rate_hz: f64,
+        allow_manual_glitch: bool,
+    ) -> (u32, u8, u8) {
         let idx = self.sample_idx;
         self.sample_idx = idx.wrapping_add(1);
 
@@ -614,7 +624,8 @@ impl SampleSynthesizer {
             && self.config.glitch_period_samples > 0
             && (idx + 1) % (self.config.glitch_period_samples as u64) == 0;
 
-        let manual_glitch = !periodic_glitch
+        let manual_glitch = allow_manual_glitch
+            && !periodic_glitch
             && !self.prev_sample_was_glitch
             && self.control.try_consume_manual_glitch();
 
@@ -761,9 +772,11 @@ impl SampleSynthesizer {
                 let frame_len = self.config.frame_byte_len();
                 let max_fit = (slab_bytes / frame_len).max(1);
                 let count = batch_samples.min(max_fit);
+                let glitch_min_idx = if count >= 4 { 2 } else { 0 };
                 let buf = emitter.pool_mut().acquire_buf(count * frame_len);
-                for _ in 0..count {
-                    let (hw_tick, flags_bits, ctrl_state) = self.synthesize_sample(sample_rate_hz);
+                for batch_idx in 0..count {
+                    let (hw_tick, flags_bits, ctrl_state) =
+                        self.synthesize_sample_with_manual(sample_rate_hz, batch_idx >= glitch_min_idx);
                     self.encode_sim_preset_into(buf, hw_tick, flags_bits, ctrl_state);
                 }
                 actual_samples = count;
@@ -772,21 +785,30 @@ impl SampleSynthesizer {
                 let frame_len = self.config.frame_byte_len();
                 let max_fit = (slab_bytes / frame_len).max(1);
                 let count = batch_samples.min(max_fit);
+                let glitch_min_idx = if count >= 4 { 2 } else { 0 };
                 let buf = emitter.pool_mut().acquire_buf(count * frame_len);
-                for _ in 0..count {
-                    let _ = self.synthesize_sample(sample_rate_hz);
+                for batch_idx in 0..count {
+                    let _ = self
+                        .synthesize_sample_with_manual(sample_rate_hz, batch_idx >= glitch_min_idx);
                     self.encode_just_float_into(buf);
                 }
                 actual_samples = count;
             }
             SimWireFormat::FireWaterCsv => {
                 let max_line_bytes = self.config.frame_byte_len();
+                let max_fit_lines = (slab_bytes / max_line_bytes).max(1);
+                let glitch_min_idx = if batch_samples.min(max_fit_lines) >= 4 {
+                    2
+                } else {
+                    0
+                };
                 let buf = emitter.pool_mut().acquire_buf(slab_bytes);
-                for _ in 0..batch_samples {
+                for batch_idx in 0..batch_samples {
                     if slab_bytes.saturating_sub(buf.len()) < max_line_bytes {
                         break;
                     }
-                    let _ = self.synthesize_sample(sample_rate_hz);
+                    let _ = self
+                        .synthesize_sample_with_manual(sample_rate_hz, batch_idx >= glitch_min_idx);
                     self.encode_firewater_line_into(buf);
                     actual_samples += 1;
                 }

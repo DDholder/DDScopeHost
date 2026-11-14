@@ -13,6 +13,12 @@ pub mod types;
 pub mod workspace;
 
 pub use scope::ddsf;
+pub use workspace::{
+    ChannelTreeSnapshot, CoreWorkspace, RegisteredChannelInfo, ScopeConfig, ScopeLaneKind,
+    ScopeSummary, ScopeTrackBinding, SourceChannelGroup, SourceConfig, SourceProtocolConfig,
+    SourceRuntimeState, SourceSession, SourceSummary, SourceTelemetrySnapshot,
+    SourceTransportConfig, SyncGroupUpdate, WorkspaceTelemetrySnapshot,
+};
 
 use serde::{Deserialize, Serialize};
 

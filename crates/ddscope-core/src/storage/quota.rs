@@ -455,6 +455,38 @@ impl PinnedGuard {
         let last = self.chunks.last()?.time_range_ns()?.1;
         Some((first, last))
     }
+
+    /// Queries pixel-aligned M4 or raw viewport data directly from these pinned chunks,
+    /// remaining valid even after the underlying series rolls past them.
+    pub fn query_m4_viewport(
+        &self,
+        t_min: TimestampNs,
+        t_max: TimestampNs,
+        w_px: usize,
+    ) -> Result<crate::storage::M4QueryResult, CoreError> {
+        crate::storage::query_chunks_m4_viewport(&self.chunks, t_min, t_max, w_px)
+    }
+
+    /// Queries viewport data and computed statistics directly from these pinned chunks,
+    /// remaining valid even after the underlying series rolls past them.
+    pub fn query_m4_viewport_with_stats(
+        &self,
+        t_min: TimestampNs,
+        t_max: TimestampNs,
+        w_px: usize,
+    ) -> Result<crate::storage::ViewportExtract, CoreError> {
+        crate::storage::query_chunks_m4_viewport_with_stats(&self.chunks, t_min, t_max, w_px)
+    }
+
+    /// Extracts normalized digital transition edges directly from these pinned boolean chunks,
+    /// remaining valid even after the underlying series rolls past them.
+    pub fn extract_digital_edges(
+        &self,
+        t_min: TimestampNs,
+        t_max: TimestampNs,
+    ) -> Result<(u8, Vec<f32>), CoreError> {
+        crate::storage::extract_chunks_digital_edges(&self.chunks, t_min, t_max)
+    }
 }
 
 impl Drop for PinnedGuard {

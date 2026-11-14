@@ -312,12 +312,26 @@ pub struct TrackPayload {
 impl TrackPayload {
     /// Creates an `AnalogRawXY` track payload from a point vector.
     pub fn new_raw_xy(channel_id: u32, points: Vec<DdsfAnalogPoint>) -> Self {
+        Self::new_raw_xy_with_stats(channel_id, points, None)
+    }
+
+    /// Creates an `AnalogRawXY` track payload with optional window statistics.
+    pub fn new_raw_xy_with_stats(
+        channel_id: u32,
+        points: Vec<DdsfAnalogPoint>,
+        stats: Option<DdsfTrackStats>,
+    ) -> Self {
+        let flags = if stats.is_some() {
+            DDSF_TRACK_FLAG_HAS_STATS
+        } else {
+            0
+        };
         Self {
             channel_id,
             block_kind: DdsfBlockKind::AnalogRawXY,
             digital_init_level: 0,
-            flags: 0,
-            stats: None,
+            flags,
+            stats,
             raw_points: points,
             m4_columns: Vec::new(),
             digital_edges: Vec::new(),

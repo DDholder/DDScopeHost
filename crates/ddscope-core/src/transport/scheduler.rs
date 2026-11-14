@@ -429,6 +429,40 @@ struct ActiveTransportRun {
     finished_flag: Arc<AtomicBool>,
 }
 
+/// Detached shutdown state returned by [`TransportScheduler::begin_stop`], allowing callers
+/// (such as [`CoreWorkspace`](crate::CoreWorkspace)) to drop scheduler locks before `.await`.
+#[derive(Debug)]
+pub struct PendingSchedulerStop {
+    active_run: Option<ActiveTransportRun>,
+    tx_queue: SharedTxQueue,
+    metrics: Arc<TransportMetrics>,
+}
+
+impl PendingSchedulerStop {
+    /// Awaits TX pump and transport IO task completion without holding any scheduler mutex/rwlock.
+    pub async fn wait(self) -> CoreResult<()> {
+        if let Some(run) = self.active_run {
+            let _ = run.tx_pump_handle.await;
+            let io_result = match run.io_handle.await {
+                Ok(res) => res,
+                Err(join_err) => Err(CoreError::Transport(format!(
+                    "transport supervisor task failed: {join_err}"
+                ))),
+            };
+            self.tx_queue.clear();
+            if io_result.is_ok() {
+                self.metrics.set_state(TransportState::Stopped);
+            } else {
+                self.metrics.set_state(TransportState::Error);
+            }
+            io_result
+        } else {
+            self.tx_queue.clear();
+            Ok(())
+        }
+    }
+}
+
 /// Async lifecycle orchestrator wrapping a [`Transport`] with a [`SharedTxQueue`] pump,
 /// bounded RX packet ring, atomic metrics, and runtime-swappable bypass raw tap.
 pub struct TransportScheduler {
@@ -656,29 +690,26 @@ impl TransportScheduler {
         }
     }
 
-    /// Gracefully signals shutdown, drains the TX pump and IO tasks, and returns the task result.
-    pub async fn stop(&mut self) -> CoreResult<()> {
-        if let Some(run) = self.active_run.take() {
+    /// Signals transport shutdown and returns a [`PendingSchedulerStop`] handle so callers
+    /// can release locks before awaiting task shutdown.
+    pub fn begin_stop(&mut self) -> PendingSchedulerStop {
+        let active_run = self.active_run.take();
+        if let Some(ref run) = active_run {
             let _ = run.shutdown_tx.send(true);
             self.tx_queue.close();
-            let _ = run.tx_pump_handle.await;
-            let io_result = match run.io_handle.await {
-                Ok(res) => res,
-                Err(join_err) => Err(CoreError::Transport(format!(
-                    "transport supervisor task failed: {join_err}"
-                ))),
-            };
-            self.tx_queue.clear();
-            if io_result.is_ok() {
-                self.metrics.set_state(TransportState::Stopped);
-            } else {
-                self.metrics.set_state(TransportState::Error);
-            }
-            io_result
         } else {
             self.tx_queue.clear();
-            Ok(())
         }
+        PendingSchedulerStop {
+            active_run,
+            tx_queue: self.tx_queue.clone(),
+            metrics: Arc::clone(&self.metrics),
+        }
+    }
+
+    /// Gracefully signals shutdown, drains the TX pump and IO tasks, and returns the task result.
+    pub async fn stop(&mut self) -> CoreResult<()> {
+        self.begin_stop().wait().await
     }
 
     /// Attaches or detaches a bypass [`RawByteTap`] observer at runtime.

@@ -33,8 +33,8 @@ pub use replay::{
     MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED,
 };
 pub use scheduler::{
-    host_monotonic_ns, new_shared_raw_tap, MonotonicClock, RawByteTap, RawTapDirection,
-    RxBackpressurePolicy, RxPacketEmitter, SharedRawTap, TransportMetrics,
+    host_monotonic_ns, new_shared_raw_tap, MonotonicClock, PendingSchedulerStop, RawByteTap,
+    RawTapDirection, RxBackpressurePolicy, RxPacketEmitter, SharedRawTap, TransportMetrics,
     TransportMetricsSnapshot, TransportRegistry, TransportRuntimeConfig, TransportScheduler,
     DEFAULT_RX_RING_CAPACITY, DEFAULT_TX_HANDOFF_CAPACITY,
 };

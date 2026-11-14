@@ -153,6 +153,18 @@ impl TriggerEngine {
         self.state()
     }
 
+    /// Returns `true` once at least one scalar sample has been observed since creation/reset.
+    #[inline]
+    pub fn has_last_scalar_sample(&self) -> bool {
+        self.last_scalar_sample.is_some()
+    }
+
+    /// Returns the most recently evaluated scalar sample `(timestamp_ns, value)`, if any.
+    #[inline]
+    pub fn last_scalar_sample(&self) -> Option<(TimestampNs, f64)> {
+        self.last_scalar_sample
+    }
+
     /// Resets all internal sample tracking and debouncing states to unprimed.
     pub fn reset(&mut self) {
         self.state = HysteresisBandState::Unprimed;
@@ -546,6 +558,24 @@ impl ScopeController {
         self.trigger_engine.as_mut()
     }
 
+    /// Returns the timestamp when the controller last armed.
+    #[inline]
+    pub fn armed_time_ns(&self) -> u64 {
+        self.armed_time_ns
+    }
+
+    /// Returns the post-trigger target window end timestamp while in `Triggered` state.
+    #[inline]
+    pub fn target_win_end_ns(&self) -> u64 {
+        self.target_win_end_ns
+    }
+
+    /// Returns the latest sample timestamp observed by this controller.
+    #[inline]
+    pub fn latest_sample_time_ns(&self) -> u64 {
+        self.latest_sample_time_ns
+    }
+
     /// Sets or clears the acquisition paused flag.
     pub fn set_paused(&mut self, paused: bool) {
         self.config.paused = paused;
@@ -557,14 +587,58 @@ impl ScopeController {
         self.config.paused
     }
 
+    /// Recomputes `current_window` (if present) after a zoom (`time_span_ns`),
+    /// pan (`pan_offset_ns`), or `pre_trigger_ratio` update.
+    ///
+    /// Essential for inspecting/zooming into `LatchedPinned` (`Single`) or paused captures.
+    pub fn refresh_window_for_view_change(&mut self) {
+        let Some(prev) = self.current_window else {
+            return;
+        };
+        let span = self.config.time_span_ns;
+        let updated = if let Some(trig_ts) = prev.trigger_timestamp_ns {
+            let pre_span = (self.pre_trigger_ratio() * span as f64).round() as u64;
+            let base = trig_ts.saturating_sub(pre_span);
+            let win_start =
+                ((base as i128) + (self.config.pan_offset_ns as i128)).clamp(0, u64::MAX as i128)
+                    as u64;
+            ScopeViewportWindow {
+                mode: self.config.sweep_mode,
+                win_t_start_ns: win_start,
+                win_t_span_ns: span,
+                ..prev
+            }
+        } else if self.latest_sample_time_ns > 0 {
+            let base = self.latest_sample_time_ns.saturating_sub(span);
+            let win_start =
+                ((base as i128) + (self.config.pan_offset_ns as i128)).clamp(0, u64::MAX as i128)
+                    as u64;
+            ScopeViewportWindow {
+                mode: self.config.sweep_mode,
+                win_t_start_ns: win_start,
+                win_t_span_ns: span,
+                ..prev
+            }
+        } else {
+            ScopeViewportWindow {
+                mode: self.config.sweep_mode,
+                win_t_span_ns: span,
+                ..prev
+            }
+        };
+        self.current_window = Some(updated);
+    }
+
     /// Updates the horizontal time span in nanoseconds.
     pub fn set_time_span_ns(&mut self, span_ns: u64) {
         self.config.time_span_ns = span_ns.max(1000);
+        self.refresh_window_for_view_change();
     }
 
     /// Updates the horizontal pan offset in nanoseconds.
     pub fn set_pan_offset_ns(&mut self, offset_ns: i64) {
         self.config.pan_offset_ns = offset_ns;
+        self.refresh_window_for_view_change();
     }
 
     /// Updates the full controller configuration, dynamically updating sweep modes and triggers.
@@ -587,6 +661,8 @@ impl ScopeController {
 
         if self.config.sweep_mode != old_mode {
             self.set_sweep_mode(self.config.sweep_mode);
+        } else {
+            self.refresh_window_for_view_change();
         }
     }
 
@@ -648,6 +724,14 @@ impl ScopeController {
                 self.state = TriggerRuntimeState::Armed;
             }
         }
+    }
+
+    /// Rearms acquisition anchored explicitly at `armed_at_ns`, preventing stale ring-buffer
+    /// samples older than `armed_at_ns` from re-triggering or prematurely firing auto-timeout.
+    pub fn rearm_at(&mut self, armed_at_ns: TimestampNs) {
+        self.latest_sample_time_ns = self.latest_sample_time_ns.max(armed_at_ns);
+        self.rearm();
+        self.armed_time_ns = armed_at_ns;
     }
 
     /// Manually forces an immediate trigger event at `now_ns`.
@@ -971,9 +1055,10 @@ impl ScopeController {
         let span = self.config.time_span_ns;
         let pre_ratio = self.pre_trigger_ratio();
         let pre_span = (pre_ratio * span as f64).round() as u64;
-        let win_start = (hit.timestamp_ns.saturating_sub(pre_span) as i64
-            + self.config.pan_offset_ns)
-            .max(0) as u64;
+        let base = hit.timestamp_ns.saturating_sub(pre_span);
+        let win_start =
+            ((base as i128) + (self.config.pan_offset_ns as i128)).clamp(0, u64::MAX as i128)
+                as u64;
 
         ScopeViewportWindow {
             scope_id: self.config.scope_id,
@@ -992,7 +1077,10 @@ impl ScopeController {
 
     fn compute_rolling_window(&self, latest_ns: u64) -> ScopeViewportWindow {
         let span = self.config.time_span_ns;
-        let win_start = (latest_ns.saturating_sub(span) as i64 + self.config.pan_offset_ns).max(0) as u64;
+        let base = latest_ns.saturating_sub(span);
+        let win_start =
+            ((base as i128) + (self.config.pan_offset_ns as i128)).clamp(0, u64::MAX as i128)
+                as u64;
 
         ScopeViewportWindow {
             scope_id: self.config.scope_id,
@@ -1007,7 +1095,10 @@ impl ScopeController {
 
     fn compute_freerun_window(&self, latest_ns: u64) -> ScopeViewportWindow {
         let span = self.config.time_span_ns;
-        let win_start = (latest_ns.saturating_sub(span) as i64 + self.config.pan_offset_ns).max(0) as u64;
+        let base = latest_ns.saturating_sub(span);
+        let win_start =
+            ((base as i128) + (self.config.pan_offset_ns as i128)).clamp(0, u64::MAX as i128)
+                as u64;
 
         ScopeViewportWindow {
             scope_id: self.config.scope_id,

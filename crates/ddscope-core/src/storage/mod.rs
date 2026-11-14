@@ -18,7 +18,10 @@ pub use quota::{
     DEFAULT_WARNING_PERCENT, MemoryQuotaManager, MemoryQuotaStats, PinnedGuard, QuotaError,
     PINNED_QUOTA_MAX_FRACTION, WARNING_THRESHOLD_FRACTION,
 };
-pub use scalar_series::{ActiveScalarChunk, NativeScalarSeries};
+pub use scalar_series::{
+    extract_chunks_digital_edges, query_chunks_m4_viewport, query_chunks_m4_viewport_with_stats,
+    ActiveScalarChunk, NativeScalarSeries,
+};
 
 pub use crate::types::{ChunkHandle, ChunkStorageRef, DataChunk, M4Bucket, MmapChunkLocator};
 
