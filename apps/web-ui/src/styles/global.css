@@ -359,7 +359,7 @@ select {
 }
 
 .ddscope-sidebar {
-  width: 288px;
+  width: 304px;
   height: 100%;
   max-height: 100%;
   flex-shrink: 0;
@@ -395,7 +395,7 @@ select {
 
 .sidebar-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   border-bottom: 1px solid var(--border-subtle);
   background: rgba(15, 23, 42, 0.72);
   flex-shrink: 0;
@@ -405,14 +405,15 @@ select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 7px 8px;
+  gap: 4px;
+  padding: 7px 4px;
   border: none;
   border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
   transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
 }
@@ -1318,6 +1319,7 @@ select {
 /* Visible high-contrast dark scrollbars across WebView2 / Chromium / Firefox */
 .sidebar-tree-scroll,
 .widget-toolbox-scroll,
+.command-list-scroll,
 .dashboard-grid,
 .widget-card-content,
 .widget-watch-wrap,
@@ -1328,6 +1330,7 @@ select {
 
 .sidebar-tree-scroll::-webkit-scrollbar,
 .widget-toolbox-scroll::-webkit-scrollbar,
+.command-list-scroll::-webkit-scrollbar,
 .dashboard-grid::-webkit-scrollbar,
 .widget-card-content::-webkit-scrollbar,
 .widget-watch-wrap::-webkit-scrollbar,
@@ -1338,6 +1341,7 @@ select {
 
 .sidebar-tree-scroll::-webkit-scrollbar-track,
 .widget-toolbox-scroll::-webkit-scrollbar-track,
+.command-list-scroll::-webkit-scrollbar-track,
 .dashboard-grid::-webkit-scrollbar-track,
 .widget-card-content::-webkit-scrollbar-track,
 .widget-watch-wrap::-webkit-scrollbar-track,
@@ -1348,6 +1352,7 @@ select {
 
 .sidebar-tree-scroll::-webkit-scrollbar-thumb,
 .widget-toolbox-scroll::-webkit-scrollbar-thumb,
+.command-list-scroll::-webkit-scrollbar-thumb,
 .dashboard-grid::-webkit-scrollbar-thumb,
 .widget-card-content::-webkit-scrollbar-thumb,
 .widget-watch-wrap::-webkit-scrollbar-thumb,
@@ -1359,6 +1364,7 @@ select {
 
 .sidebar-tree-scroll::-webkit-scrollbar-thumb:hover,
 .widget-toolbox-scroll::-webkit-scrollbar-thumb:hover,
+.command-list-scroll::-webkit-scrollbar-thumb:hover,
 .dashboard-grid::-webkit-scrollbar-thumb:hover,
 .widget-card-content::-webkit-scrollbar-thumb:hover,
 .widget-watch-wrap::-webkit-scrollbar-thumb:hover,
@@ -2033,4 +2039,257 @@ select {
 .config-io-notice.err {
   background: rgba(244, 63, 94, 0.16);
   color: #fda4af;
+}
+
+/* ==========================================================================
+   Command System & Command Panel
+   ========================================================================== */
+
+.command-panel-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.command-panel-hint {
+  padding: 5px 10px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-subtle);
+  line-height: 1.35;
+  flex-shrink: 0;
+}
+
+.command-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-gutter: stable;
+}
+
+.command-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.command-card[draggable="true"] {
+  cursor: grab;
+  user-select: none;
+}
+
+.command-card[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.command-card:hover {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.04);
+}
+
+.command-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cmd-badge-hex {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+}
+
+.cmd-badge-str {
+  background: rgba(56, 189, 248, 0.14);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: var(--accent);
+}
+
+.command-card-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-bound-badge {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #34d399;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  flex-shrink: 0;
+}
+
+.command-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.command-preview-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.command-template-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.command-meta-label {
+  flex-shrink: 0;
+}
+
+.command-template-line code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-test-val-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.command-test-val-wrap input {
+  width: 84px;
+}
+
+.command-preview-output {
+  padding: 3px 6px;
+  border-radius: 3px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #7dd3fc;
+  word-break: break-all;
+}
+
+.command-preview-output.is-error {
+  border-color: rgba(244, 63, 94, 0.45);
+  background: rgba(244, 63, 94, 0.1);
+  color: #fda4af;
+}
+
+.command-send-status {
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.command-send-status.ok {
+  color: var(--ok);
+}
+
+.command-send-status.err {
+  color: #fda4af;
+}
+
+.command-editor-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.command-editor-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  min-width: 0;
+}
+
+.command-editor-form label.command-check-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  padding-top: 12px;
+}
+
+.command-editor-form input[type="text"],
+.command-editor-form select {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-root);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.command-editor-form input.mono {
+  font-family: var(--mono);
+}
+
+.command-format-help {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.35;
+}
+
+.widget-cmd-bound-badge {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+}
+
+.widget-cmd-preview {
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #7dd3fc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widget-cmd-preview.is-error {
+  border-color: rgba(244, 63, 94, 0.45);
+  color: #fda4af;
+}
+
+.widget-cmd-val-input {
+  width: 72px;
+  flex-shrink: 0;
 }

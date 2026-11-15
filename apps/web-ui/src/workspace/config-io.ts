@@ -25,11 +25,16 @@ import {
   type WidgetSliderConfig,
   type WidgetType,
 } from "../widgets/types.ts";
+import {
+  normalizeCommandDefinition,
+  type CommandDefinition,
+} from "./command-system.ts";
 
 export const SOURCES_CONFIG_SCHEMA_V1 = "ddscope.sources.v1" as const;
 export const CANVAS_CONFIG_SCHEMA_V1 = "ddscope.canvas.v1" as const;
 export const BOARD_CONFIG_SCHEMA_V1 = "ddscope.board.v1" as const;
 export const PROJECT_CONFIG_SCHEMA_V1 = "ddscope.project.v1" as const;
+export const COMMANDS_CONFIG_SCHEMA_V1 = "ddscope.commands.v1" as const;
 
 export interface DownlinkUiConfig {
   targetSource: string;
@@ -56,10 +61,16 @@ export const DEFAULT_DOWNLINK_UI_CONFIG: DownlinkUiConfig = {
 export interface BoardUiLayoutStateV1 {
   mockRateHz: 60 | 120;
   sidebarCollapsed: boolean;
-  sidebarTab: "sources" | "toolbox";
+  sidebarTab: "sources" | "toolbox" | "commands";
   downlinkBarCollapsed: boolean;
   focusedScopeId: number | null;
   activeCanvasId: number | null;
+}
+
+export interface CommandsConfigFileV1 {
+  schema: typeof COMMANDS_CONFIG_SCHEMA_V1;
+  exportedAt: string;
+  commands: CommandDefinition[];
 }
 
 export interface SourcesConfigFileV1 {
@@ -147,6 +158,7 @@ export interface ProjectBoardSectionsV1 {
   dockviewLayout: Record<string, unknown> | null;
   standaloneScopes: PortableStandaloneScopeV1[];
   canvases: PortableDashboardCanvasV1[];
+  commands?: CommandDefinition[];
 }
 
 export interface BoardConfigFileV1 extends ProjectBoardSectionsV1 {
@@ -442,6 +454,12 @@ export function parseSourcesConfigJson(jsonText: string): SourcesConfigFileV1 {
     );
   }
 
+  if (parsed.schema === COMMANDS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${SOURCES_CONFIG_SCHEMA_V1}', got commands config ('${parsed.schema}'). Please load it from the Commands panel.`,
+    );
+  }
+
   if (parsed.schema !== SOURCES_CONFIG_SCHEMA_V1) {
     throw new Error(
       `Unsupported sources config schema '${String(parsed.schema ?? "missing")}'. Expected '${SOURCES_CONFIG_SCHEMA_V1}'.`,
@@ -558,6 +576,7 @@ export interface BoardExportInput {
   ui: BoardUiLayoutStateV1;
   downlink: DownlinkUiConfig;
   dockviewLayout: Record<string, unknown> | null;
+  commands?: CommandDefinition[];
 }
 
 function buildBoardConfigSections(input: BoardExportInput): ProjectBoardSectionsV1 {
@@ -589,6 +608,7 @@ function buildBoardConfigSections(input: BoardExportInput): ProjectBoardSections
     dockviewLayout: input.dockviewLayout,
     standaloneScopes,
     canvases,
+    commands: (input.commands ?? []).map((cmd) => ({ ...cmd })),
   };
 }
 
@@ -685,10 +705,16 @@ function normalizeUiLayoutState(
   fallbackFocusedScopeId: number | null,
 ): BoardUiLayoutStateV1 {
   const uiRec = isRecord(rawUi) ? rawUi : {};
+  const sidebarTab =
+    uiRec.sidebarTab === "toolbox"
+      ? "toolbox"
+      : uiRec.sidebarTab === "commands"
+        ? "commands"
+        : "sources";
   return {
     mockRateHz: uiRec.mockRateHz === 60 ? 60 : 120,
     sidebarCollapsed: Boolean(uiRec.sidebarCollapsed),
-    sidebarTab: uiRec.sidebarTab === "toolbox" ? "toolbox" : "sources",
+    sidebarTab,
     downlinkBarCollapsed: Boolean(uiRec.downlinkBarCollapsed),
     focusedScopeId:
       typeof uiRec.focusedScopeId === "number" && Number.isFinite(uiRec.focusedScopeId)
@@ -790,12 +816,91 @@ function validateAndNormalizeBoardSections(
   const fallbackFocusedScopeId = standaloneScopes[0]?.scopeId ?? null;
   const fallbackActiveCanvasId = canvases[0]?.canvasId ?? null;
 
+  let commands: CommandDefinition[] = [];
+  if (rawBoard.commands !== undefined) {
+    if (!Array.isArray(rawBoard.commands)) {
+      throw new Error(`'${prefixLabel}commands' field must be an array.`);
+    }
+    commands = rawBoard.commands.map((item, idx) => {
+      if (!isRecord(item)) {
+        throw new Error(`${prefixLabel}commands[${idx}] must be an object.`);
+      }
+      return normalizeCommandDefinition(item, idx + 1);
+    });
+  }
+
   return {
     ui: normalizeUiLayoutState(rawBoard.ui, fallbackActiveCanvasId, fallbackFocusedScopeId),
     downlink: normalizeDownlinkUiConfig(rawBoard.downlink),
     dockviewLayout: isRecord(rawBoard.dockviewLayout) ? rawBoard.dockviewLayout : null,
     standaloneScopes,
     canvases,
+    commands,
+  };
+}
+
+export function serializeCommandsConfig(commands: ReadonlyArray<CommandDefinition>): string {
+  const payload: CommandsConfigFileV1 = {
+    schema: COMMANDS_CONFIG_SCHEMA_V1,
+    exportedAt: new Date().toISOString(),
+    commands: commands.map((cmd, idx) => normalizeCommandDefinition(cmd, idx + 1)),
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+export function parseCommandsConfigJson(jsonText: string): CommandsConfigFileV1 {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid JSON syntax in commands config: ${msg}`);
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error("Commands config root must be a JSON object.");
+  }
+
+  if (parsed.schema === SOURCES_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${COMMANDS_CONFIG_SCHEMA_V1}', got sources config ('${SOURCES_CONFIG_SCHEMA_V1}'). Please load it from the Sources sidebar.`,
+    );
+  }
+
+  if (parsed.schema === BOARD_CONFIG_SCHEMA_V1 || parsed.schema === CANVAS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${COMMANDS_CONFIG_SCHEMA_V1}', got board config ('${parsed.schema}'). Please load it from the Stage toolbar.`,
+    );
+  }
+
+  if (parsed.schema === PROJECT_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${COMMANDS_CONFIG_SCHEMA_V1}', got project config ('${PROJECT_CONFIG_SCHEMA_V1}'). Please load it from the Project toolbar.`,
+    );
+  }
+
+  if (parsed.schema !== COMMANDS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Unsupported commands config schema '${String(parsed.schema ?? "missing")}'. Expected '${COMMANDS_CONFIG_SCHEMA_V1}'.`,
+    );
+  }
+
+  if (!Array.isArray(parsed.commands)) {
+    throw new Error("Commands config 'commands' field must be an array.");
+  }
+
+  const commands = parsed.commands.map((item, idx) => {
+    if (!isRecord(item)) {
+      throw new Error(`commands[${idx}] must be an object.`);
+    }
+    return normalizeCommandDefinition(item, idx + 1);
+  });
+
+  return {
+    schema: COMMANDS_CONFIG_SCHEMA_V1,
+    exportedAt:
+      typeof parsed.exportedAt === "string" ? parsed.exportedAt : new Date().toISOString(),
+    commands,
   };
 }
 
@@ -827,6 +932,12 @@ export function parseBoardConfigJson(jsonText: string): BoardConfigFileV1 {
   if (parsed.schema === PROJECT_CONFIG_SCHEMA_V1) {
     throw new Error(
       `Expected schema '${BOARD_CONFIG_SCHEMA_V1}', got project config ('${PROJECT_CONFIG_SCHEMA_V1}'). Please load it from the Project toolbar.`,
+    );
+  }
+
+  if (parsed.schema === COMMANDS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${BOARD_CONFIG_SCHEMA_V1}', got commands config ('${COMMANDS_CONFIG_SCHEMA_V1}'). Please load it from the Commands panel.`,
     );
   }
 
@@ -901,6 +1012,12 @@ export function parseProjectConfigJson(jsonText: string): ProjectConfigFileV1 {
   if (parsed.schema === BOARD_CONFIG_SCHEMA_V1 || parsed.schema === CANVAS_CONFIG_SCHEMA_V1) {
     throw new Error(
       `Expected schema '${PROJECT_CONFIG_SCHEMA_V1}', got board config ('${parsed.schema}'). Please load it from the Stage toolbar.`,
+    );
+  }
+
+  if (parsed.schema === COMMANDS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${PROJECT_CONFIG_SCHEMA_V1}', got commands config ('${COMMANDS_CONFIG_SCHEMA_V1}'). Please load it from the Commands panel.`,
     );
   }
 
@@ -1036,6 +1153,8 @@ export function rehydrateBoardFromConfig(args: {
   ui: BoardUiLayoutStateV1;
   downlink: DownlinkUiConfig;
   dockviewLayout: Record<string, unknown> | null;
+  commands: CommandDefinition[];
+  nextCommandSeq: number;
   missingChannelPaths: string[];
 } {
   const { file, channelsById, availableSourceIds } = args;
@@ -1324,11 +1443,38 @@ export function rehydrateBoardFromConfig(args: {
   const ui: BoardUiLayoutStateV1 = {
     mockRateHz: file.ui.mockRateHz === 60 ? 60 : 120,
     sidebarCollapsed: Boolean(file.ui.sidebarCollapsed),
-    sidebarTab: file.ui.sidebarTab === "toolbox" ? "toolbox" : "sources",
+    sidebarTab:
+      file.ui.sidebarTab === "toolbox"
+        ? "toolbox"
+        : file.ui.sidebarTab === "commands"
+          ? "commands"
+          : "sources",
     downlinkBarCollapsed: Boolean(file.ui.downlinkBarCollapsed),
     focusedScopeId,
     activeCanvasId,
   };
+
+  let maxCmdSeq = 0;
+  const seenCmdIds = new Set<string>();
+  const commands: CommandDefinition[] = [];
+  for (const rawCmd of file.commands ?? []) {
+    const normalized = normalizeCommandDefinition(rawCmd, commands.length + 1);
+    let finalId = normalized.id;
+    if (seenCmdIds.has(finalId)) {
+      maxCmdSeq += 1;
+      while (seenCmdIds.has(`cmd_${maxCmdSeq}`)) {
+        maxCmdSeq += 1;
+      }
+      finalId = `cmd_${maxCmdSeq}`;
+    }
+    seenCmdIds.add(finalId);
+    const seqMatch = /^cmd_(\d+)$/.exec(finalId);
+    if (seqMatch) {
+      maxCmdSeq = Math.max(maxCmdSeq, Number(seqMatch[1]));
+    }
+    commands.push({ ...normalized, id: finalId });
+  }
+  const nextCommandSeq = Math.max(maxCmdSeq + 1, commands.length + 1);
 
   const targetSource =
     file.downlink.targetSource.trim().length > 0
@@ -1360,6 +1506,8 @@ export function rehydrateBoardFromConfig(args: {
     ui,
     downlink,
     dockviewLayout,
+    commands,
+    nextCommandSeq,
     missingChannelPaths: Array.from(missingSet),
   };
 }

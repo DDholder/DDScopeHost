@@ -31,6 +31,7 @@ export interface WidgetSliderConfig {
   max: number;
   step: number;
   value: number;
+  commandId?: string | null;
 }
 
 export interface WidgetButtonConfig {
@@ -40,6 +41,8 @@ export interface WidgetButtonConfig {
   kvKey: string;
   kvValue: number;
   priority: "normal" | "high";
+  commandId?: string | null;
+  commandValue?: number;
 }
 
 export interface DashboardWidgetItem {

@@ -18,6 +18,7 @@ import {
   DDSCOPE_POINTER_DROP_EVENT,
   type PointerDropEventDetail,
 } from "../workspace/pointer-dnd.ts";
+import type { CommandDefinition } from "../workspace/command-system.ts";
 import { CmdButtonWidget } from "./CmdButtonWidget.tsx";
 import { DigitalMeterWidget } from "./DigitalMeterWidget.tsx";
 import { ParamSliderWidget } from "./ParamSliderWidget.tsx";
@@ -39,6 +40,7 @@ export interface DashboardCanvasProps {
   canvas: DashboardCanvasConfig;
   channelsById: Record<number, ChannelNodeDto_Serialize>;
   sourceIds: string[];
+  commands: CommandDefinition[];
   scopes: Record<number, ScopeUiConfig>;
   focusedScopeId: number | null;
   scopeCallbacks: ScopeCallbacks;
@@ -59,6 +61,12 @@ export interface DashboardCanvasProps {
   ) => void;
   onRemoveWidget: (canvasId: number, widgetId: string) => void;
   onBindChannelToWidget: (canvasId: number, widgetId: string, channelId: number) => void;
+  onBindCommandToWidget?: (canvasId: number, widgetId: string, commandId: string) => void;
+  onPlaceCommandOnCanvas?: (
+    canvasId: number,
+    commandId: string,
+    opts?: { col?: number; row?: number },
+  ) => string;
   onSendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
     labelSummary?: string,
@@ -114,10 +122,31 @@ function parseDroppedChannelId(ev: DragEvent): number | null {
   return null;
 }
 
+function parseDroppedCommandId(ev: DragEvent): string | null {
+  const rawJson = ev.dataTransfer.getData("application/x-ddscope-command");
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson) as { commandId?: string };
+      if (typeof parsed.commandId === "string" && parsed.commandId.trim().length > 0) {
+        return parsed.commandId.trim();
+      }
+    } catch {
+      // Ignore malformed command payload
+    }
+  }
+  const plain = ev.dataTransfer.getData("text/plain").trim();
+  if (plain.startsWith("command:")) {
+    const id = plain.slice("command:".length).trim();
+    return id.length > 0 ? id : null;
+  }
+  return null;
+}
+
 export function DashboardCanvas({
   canvas,
   channelsById,
   sourceIds,
+  commands,
   scopes,
   focusedScopeId,
   scopeCallbacks,
@@ -130,6 +159,8 @@ export function DashboardCanvas({
   onUpdateWidget,
   onRemoveWidget,
   onBindChannelToWidget,
+  onBindCommandToWidget,
+  onPlaceCommandOnCanvas,
   onSendDownlink,
 }: DashboardCanvasProps) {
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
@@ -171,6 +202,8 @@ export function DashboardCanvas({
     canvasId: canvas.canvasId,
     widgets: canvas.widgets,
     onAddWidget,
+    onBindCommandToWidget,
+    onPlaceCommandOnCanvas,
     dropChannelAtCell,
     dropChannelOnWidget,
   });
@@ -178,6 +211,8 @@ export function DashboardCanvas({
     canvasId: canvas.canvasId,
     widgets: canvas.widgets,
     onAddWidget,
+    onBindCommandToWidget,
+    onPlaceCommandOnCanvas,
     dropChannelAtCell,
     dropChannelOnWidget,
   };
@@ -202,6 +237,18 @@ export function DashboardCanvas({
         return;
       }
 
+      if (detail.dropKind === "widget-card" && detail.payload.kind === "command") {
+        const targetWidget = latest.widgets.find((w) => w.id === detail.widgetId);
+        if (targetWidget) {
+          latest.onBindCommandToWidget?.(
+            latest.canvasId,
+            targetWidget.id,
+            detail.payload.commandId,
+          );
+        }
+        return;
+      }
+
       if (detail.dropKind === "canvas-grid") {
         if (detail.payload.kind === "widget") {
           const cell = computeCanvasGridCell(
@@ -213,6 +260,19 @@ export function DashboardCanvas({
             col: cell.col,
             row: cell.row,
           });
+          return;
+        }
+        if (detail.payload.kind === "command") {
+          const cell = computeCanvasGridCell(
+            detail.clientX,
+            detail.clientY,
+            gridEl.getBoundingClientRect(),
+          );
+          latest.onPlaceCommandOnCanvas?.(
+            latest.canvasId,
+            detail.payload.commandId,
+            { col: cell.col, row: cell.row },
+          );
           return;
         }
         if (detail.payload.kind === "channel") {
@@ -234,6 +294,7 @@ export function DashboardCanvas({
     if (
       types.includes("application/x-ddscope-widget") ||
       types.includes("application/x-ddscope-channel") ||
+      types.includes("application/x-ddscope-command") ||
       types.includes("text/plain")
     ) {
       ev.preventDefault();
@@ -255,6 +316,17 @@ export function DashboardCanvas({
       return;
     }
 
+    const commandId = parseDroppedCommandId(ev);
+    if (commandId) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      onPlaceCommandOnCanvas?.(canvas.canvasId, commandId, {
+        col: cell.col,
+        row: cell.row,
+      });
+      return;
+    }
+
     const chId = parseDroppedChannelId(ev);
     if (chId !== null) {
       ev.preventDefault();
@@ -268,6 +340,16 @@ export function DashboardCanvas({
     if (Array.from(ev.dataTransfer.types).includes("application/x-ddscope-widget")) {
       return;
     }
+    const commandId = parseDroppedCommandId(ev);
+    if (commandId && (widget.type === "param_slider" || widget.type === "cmd_button")) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      setCardDragOverId(null);
+      setGridDragOver(false);
+      onBindCommandToWidget?.(canvas.canvasId, widget.id, commandId);
+      return;
+    }
+
     const chId = parseDroppedChannelId(ev);
     if (chId === null) return;
 
@@ -403,6 +485,7 @@ export function DashboardCanvas({
           <ParamSliderWidget
             widget={widget}
             sourceIds={sourceIds}
+            commands={commands}
             locale={locale}
             onUpdateWidget={handleUpdate}
             onSendDownlink={onSendDownlink}
@@ -413,6 +496,7 @@ export function DashboardCanvas({
           <CmdButtonWidget
             widget={widget}
             sourceIds={sourceIds}
+            commands={commands}
             locale={locale}
             onUpdateWidget={handleUpdate}
             onSendDownlink={onSendDownlink}
@@ -502,6 +586,9 @@ export function DashboardCanvas({
                   !canvas.locked ? "is-editable" : ""
                 }`}
                 data-drop-widget-id={widget.id}
+                {...(widget.type === "param_slider" || widget.type === "cmd_button"
+                  ? { "data-drop-command-widget-id": widget.id }
+                  : {})}
                 data-drop-canvas-id={canvas.canvasId}
                 data-testid={`widget-card-${widget.id}`}
                 style={{
@@ -511,9 +598,12 @@ export function DashboardCanvas({
                 onDragOver={(ev) => {
                   const types = Array.from(ev.dataTransfer.types);
                   const isWidgetDrag = types.includes("application/x-ddscope-widget");
+                  const isCmdWidget =
+                    widget.type === "param_slider" || widget.type === "cmd_button";
                   if (
                     !isWidgetDrag &&
                     (types.includes("application/x-ddscope-channel") ||
+                      (isCmdWidget && types.includes("application/x-ddscope-command")) ||
                       types.includes("text/plain"))
                   ) {
                     ev.preventDefault();

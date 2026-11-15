@@ -90,6 +90,7 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
   const canvas = useWorkspaceStore((s) => s.canvases[canvasId]);
   const channelsById = useWorkspaceStore((s) => s.channelsById);
   const channelGroups = useWorkspaceStore((s) => s.channelGroups);
+  const commands = useWorkspaceStore((s) => s.commands);
   const scopes = useWorkspaceStore((s) => s.scopes);
   const focusedScopeId = useWorkspaceStore((s) => s.focusedScopeId);
   const setFocusedScopeId = useWorkspaceStore((s) => s.setFocusedScopeId);
@@ -104,6 +105,8 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
   const updateCanvasWidget = useWorkspaceStore((s) => s.updateCanvasWidget);
   const removeCanvasWidget = useWorkspaceStore((s) => s.removeCanvasWidget);
   const bindChannelToWidget = useWorkspaceStore((s) => s.bindChannelToWidget);
+  const bindCommandToWidget = useWorkspaceStore((s) => s.bindCommandToWidget);
+  const placeCommandOnCanvas = useWorkspaceStore((s) => s.placeCommandOnCanvas);
   const sendDownlink = useWorkspaceStore((s) => s.sendDownlink);
 
   const scopeCallbacks = useMemo<ScopeCallbacks>(
@@ -140,6 +143,7 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
       canvas={canvas}
       channelsById={channelsById}
       sourceIds={sourceIds}
+      commands={commands}
       scopes={scopes}
       focusedScopeId={focusedScopeId}
       scopeCallbacks={scopeCallbacks}
@@ -152,6 +156,8 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
       onUpdateWidget={updateCanvasWidget}
       onRemoveWidget={removeCanvasWidget}
       onBindChannelToWidget={bindChannelToWidget}
+      onBindCommandToWidget={bindCommandToWidget}
+      onPlaceCommandOnCanvas={placeCommandOnCanvas}
       onSendDownlink={sendDownlink}
     />
   );
@@ -179,11 +185,32 @@ function parseWatermarkWidgetType(ev: DragEvent): WidgetType | null {
   return null;
 }
 
+function parseWatermarkCommandId(ev: DragEvent): string | null {
+  const raw = ev.dataTransfer.getData("application/x-ddscope-command");
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { commandId?: string };
+      if (typeof parsed.commandId === "string" && parsed.commandId.trim().length > 0) {
+        return parsed.commandId.trim();
+      }
+    } catch {
+      // Ignore malformed payload
+    }
+  }
+  const plain = ev.dataTransfer.getData("text/plain").trim();
+  if (plain.startsWith("command:")) {
+    const id = plain.slice("command:".length).trim();
+    return id.length > 0 ? id : null;
+  }
+  return null;
+}
+
 function WorkspaceWatermark(_props: IWatermarkPanelProps) {
   const { t } = useI18n();
   const addScope = useWorkspaceStore((s) => s.addScope);
   const addCanvas = useWorkspaceStore((s) => s.addCanvas);
   const addWidgetToCanvas = useWorkspaceStore((s) => s.addWidgetToCanvas);
+  const placeCommandOnCanvas = useWorkspaceStore((s) => s.placeCommandOnCanvas);
   const importBoardConfig = useWorkspaceStore((s) => s.importBoardConfig);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -194,14 +221,22 @@ function WorkspaceWatermark(_props: IWatermarkPanelProps) {
     if (!el) return;
     const onPointerDrop = (ev: Event) => {
       const detail = (ev as CustomEvent<PointerDropEventDetail>).detail;
-      if (!detail || detail.payload.kind !== "widget") return;
-      ev.stopPropagation();
-      const cid = addCanvas();
-      addWidgetToCanvas(cid, detail.payload.widgetType);
+      if (!detail) return;
+      if (detail.payload.kind === "widget") {
+        ev.stopPropagation();
+        const cid = addCanvas();
+        addWidgetToCanvas(cid, detail.payload.widgetType);
+        return;
+      }
+      if (detail.payload.kind === "command") {
+        ev.stopPropagation();
+        const cid = addCanvas();
+        placeCommandOnCanvas(cid, detail.payload.commandId);
+      }
     };
     el.addEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
     return () => el.removeEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
-  }, [addCanvas, addWidgetToCanvas]);
+  }, [addCanvas, addWidgetToCanvas, placeCommandOnCanvas]);
 
   return (
     <div
@@ -210,7 +245,11 @@ function WorkspaceWatermark(_props: IWatermarkPanelProps) {
       data-drop-watermark="true"
       onDragOver={(ev) => {
         const types = Array.from(ev.dataTransfer.types);
-        if (types.includes("application/x-ddscope-widget") || types.includes("text/plain")) {
+        if (
+          types.includes("application/x-ddscope-widget") ||
+          types.includes("application/x-ddscope-command") ||
+          types.includes("text/plain")
+        ) {
           ev.preventDefault();
           ev.dataTransfer.dropEffect = "copy";
           ev.currentTarget.classList.add("is-drag-over");
@@ -224,10 +263,18 @@ function WorkspaceWatermark(_props: IWatermarkPanelProps) {
       onDrop={(ev) => {
         ev.currentTarget.classList.remove("is-drag-over");
         const wType = parseWatermarkWidgetType(ev);
-        if (!wType) return;
-        ev.preventDefault();
-        const cid = addCanvas();
-        addWidgetToCanvas(cid, wType);
+        if (wType) {
+          ev.preventDefault();
+          const cid = addCanvas();
+          addWidgetToCanvas(cid, wType);
+          return;
+        }
+        const cmdId = parseWatermarkCommandId(ev);
+        if (cmdId) {
+          ev.preventDefault();
+          const cid = addCanvas();
+          placeCommandOnCanvas(cid, cmdId);
+        }
       }}
     >
       <h3>{t("stage.emptyTitle")}</h3>

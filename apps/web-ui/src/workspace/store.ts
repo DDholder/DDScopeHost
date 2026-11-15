@@ -46,11 +46,13 @@ import {
   DEFAULT_DOWNLINK_UI_CONFIG,
   normalizeSourceConfigForExport,
   parseBoardConfigJson,
+  parseCommandsConfigJson,
   parseProjectConfigJson,
   parseSourcesConfigJson,
   projectToBoardFile,
   rehydrateBoardFromConfig,
   serializeBoardConfig,
+  serializeCommandsConfig,
   serializeProjectConfig,
   serializeSourcesConfig,
   synthesizeFallbackSourceConfig,
@@ -58,6 +60,11 @@ import {
   type DownlinkUiConfig,
   type ProjectConfigFileV1,
 } from "./config-io.ts";
+import {
+  commandUsesValue,
+  compileCommandPayload,
+  type CommandDefinition,
+} from "./command-system.ts";
 
 const TRACE_COLORS = [
   0x38bdf8ff, // sky
@@ -109,10 +116,13 @@ export interface WorkspaceStoreState {
   nextCanvasId: number;
   nextWidgetSeq: number;
 
+  commands: CommandDefinition[];
+  nextCommandSeq: number;
+
   locale: UiLocale;
   mockRateHz: 60 | 120;
   sidebarCollapsed: boolean;
-  sidebarTab: "sources" | "toolbox";
+  sidebarTab: "sources" | "toolbox" | "commands";
   downlinkBarCollapsed: boolean;
   sourceWizardOpen: boolean;
   downlinkConfig: DownlinkUiConfig;
@@ -124,7 +134,7 @@ export interface WorkspaceStoreState {
   refreshChannelTree: () => Promise<void>;
   setMockRateHz: (rate: 60 | 120) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
-  setSidebarTab: (tab: "sources" | "toolbox") => void;
+  setSidebarTab: (tab: "sources" | "toolbox" | "commands") => void;
   setDownlinkBarCollapsed: (collapsed: boolean) => void;
   setSourceWizardOpen: (open: boolean) => void;
   setFocusedScopeId: (scopeId: number | null) => void;
@@ -202,6 +212,30 @@ export interface WorkspaceStoreState {
     mode: "exe-dir" | "browser-storage";
   }>;
   clearDefaultProjectConfig: () => Promise<void>;
+
+  addCommand: (partial?: Partial<Omit<CommandDefinition, "id">>) => string;
+  updateCommand: (commandId: string, patch: Partial<Omit<CommandDefinition, "id">>) => void;
+  removeCommand: (commandId: string) => void;
+  bindCommandToWidget: (canvasId: number, widgetId: string, commandId: string) => void;
+  placeCommandOnCanvas: (
+    canvasId: number,
+    commandId: string,
+    opts?: { col?: number; row?: number },
+  ) => string;
+  executeCommand: (
+    commandId: string,
+    opts?: {
+      value?: number;
+      fallbackSourceId?: string;
+      coalesceKey?: string | null;
+      isSliderEvent?: boolean;
+    },
+  ) => Promise<DownlinkReceiptDto>;
+  exportCommandsConfig: () => string;
+  importCommandsConfig: (
+    jsonText: string,
+    options?: { replaceExisting?: boolean },
+  ) => { importedCount: number };
 
   sendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
@@ -756,6 +790,7 @@ export function createWorkspaceStore(
           targetSource: effectiveTargetSource,
         },
         dockviewLayout: liveLayout,
+        commands: state.commands,
       };
     };
 
@@ -800,6 +835,8 @@ export function createWorkspaceStore(
         sidebarTab: rehydrated.ui.sidebarTab,
         downlinkBarCollapsed: rehydrated.ui.downlinkBarCollapsed,
         downlinkConfig: rehydrated.downlink,
+        commands: rehydrated.commands,
+        nextCommandSeq: rehydrated.nextCommandSeq,
         pendingDockviewLayout: rehydrated.dockviewLayout,
         layoutRestoreSeq: s.layoutRestoreSeq + 1,
       }));
@@ -900,6 +937,9 @@ export function createWorkspaceStore(
     activeCanvasId: 1,
     nextCanvasId: 2,
     nextWidgetSeq: 1,
+
+    commands: [],
+    nextCommandSeq: 1,
 
     locale: detectInitialLocale(),
     mockRateHz: 120,
@@ -2067,6 +2107,256 @@ export function createWorkspaceStore(
 
     clearDefaultProjectConfig: async () => {
       await client.clearDefaultProjectConfig();
+    },
+
+    addCommand: (partial) => {
+      const state = get();
+      const usedIds = new Set(state.commands.map((c) => c.id));
+      let seq = state.nextCommandSeq;
+      while (usedIds.has(`cmd_${seq}`)) {
+        seq += 1;
+      }
+      const id = `cmd_${seq}`;
+      const format = partial?.format === "hex" ? "hex" : "string";
+      const defaultName =
+        state.locale === "zh-CN" ? `命令 ${seq}` : `Command ${seq}`;
+      const item: CommandDefinition = {
+        id,
+        name: partial?.name ?? defaultName,
+        format,
+        template: partial?.template ?? (format === "hex" ? "00 01 02" : "set_num %f"),
+        appendNewline: partial?.appendNewline ?? false,
+        endian: partial?.endian === "big" ? "big" : "little",
+        targetSourceId: partial?.targetSourceId?.trim() ?? "",
+        priority: partial?.priority === "high" ? "high" : "normal",
+      };
+      set({
+        commands: [...state.commands, item],
+        nextCommandSeq: seq + 1,
+      });
+      return id;
+    },
+
+    updateCommand: (commandId, patch) => {
+      set((state) => ({
+        commands: state.commands.map((cmd) =>
+          cmd.id === commandId ? { ...cmd, ...patch, id: cmd.id } : cmd,
+        ),
+      }));
+    },
+
+    removeCommand: (commandId) => {
+      const state = get();
+      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
+      let canvasChanged = false;
+      for (const [idStr, canvas] of Object.entries(state.canvases)) {
+        const cid = Number(idStr);
+        let widgetChanged = false;
+        const nextWidgets = canvas.widgets.map((w) => {
+          let nextW = w;
+          if (w.sliderConfig?.commandId === commandId) {
+            widgetChanged = true;
+            nextW = {
+              ...nextW,
+              sliderConfig: { ...w.sliderConfig, commandId: null },
+            };
+          }
+          if (w.buttonConfig?.commandId === commandId) {
+            widgetChanged = true;
+            nextW = {
+              ...nextW,
+              buttonConfig: { ...w.buttonConfig, commandId: null },
+            };
+          }
+          return nextW;
+        });
+        if (widgetChanged) {
+          canvasChanged = true;
+          nextCanvases[cid] = { ...canvas, widgets: nextWidgets };
+        } else {
+          nextCanvases[cid] = canvas;
+        }
+      }
+
+      set({
+        commands: state.commands.filter((c) => c.id !== commandId),
+        ...(canvasChanged ? { canvases: nextCanvases } : {}),
+      });
+    },
+
+    bindCommandToWidget: (canvasId, widgetId, commandId) => {
+      const state = get();
+      const canvas = state.canvases[canvasId];
+      const cmd = state.commands.find((c) => c.id === commandId);
+      if (!canvas || !cmd) return;
+
+      const fallbackSource = state.channelGroups[0]?.source.source_id ?? "sim0";
+
+      get().updateCanvasWidget(canvasId, widgetId, (prev) => {
+        if (prev.type === "param_slider") {
+          const prevCfg = prev.sliderConfig ?? {
+            sourceId: fallbackSource,
+            key: "kp",
+            min: 0.2,
+            max: 6.0,
+            step: 0.05,
+            value: 1.2,
+          };
+          return {
+            ...prev,
+            title: cmd.name || prev.title,
+            sliderConfig: {
+              ...prevCfg,
+              sourceId: cmd.targetSourceId || prevCfg.sourceId || fallbackSource,
+              commandId: cmd.id,
+            },
+          };
+        }
+
+        if (prev.type === "cmd_button") {
+          const prevCfg = prev.buttonConfig ?? {
+            sourceId: fallbackSource,
+            mode: "ascii" as const,
+            command: "SET_MODE=FOC_RUN",
+            kvKey: "kp",
+            kvValue: 1.5,
+            priority: cmd.priority,
+          };
+          return {
+            ...prev,
+            title: cmd.name || prev.title,
+            buttonConfig: {
+              ...prevCfg,
+              sourceId: cmd.targetSourceId || prevCfg.sourceId || fallbackSource,
+              priority: cmd.priority,
+              commandId: cmd.id,
+              commandValue: prevCfg.commandValue ?? 0,
+            },
+          };
+        }
+
+        return prev;
+      });
+    },
+
+    placeCommandOnCanvas: (canvasId, commandId, opts) => {
+      const state = get();
+      const cmd = state.commands.find((c) => c.id === commandId);
+      if (!cmd) return "";
+
+      const widgetType: WidgetType = commandUsesValue(cmd)
+        ? "param_slider"
+        : "cmd_button";
+      const widgetId = get().addWidgetToCanvas(canvasId, widgetType, opts);
+      if (widgetId) {
+        get().bindCommandToWidget(canvasId, widgetId, commandId);
+      }
+      return widgetId;
+    },
+
+    executeCommand: async (commandId, opts) => {
+      const state = get();
+      const cmd = state.commands.find((c) => c.id === commandId);
+      if (!cmd) {
+        throw new Error(`Command '${commandId}' not found.`);
+      }
+      const compiled = compileCommandPayload(cmd, opts?.value ?? 0);
+      if (!compiled.ok) {
+        throw new Error(compiled.error);
+      }
+      const targetSource =
+        cmd.targetSourceId.trim() ||
+        opts?.fallbackSourceId?.trim() ||
+        state.channelGroups[0]?.source.source_id ||
+        "sim0";
+      return get().sendDownlink(
+        {
+          source_id: targetSource,
+          priority: cmd.priority,
+          coalesce_key: opts?.coalesceKey ?? null,
+          payload: compiled.payload,
+        },
+        `${cmd.name}: ${compiled.preview}`,
+        opts?.isSliderEvent ?? false,
+      );
+    },
+
+    exportCommandsConfig: () => {
+      return serializeCommandsConfig(get().commands);
+    },
+
+    importCommandsConfig: (jsonText, options) => {
+      const file = parseCommandsConfigJson(jsonText);
+      const state = get();
+
+      if (options?.replaceExisting) {
+        const nextIds = new Set(file.commands.map((c) => c.id));
+        const nextCanvases: Record<number, DashboardCanvasConfig> = {};
+        let canvasChanged = false;
+        for (const [idStr, canvas] of Object.entries(state.canvases)) {
+          const cid = Number(idStr);
+          let widgetChanged = false;
+          const nextWidgets = canvas.widgets.map((w) => {
+            let nextW = w;
+            if (w.sliderConfig?.commandId && !nextIds.has(w.sliderConfig.commandId)) {
+              widgetChanged = true;
+              nextW = { ...nextW, sliderConfig: { ...w.sliderConfig, commandId: null } };
+            }
+            if (w.buttonConfig?.commandId && !nextIds.has(w.buttonConfig.commandId)) {
+              widgetChanged = true;
+              nextW = { ...nextW, buttonConfig: { ...w.buttonConfig, commandId: null } };
+            }
+            return nextW;
+          });
+          if (widgetChanged) {
+            canvasChanged = true;
+            nextCanvases[cid] = { ...canvas, widgets: nextWidgets };
+          } else {
+            nextCanvases[cid] = canvas;
+          }
+        }
+
+        let maxSeq = 0;
+        for (const c of file.commands) {
+          const m = /^cmd_(\d+)$/.exec(c.id);
+          if (m) maxSeq = Math.max(maxSeq, Number(m[1]));
+        }
+
+        set({
+          commands: file.commands,
+          nextCommandSeq: Math.max(maxSeq + 1, file.commands.length + 1),
+          ...(canvasChanged ? { canvases: nextCanvases } : {}),
+        });
+        return { importedCount: file.commands.length };
+      }
+
+      const usedIds = new Set(state.commands.map((c) => c.id));
+      let nextSeq = state.nextCommandSeq;
+      for (const c of state.commands) {
+        const m = /^cmd_(\d+)$/.exec(c.id);
+        if (m) nextSeq = Math.max(nextSeq, Number(m[1]) + 1);
+      }
+      const appended: CommandDefinition[] = [];
+      for (const rawCmd of file.commands) {
+        let finalId = rawCmd.id;
+        if (usedIds.has(finalId)) {
+          while (usedIds.has(`cmd_${nextSeq}`)) {
+            nextSeq += 1;
+          }
+          finalId = `cmd_${nextSeq}`;
+          nextSeq += 1;
+        }
+        usedIds.add(finalId);
+        const m = /^cmd_(\d+)$/.exec(finalId);
+        if (m) nextSeq = Math.max(nextSeq, Number(m[1]) + 1);
+        appended.push({ ...rawCmd, id: finalId });
+      }
+
+      set({
+        commands: [...state.commands, ...appended],
+        nextCommandSeq: nextSeq,
+      });
+      return { importedCount: appended.length };
     },
 
     sendDownlink: async (req, labelSummary, isSliderEvent = false) => {

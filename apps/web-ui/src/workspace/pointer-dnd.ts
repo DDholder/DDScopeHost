@@ -16,6 +16,12 @@ export type PointerDragPayload =
       widgetType: WidgetType;
       badge: string;
       label: string;
+    }
+  | {
+      kind: "command";
+      commandId: string;
+      badge: string;
+      label: string;
     };
 
 export type DropTargetKind =
@@ -93,6 +99,23 @@ function resolveDropTarget(
     }
   }
 
+  if (payload.kind === "command") {
+    const cmdWidgetCard = findFirstMatching(stack, "[data-drop-command-widget-id]");
+    if (cmdWidgetCard) {
+      const widgetId =
+        cmdWidgetCard.getAttribute("data-drop-command-widget-id") ?? undefined;
+      const rawCanvasId = cmdWidgetCard.getAttribute("data-drop-canvas-id");
+      const canvasId = rawCanvasId ? Number.parseInt(rawCanvasId, 10) : undefined;
+      return {
+        el: cmdWidgetCard,
+        kind: "widget-card",
+        highlightClass: "is-channel-drop-over",
+        widgetId,
+        canvasId: Number.isFinite(canvasId) ? canvasId : undefined,
+      };
+    }
+  }
+
   const canvasGrid = findFirstMatching(stack, "[data-drop-canvas-grid]");
   if (canvasGrid) {
     const rawCanvasId = canvasGrid.getAttribute("data-drop-canvas-id");
@@ -105,7 +128,7 @@ function resolveDropTarget(
     };
   }
 
-  if (payload.kind === "widget") {
+  if (payload.kind === "widget" || payload.kind === "command") {
     const watermark = findFirstMatching(stack, "[data-drop-watermark]");
     if (watermark) {
       return {

@@ -341,3 +341,35 @@ fn portable_default_project_config_saves_next_to_exe_and_round_trips() {
     assert!(!clear_default_project_config_at_path(&test_file).expect("clear missing"));
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn downlink_ascii_append_newline_false_preserves_exact_raw_bytes() {
+    use ddscope_core::protocol::DownlinkPayload;
+
+    let (_, no_nl_req) = convert::downlink_dto_to_core(SendDownlinkRequestDto {
+        source_id: "udp0".to_string(),
+        payload: DownlinkPayloadDto::AsciiText {
+            text: "123".to_string(),
+            append_newline: false,
+        },
+        priority: TxPriorityDto::Normal,
+        coalesce_key: None,
+    })
+    .expect("append_newline=false conversion should succeed");
+    assert_eq!(no_nl_req.payload, DownlinkPayload::RawBytes(b"123".to_vec()));
+
+    let (_, nl_req) = convert::downlink_dto_to_core(SendDownlinkRequestDto {
+        source_id: "udp0".to_string(),
+        payload: DownlinkPayloadDto::AsciiText {
+            text: "123".to_string(),
+            append_newline: true,
+        },
+        priority: TxPriorityDto::Normal,
+        coalesce_key: None,
+    })
+    .expect("append_newline=true conversion should succeed");
+    assert_eq!(
+        nl_req.payload,
+        DownlinkPayload::AsciiLine("123\n".to_string())
+    );
+}

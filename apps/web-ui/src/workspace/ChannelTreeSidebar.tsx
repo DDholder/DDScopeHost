@@ -11,7 +11,12 @@ import {
   formatBytesCompact,
   formatSampleRate,
 } from "../scope-engine/time-format.ts";
-import { WIDGET_CATALOG, WidgetToolbox, type WidgetType } from "../widgets/index.ts";
+import {
+  CommandPanel,
+  WIDGET_CATALOG,
+  WidgetToolbox,
+  type WidgetType,
+} from "../widgets/index.ts";
 import { readJsonFileFromInput, saveJsonFile } from "./file-dialog.ts";
 import { isPointerDragArmed, startPointerDrag } from "./pointer-dnd.ts";
 import { useWorkspaceStore } from "./store.ts";
@@ -71,6 +76,15 @@ export function ChannelTreeSidebar() {
   const addWidgetToCanvas = useWorkspaceStore((s) => s.addWidgetToCanvas);
   const exportSourcesConfig = useWorkspaceStore((s) => s.exportSourcesConfig);
   const importSourcesConfig = useWorkspaceStore((s) => s.importSourcesConfig);
+  const commands = useWorkspaceStore((s) => s.commands);
+  const canvases = useWorkspaceStore((s) => s.canvases);
+  const addCommand = useWorkspaceStore((s) => s.addCommand);
+  const updateCommand = useWorkspaceStore((s) => s.updateCommand);
+  const removeCommand = useWorkspaceStore((s) => s.removeCommand);
+  const placeCommandOnCanvas = useWorkspaceStore((s) => s.placeCommandOnCanvas);
+  const executeCommand = useWorkspaceStore((s) => s.executeCommand);
+  const exportCommandsConfig = useWorkspaceStore((s) => s.exportCommandsConfig);
+  const importCommandsConfig = useWorkspaceStore((s) => s.importCommandsConfig);
 
   const sourcesImportRef = useRef<HTMLInputElement | null>(null);
   const [sourceIoNotice, setSourceIoNotice] = useState<{
@@ -204,6 +218,19 @@ export function ChannelTreeSidebar() {
     addWidgetToCanvas(targetId, widgetType);
   };
 
+  const handleQuickPlaceCommand = (commandId: string) => {
+    const targetId =
+      activeCanvasId !== null && canvasOrder.includes(activeCanvasId)
+        ? activeCanvasId
+        : (canvasOrder[0] ?? addCanvas());
+    placeCommandOnCanvas(targetId, commandId);
+  };
+
+  const sourceIds = useMemo(
+    () => channelGroups.map((g) => g.source.source_id),
+    [channelGroups],
+  );
+
   useEffect(() => {
     flushDom();
   }, [sidebarTab, collapsed, filter, channelsById, locale]);
@@ -306,6 +333,17 @@ export function ChannelTreeSidebar() {
         >
           <span>{t("sidebar.tab.toolbox")}</span>
           <span className="sidebar-tab-badge">{WIDGET_CATALOG.length}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={sidebarTab === "commands"}
+          className={`sidebar-tab-btn ${sidebarTab === "commands" ? "active" : ""}`}
+          data-testid="sidebar-tab-commands"
+          onClick={() => setSidebarTab("commands")}
+        >
+          <span>{t("sidebar.tab.commands")}</span>
+          <span className="sidebar-tab-badge">{commands.length}</span>
         </button>
       </div>
 
@@ -557,9 +595,25 @@ export function ChannelTreeSidebar() {
             )}
           </div>
         </div>
-      ) : (
+      ) : sidebarTab === "toolbox" ? (
         <div className="sidebar-tab-panel" data-testid="sidebar-panel-toolbox">
           <WidgetToolbox locale={locale} onQuickAddWidget={handleQuickAddWidget} />
+        </div>
+      ) : (
+        <div className="sidebar-tab-panel" data-testid="sidebar-panel-commands">
+          <CommandPanel
+            locale={locale}
+            commands={commands}
+            canvases={canvases}
+            sourceIds={sourceIds}
+            onAddCommand={addCommand}
+            onUpdateCommand={updateCommand}
+            onRemoveCommand={removeCommand}
+            onPlaceCommandOnCanvas={handleQuickPlaceCommand}
+            onExecuteCommand={executeCommand}
+            onExportCommandsConfig={exportCommandsConfig}
+            onImportCommandsConfig={importCommandsConfig}
+          />
         </div>
       )}
     </aside>

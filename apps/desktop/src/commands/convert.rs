@@ -723,7 +723,15 @@ pub fn downlink_dto_to_core(
         DownlinkPayloadDto::AsciiText {
             text,
             append_newline,
-        } => DownlinkRequest::from_ascii(text, append_newline, priority),
+        } => {
+            if append_newline {
+                DownlinkRequest::from_ascii(text, true, priority)
+            } else {
+                // Use RawBytes so BasicDownlinkEncoder::default()'s ensure_newline=true
+                // does not force a trailing '\n' when exact string bytes are requested.
+                DownlinkRequest::new(DownlinkPayload::RawBytes(text.into_bytes()), priority)
+            }
+        }
         DownlinkPayloadDto::KeyValue { key, value } => {
             if !value.is_finite() {
                 return Err(ApiErrorDto::invalid_config(format!(
