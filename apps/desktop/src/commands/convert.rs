@@ -277,6 +277,37 @@ pub fn create_source_dto_to_core(req: CreateSourceRequestDto) -> Result<SourceCo
             nominal_sample_rate_hz,
         },
         ClockConfigDto::Tier3HostArrival => ClockMode::Tier3HostArrival,
+        ClockConfigDto::ChannelCounter {
+            channel,
+            ns_per_count,
+            rollover_modulus,
+            drift_compensation,
+        } => {
+            let trimmed_ch = channel.trim().to_owned();
+            if trimmed_ch.is_empty() {
+                return Err(ApiErrorDto::invalid_config(
+                    "channel_counter sync channel must not be empty",
+                ));
+            }
+            if !ns_per_count.is_finite() || ns_per_count <= 0.0 {
+                return Err(ApiErrorDto::invalid_config(
+                    "channel_counter ns_per_count must be finite and > 0",
+                ));
+            }
+            if let Some(m) = rollover_modulus {
+                if !m.is_finite() || m <= 0.0 {
+                    return Err(ApiErrorDto::invalid_config(
+                        "channel_counter rollover_modulus must be finite and > 0",
+                    ));
+                }
+            }
+            ClockMode::ChannelCounter {
+                channel: trimmed_ch,
+                ns_per_count,
+                rollover_modulus,
+                drift_compensation,
+            }
+        }
     };
 
     let protocol = match req.protocol {
@@ -398,20 +429,31 @@ pub fn source_config_core_to_dto(cfg: &SourceConfig) -> Result<CreateSourceReque
         }
     };
 
-    let clock = match cfg.clock_mode {
+    let clock = match &cfg.clock_mode {
         ClockMode::Tier1HardwareCounter {
             tick_hz,
             counter_bits,
         } => ClockConfigDto::Tier1HardwareCounter {
-            tick_hz,
-            counter_bits,
+            tick_hz: *tick_hz,
+            counter_bits: *counter_bits,
         },
         ClockMode::Tier2SoftwarePll {
             nominal_sample_rate_hz,
         } => ClockConfigDto::Tier2SoftwarePll {
-            nominal_sample_rate_hz,
+            nominal_sample_rate_hz: *nominal_sample_rate_hz,
         },
         ClockMode::Tier3HostArrival => ClockConfigDto::Tier3HostArrival,
+        ClockMode::ChannelCounter {
+            channel,
+            ns_per_count,
+            rollover_modulus,
+            drift_compensation,
+        } => ClockConfigDto::ChannelCounter {
+            channel: channel.clone(),
+            ns_per_count: *ns_per_count,
+            rollover_modulus: *rollover_modulus,
+            drift_compensation: *drift_compensation,
+        },
     };
 
     let protocol = match &cfg.protocol {

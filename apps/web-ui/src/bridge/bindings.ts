@@ -130,10 +130,10 @@ export type ChannelTreeSnapshotDto_Serialize = {
 export type ClockConfigDto = ClockConfigDto_Serialize | ClockConfigDto_Deserialize;
 
 /**  Per-source hybrid clock synchronization configuration. */
-export type ClockConfigDto_Deserialize = { mode: "tier1_hardware_counter"; tick_hz: number | null; counter_bits: number } | { mode: "tier2_software_pll"; nominal_sample_rate_hz?: number | null } | { mode: "tier3_host_arrival" };
+export type ClockConfigDto_Deserialize = { mode: "tier1_hardware_counter"; tick_hz: number | null; counter_bits: number } | { mode: "tier2_software_pll"; nominal_sample_rate_hz?: number | null } | { mode: "tier3_host_arrival" } | { mode: "channel_counter"; channel: string; ns_per_count: number | null; rollover_modulus?: number | null; drift_compensation?: boolean };
 
 /**  Per-source hybrid clock synchronization configuration. */
-export type ClockConfigDto_Serialize = { mode: "tier1_hardware_counter"; tick_hz: number | null; counter_bits: number } | { mode: "tier2_software_pll"; nominal_sample_rate_hz: number | null } | { mode: "tier3_host_arrival" };
+export type ClockConfigDto_Serialize = { mode: "tier1_hardware_counter"; tick_hz: number | null; counter_bits: number } | { mode: "tier2_software_pll"; nominal_sample_rate_hz: number | null } | { mode: "tier3_host_arrival" } | { mode: "channel_counter"; channel: string; ns_per_count: number | null; rollover_modulus: number | null; drift_compensation: boolean };
 
 /**  Request payload for `create_source`. */
 export type CreateSourceRequestDto = CreateSourceRequestDto_Serialize | CreateSourceRequestDto_Deserialize;

@@ -551,3 +551,100 @@ async fn update_source_and_run_boundaries_roundtrip() {
     state.stop_source("udp_edit".to_string()).await.ok();
     ws.shutdown().await.expect("shutdown workspace");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_counter_clock_mode_control_plane_roundtrip() {
+    let ws = Arc::new(CoreWorkspace::new(tokio::runtime::Handle::current()));
+    let state = DesktopBridgeState::with_workspace(Arc::clone(&ws));
+
+    // Invalid empty or nonexistent channel must return INVALID_CONFIG
+    let bad_err = state
+        .create_source(CreateSourceRequestDto {
+            source_id: "cc_bad".to_string(),
+            display_name: None,
+            transport: TransportConfigDto::Udp {
+                bind_addr: "127.0.0.1:0".to_string(),
+                multicast_group: None,
+                recv_buffer_bytes: 65_536,
+                remote_tx_addr: None,
+            },
+            clock: ClockConfigDto::ChannelCounter {
+                channel: "missing_cnt".to_string(),
+                ns_per_count: 1_000.0,
+                rollover_modulus: Some(65_536.0),
+                drift_compensation: true,
+            },
+            protocol: ProtocolConfigDto::FireWater {
+                channel_names: vec!["va".to_string(), "tick_cnt".to_string()],
+            },
+            auto_start: false,
+        })
+        .expect_err("nonexistent sync channel must fail");
+    assert_eq!(bad_err.code, "INVALID_CONFIG");
+
+    // Valid ChannelCounter create + update + get_source_configs export roundtrip
+    let created = state
+        .create_source(CreateSourceRequestDto {
+            source_id: "cc_udp".to_string(),
+            display_name: Some("Channel Sync UDP".to_string()),
+            transport: TransportConfigDto::Udp {
+                bind_addr: "127.0.0.1:0".to_string(),
+                multicast_group: None,
+                recv_buffer_bytes: 65_536,
+                remote_tx_addr: None,
+            },
+            clock: ClockConfigDto::ChannelCounter {
+                channel: "tick_cnt".to_string(),
+                ns_per_count: 1_000.0,
+                rollover_modulus: None,
+                drift_compensation: true,
+            },
+            protocol: ProtocolConfigDto::FireWater {
+                channel_names: vec!["va".to_string(), "tick_cnt".to_string()],
+            },
+            auto_start: false,
+        })
+        .expect("create cc_udp with ChannelCounter");
+    assert_eq!(created.source_id, "cc_udp");
+
+    state
+        .update_source(
+            "cc_udp".to_string(),
+            CreateSourceRequestDto {
+                source_id: "cc_udp".to_string(),
+                display_name: Some("Channel Sync Edited".to_string()),
+                transport: TransportConfigDto::Udp {
+                    bind_addr: "127.0.0.1:0".to_string(),
+                    multicast_group: None,
+                    recv_buffer_bytes: 65_536,
+                    remote_tx_addr: Some("127.0.0.1:19010".to_string()),
+                },
+                clock: ClockConfigDto::ChannelCounter {
+                    channel: "tick_cnt".to_string(),
+                    ns_per_count: 250.0,
+                    rollover_modulus: Some(10_000.0),
+                    drift_compensation: false,
+                },
+                protocol: ProtocolConfigDto::FireWater {
+                    channel_names: vec!["va".to_string(), "tick_cnt".to_string()],
+                },
+                auto_start: false,
+            },
+        )
+        .await
+        .expect("update cc_udp ChannelCounter parameters");
+
+    let cfgs = state.get_source_configs().expect("get_source_configs");
+    assert_eq!(cfgs.len(), 1);
+    assert_eq!(
+        cfgs[0].clock,
+        ClockConfigDto::ChannelCounter {
+            channel: "tick_cnt".to_string(),
+            ns_per_count: 250.0,
+            rollover_modulus: Some(10_000.0),
+            drift_compensation: false,
+        }
+    );
+
+    ws.shutdown().await.expect("shutdown workspace");
+}

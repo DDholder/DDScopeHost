@@ -33,13 +33,30 @@ export function normalizeSourceConfigToSerialize(
       break;
   }
 
-  const clock: ClockConfigDto_Serialize =
-    req.clock.mode === "tier2_software_pll"
-      ? {
-          mode: "tier2_software_pll",
-          nominal_sample_rate_hz: req.clock.nominal_sample_rate_hz ?? null,
-        }
-      : { ...req.clock };
+  let clock: ClockConfigDto_Serialize;
+  switch (req.clock.mode) {
+    case "tier2_software_pll":
+      clock = {
+        mode: "tier2_software_pll",
+        nominal_sample_rate_hz: req.clock.nominal_sample_rate_hz ?? null,
+      };
+      break;
+    case "channel_counter":
+      clock = {
+        mode: "channel_counter",
+        channel: req.clock.channel.trim(),
+        ns_per_count: req.clock.ns_per_count ?? 1_000,
+        rollover_modulus: req.clock.rollover_modulus ?? null,
+        drift_compensation: req.clock.drift_compensation ?? true,
+      };
+      break;
+    case "tier1_hardware_counter":
+      clock = { ...req.clock };
+      break;
+    default:
+      clock = { mode: "tier3_host_arrival" };
+      break;
+  }
 
   let protocol: ProtocolConfigDto_Serialize;
   switch (req.protocol.codec) {

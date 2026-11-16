@@ -4,8 +4,10 @@ import {
   BridgeClient,
   HighFreqTopicBus,
   formatUdpRemoteTxAddr,
+  normalizeSourceConfigToSerialize,
   parseUdpRemoteTxAddr,
 } from "../src/bridge/index.ts";
+import { parseSourcesConfigJson, serializeSourcesConfig } from "../src/workspace/config-io.ts";
 import { DdsfFrameBuilder, parseDdsfFrame } from "../src/bridge/ddsf-parser.ts";
 import { DdsfBlockKind, TriggerRuntimeStateCode } from "../src/bridge/ddsf-spec.ts";
 import { MockSimulationCore } from "../src/bridge/mock-ddsf-core.ts";
@@ -682,4 +684,101 @@ test("ScopeGeometryBuilder splits analog RawXY and M4 connecting segments across
     [0.5],
   );
   assert.equal(geomM4Full.signalVertexCount - geomM4Split.signalVertexCount, 6);
+});
+
+test("ChannelCounter clock config normalizes, serializes/parses, validates in MockCore & round-trips in store", async () => {
+  const normalizedAuto = normalizeSourceConfigToSerialize({
+    source_id: "fw_sync",
+    display_name: "FW Sync",
+    transport: {
+      kind: "udp",
+      bind_addr: "0.0.0.0:9200",
+      multicast_group: null,
+      recv_buffer_bytes: 1_048_576,
+      remote_tx_addr: null,
+    },
+    clock: {
+      mode: "channel_counter",
+      channel: " ts_cnt ",
+      ns_per_count: 500,
+    },
+    protocol: { codec: "fire_water", channel_names: ["va", "ts_cnt"] },
+    auto_start: false,
+  });
+  assert.deepEqual(normalizedAuto.clock, {
+    mode: "channel_counter",
+    channel: "ts_cnt",
+    ns_per_count: 500,
+    rollover_modulus: null,
+    drift_compensation: true,
+  });
+
+  const json = serializeSourcesConfig([
+    normalizedAuto,
+    {
+      ...normalizedAuto,
+      source_id: "fw_custom",
+      clock: {
+        mode: "channel_counter",
+        channel: "ts_cnt",
+        ns_per_count: 1000,
+        rollover_modulus: 10_000,
+        drift_compensation: false,
+      },
+    },
+  ]);
+  const parsed = parseSourcesConfigJson(json);
+  assert.equal(parsed.sources.length, 2);
+  assert.deepEqual(parsed.sources[1].clock, {
+    mode: "channel_counter",
+    channel: "ts_cnt",
+    ns_per_count: 1000,
+    rollover_modulus: 10_000,
+    drift_compensation: false,
+  });
+
+  const bus = new HighFreqTopicBus();
+  const client = new BridgeClient(bus);
+  const store = createWorkspaceStore(client);
+  try {
+    await store.getState().initWorkspace();
+
+    // Missing sync channel must throw on createSource in MockSimulationCore
+    await assert.rejects(
+      store.getState().createSource({
+        ...normalizedAuto,
+        clock: {
+          mode: "channel_counter",
+          channel: "missing_col",
+          ns_per_count: 1000,
+          rollover_modulus: 65536,
+          drift_compensation: true,
+        },
+      }),
+      /missing_col/,
+    );
+
+    await store.getState().createSource(normalizedAuto);
+    assert.deepEqual(store.getState().sourceConfigsById["fw_sync"]?.clock, normalizedAuto.clock);
+
+    await store.getState().updateSource("fw_sync", {
+      ...normalizedAuto,
+      clock: {
+        mode: "channel_counter",
+        channel: "ts_cnt",
+        ns_per_count: 250,
+        rollover_modulus: 65_536,
+        drift_compensation: false,
+      },
+    });
+    assert.deepEqual(store.getState().sourceConfigsById["fw_sync"]?.clock, {
+      mode: "channel_counter",
+      channel: "ts_cnt",
+      ns_per_count: 250,
+      rollover_modulus: 65_536,
+      drift_compensation: false,
+    });
+  } finally {
+    client.stopDataPlane();
+  }
 });

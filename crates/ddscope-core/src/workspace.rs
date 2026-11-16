@@ -627,7 +627,7 @@ fn build_source_session_components(
         }
     };
 
-    let clock = StreamClockSynchronizer::with_config(config.clock_mode, config.clock_config)?;
+    let mut clock = StreamClockSynchronizer::with_config(config.clock_mode, config.clock_config)?;
 
     let codec: Box<dyn ProtocolCodec> = match config.protocol {
         SourceProtocolConfig::SimPreset(mut p_cfg) => {
@@ -651,6 +651,8 @@ fn build_source_session_components(
             json_config,
         } => protocol_registry.create(&codec_id, &json_config)?,
     };
+
+    clock.bind_declared_channels(codec.declared_channels())?;
 
     Ok((
         stored_config,
@@ -739,10 +741,13 @@ impl SourceSession {
     /// Constructs a [`SourceSession`] from pre-built transport, clock, and codec instances,
     /// immediately registering its declared channels under `<source_id>/<local_path>` in `hub`.
     pub fn from_components(
-        components: SourceSessionComponents,
+        mut components: SourceSessionComponents,
         hub: Arc<ChannelHub>,
     ) -> CoreResult<Self> {
         let declared_descriptors = declared_descriptors_for_components(&components);
+        components
+            .clock
+            .bind_declared_channels(&declared_descriptors)?;
         let source_id = components.source_id;
         if source_id.as_str().trim().is_empty() {
             return Err(CoreError::InvalidConfig(
@@ -2368,17 +2373,38 @@ impl CoreWorkspace {
         self.sync_groups.get_group_state(group_id)
     }
 
+    fn direct_channel_clock_sources(&self) -> HashSet<SourceId> {
+        let arcs: Vec<_> = self.sources.read().values().cloned().collect();
+        let mut set = HashSet::new();
+        for arc in arcs {
+            let sess = arc.lock();
+            if matches!(
+                sess.clock_mode(),
+                ClockMode::ChannelCounter {
+                    drift_compensation: false,
+                    ..
+                }
+            ) {
+                set.insert(sess.source_id().clone());
+            }
+        }
+        set
+    }
+
     /// Evaluates trigger conditions (with M4 L2/L1 fast-forwarding), advances post-trigger windows,
     /// and acquires/refreshes [`PinnedGuard`] chunk locks across all registered scopes.
     ///
     /// Also enforces global chunk memory quota so unpinned roll-over never stalls.
     pub fn tick_scopes(&self, now_ns: TimestampNs) -> Vec<ScopeSummary> {
         let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
+        let direct_sources = self.direct_channel_clock_sources();
         let mut scopes = self.scopes.lock();
         let mut summaries = Vec::with_capacity(scopes.len());
 
         for scope in scopes.values_mut() {
-            step_managed_scope(&self.hub, scope, effective_now_ns);
+            let use_channel_head =
+                scope_uses_channel_clock_head(&self.hub, scope, &direct_sources);
+            step_managed_scope(&self.hub, scope, effective_now_ns, use_channel_head);
             summaries.push(scope.summary());
         }
         drop(scopes);
@@ -2397,11 +2423,14 @@ impl CoreWorkspace {
         f: impl FnOnce(&[u8]) -> R,
     ) -> CoreResult<R> {
         let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
+        let direct_sources = self.direct_channel_clock_sources();
         let payloads = {
             let mut scopes = self.scopes.lock();
             let mut list = Vec::with_capacity(scopes.len());
             for scope in scopes.values_mut() {
-                step_managed_scope(&self.hub, scope, effective_now_ns);
+                let use_channel_head =
+                    scope_uses_channel_clock_head(&self.hub, scope, &direct_sources);
+                step_managed_scope(&self.hub, scope, effective_now_ns, use_channel_head);
                 if let Some(vp) = extract_scope_viewport(&self.hub, scope, effective_now_ns) {
                     list.push(vp);
                 }
@@ -2574,12 +2603,40 @@ fn pin_scope_range(
     }
 }
 
-fn step_managed_scope(hub: &ChannelHub, scope: &mut ManagedScope, now_ns: TimestampNs) {
+fn scope_uses_channel_clock_head(
+    hub: &ChannelHub,
+    scope: &ManagedScope,
+    direct_sources: &HashSet<SourceId>,
+) -> bool {
+    if direct_sources.is_empty() || scope.config.tracks.is_empty() {
+        return false;
+    }
+    for track in &scope.config.tracks {
+        let Some(entry) = hub.get(track.channel_id) else {
+            return false;
+        };
+        if !direct_sources.contains(entry.source_id()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn step_managed_scope(
+    hub: &ChannelHub,
+    scope: &mut ManagedScope,
+    now_ns: TimestampNs,
+    use_channel_clock_head: bool,
+) {
     let sweep_mode = scope.controller.config().sweep_mode;
     let channel_max_ts = scope_max_channel_timestamp(hub, scope);
 
     if sweep_mode == TriggerSweepMode::Roll {
-        let roll_now = channel_max_ts.map_or(now_ns, |ts| ts.max(now_ns));
+        let roll_now = if use_channel_clock_head {
+            channel_max_ts.unwrap_or(now_ns)
+        } else {
+            channel_max_ts.map_or(now_ns, |ts| ts.max(now_ns))
+        };
         scope.controller.step(roll_now);
         return;
     }
@@ -2655,7 +2712,11 @@ fn step_managed_scope(hub: &ChannelHub, scope: &mut ManagedScope, now_ns: Timest
         scope.controller.current_state(),
         TriggerRuntimeState::Armed | TriggerRuntimeState::AutoFreerun
     ) {
-        let auto_now = channel_max_ts.map_or(now_ns, |ts| ts.max(now_ns));
+        let auto_now = if use_channel_clock_head {
+            channel_max_ts.unwrap_or(now_ns)
+        } else {
+            channel_max_ts.map_or(now_ns, |ts| ts.max(now_ns))
+        };
         if matches!(
             scope.controller.step(auto_now),
             ScopeStepOutcome::AutoFreerunFired { .. }
@@ -3501,5 +3562,90 @@ mod tests {
         assert!(receipt.accepted);
 
         ws.shutdown().await.expect("shutdown workspace");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_counter_clock_sync_e2e_unwraps_rollover_and_validates_sync_channel() {
+        let ws = CoreWorkspace::new(tokio::runtime::Handle::current());
+        let src_id = SourceId::new("fw_sync");
+
+        // Prepare raw FireWater capture whose 2nd column (`cnt`) wraps twice: 9998 -> 9999 -> 0 -> 1
+        // and also test mid-range custom modulus rollover.
+        let temp_path = std::env::temp_dir().join(format!(
+            "ddscope_channel_counter_sync_{}.bin",
+            std::process::id()
+        ));
+        let raw_payload = "1.0,9998\n2.0,9999\n3.0,0\n4.0,1\n5.0,3\n";
+        std::fs::write(&temp_path, raw_payload.as_bytes()).expect("write capture file");
+
+        let mut replay_cfg = RawFileReplayConfig::offline(temp_path.clone());
+        replay_cfg.loop_playback = false;
+
+        // 1. Missing sync channel must fail validation cleanly on create_source.
+        let bad_sync_cfg = SourceConfig::new(
+            src_id.clone(),
+            SourceTransportConfig::RawFileReplay(replay_cfg.clone()),
+            ClockMode::ChannelCounter {
+                channel: "nonexistent".to_string(),
+                ns_per_count: 1_000.0,
+                rollover_modulus: Some(10_000.0),
+                drift_compensation: false,
+            },
+            SourceProtocolConfig::FireWater(FireWaterConfig::from_channel_names(
+                src_id.as_str(),
+                vec!["val".to_string(), "cnt".to_string()],
+            )),
+        );
+        let bad_res = ws.create_source(bad_sync_cfg);
+        assert!(matches!(bad_res, Err(CoreError::InvalidConfig(_))));
+        assert!(ws.list_sources().is_empty());
+
+        // 2. Valid ChannelCounter (cnt column, 50_000 ns/count, custom Mod 10_000) unwraps seamlessly.
+        let valid_cfg = SourceConfig::new(
+            src_id.clone(),
+            SourceTransportConfig::RawFileReplay(replay_cfg),
+            ClockMode::ChannelCounter {
+                channel: "cnt".to_string(),
+                ns_per_count: 50_000.0,
+                rollover_modulus: Some(10_000.0),
+                drift_compensation: false,
+            },
+            SourceProtocolConfig::FireWater(FireWaterConfig::from_channel_names(
+                src_id.as_str(),
+                vec!["val".to_string(), "cnt".to_string()],
+            )),
+        )
+        .with_auto_start(true);
+        ws.create_source(valid_cfg).expect("create fw_sync");
+
+        ws.wait_for_source_completion(&src_id, Duration::from_secs(2))
+            .await
+            .expect("wait for offline replay completion");
+
+        // Wait briefly for worker loop to flush final decoded rows into ChannelHub.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let captured_ts: Vec<TimestampNs> = loop {
+            if let Some(entry) = ws.hub().get_by_path_str("fw_sync/val") {
+                if let Some(ts) = entry.with_scalar_read(|s| s.active_chunk().timestamps().to_vec()) {
+                    if ts.len() >= 5 {
+                        break ts;
+                    }
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for FireWater samples in hub"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+
+        assert_eq!(captured_ts.len(), 5);
+        // Counts: 9998 -> 9999 (+1) -> 0 (+1) -> 1 (+1) -> 3 (+2) at 50_000 ns/count
+        let t0 = captured_ts[0];
+        let deltas: Vec<u64> = captured_ts.iter().map(|t| t - t0).collect();
+        assert_eq!(deltas, vec![0, 50_000, 100_000, 150_000, 250_000]);
+
+        ws.shutdown().await.expect("shutdown workspace");
+        let _ = std::fs::remove_file(&temp_path);
     }
 }

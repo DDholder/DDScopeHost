@@ -374,6 +374,25 @@ export class MockSimulationCore {
     return [...this.runBoundariesNs];
   }
 
+  private describeScalarSyncCandidates(req: CreateSourceRequestDto_Deserialize): string[] {
+    if (req.protocol.codec === "just_float" || req.protocol.codec === "fire_water") {
+      return req.protocol.channel_names.length > 0
+        ? req.protocol.channel_names
+        : ["ch0", "ch1", "ch2"];
+    }
+    if (req.protocol.codec === "fixed_schema_binary") {
+      return req.protocol.fields
+        .filter((f) => !f.is_state_enum && f.scalar_type !== "bool")
+        .map((f) => f.name);
+    }
+    const analogCount =
+      req.transport.kind === "sim" ? clamp(req.transport.analog_channels, 1, 16) : 4;
+    if (req.source_id === "sim0" && analogCount === 4) {
+      return ["ia", "ib", "ic", "v_bus"];
+    }
+    return Array.from({ length: analogCount }, (_, i) => `ch${i}`);
+  }
+
   private validateSourceRequest(req: CreateSourceRequestDto_Deserialize): void {
     if (!req.source_id.trim()) {
       throw new Error("source_id must not be empty");
@@ -386,6 +405,37 @@ export class MockSimulationCore {
         if (!isValidUdpSocketAddr(req.transport.remote_tx_addr)) {
           throw new Error(`invalid UDP remote_tx_addr '${req.transport.remote_tx_addr}'`);
         }
+      }
+    }
+    if (req.clock.mode === "channel_counter") {
+      const trimmedCh = req.clock.channel.trim();
+      if (!trimmedCh) {
+        throw new Error("ChannelCounter sync channel must not be empty");
+      }
+      if (
+        req.clock.ns_per_count == null ||
+        !Number.isFinite(req.clock.ns_per_count) ||
+        req.clock.ns_per_count <= 0
+      ) {
+        throw new Error("ChannelCounter ns_per_count must be finite and > 0");
+      }
+      if (
+        req.clock.rollover_modulus != null &&
+        (!Number.isFinite(req.clock.rollover_modulus) || req.clock.rollover_modulus <= 0)
+      ) {
+        throw new Error("ChannelCounter rollover_modulus must be finite and > 0");
+      }
+      const candidates = this.describeScalarSyncCandidates(req);
+      const slashIdx = trimmedCh.indexOf("/");
+      const bare = slashIdx >= 0 ? trimmedCh.slice(slashIdx + 1).trim() : trimmedCh;
+      const lower = bare.toLowerCase();
+      const matched =
+        candidates.some((c) => c === bare || c.toLowerCase() === lower) ||
+        (/^#\d+$/.test(bare) && Number(bare.slice(1)) < candidates.length);
+      if (!matched) {
+        throw new Error(
+          `ChannelCounter sync channel '${trimmedCh}' does not match any numeric channel (${candidates.join(", ")})`,
+        );
       }
     }
   }
@@ -481,6 +531,13 @@ export class MockSimulationCore {
     }
     if (req.clock.mode === "tier1_hardware_counter" && req.clock.tick_hz) {
       return req.clock.tick_hz;
+    }
+    if (
+      req.clock.mode === "channel_counter" &&
+      req.clock.ns_per_count &&
+      req.clock.ns_per_count > 0
+    ) {
+      return clamp(Math.round(1e9 / req.clock.ns_per_count), 1, 10_000_000);
     }
     return 250_000;
   }

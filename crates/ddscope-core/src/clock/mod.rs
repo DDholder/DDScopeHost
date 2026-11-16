@@ -1,17 +1,23 @@
 //! Three-tier hybrid clock synchronization and second-order software PLL contracts.
 
+pub mod channel_sync;
 pub mod tier1;
 pub mod tier2;
 
+pub use channel_sync::ChannelCounterUnwrapper;
 pub use tier1::{CounterUnwrapper, LinearDriftTracker, DRIFT_SLOPE_MAX, DRIFT_SLOPE_MIN};
 pub use tier2::SecondOrderPll;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{CoreError, CoreResult, DecodedBatch, TimestampNs};
+use crate::types::{ChannelDescriptor, CoreError, CoreResult, DecodedBatch, TimestampNs};
+
+fn default_true() -> bool {
+    true
+}
 
 /// Clock reconstruction strategy configured per data source.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum ClockMode {
     /// Tier 1: Hardware counter embedded in protocol frames, anchored to `host_mono_ns`.
     Tier1HardwareCounter { tick_hz: f64, counter_bits: u8 },
@@ -20,6 +26,14 @@ pub enum ClockMode {
     /// Tier 3: Direct monotonic host arrival timestamps for asynchronous events.
     #[default]
     Tier3HostArrival,
+    /// Channel-value counter synchronization using a designated scalar channel with rollover awareness.
+    ChannelCounter {
+        channel: String,
+        ns_per_count: f64,
+        rollover_modulus: Option<f64>,
+        #[serde(default = "default_true")]
+        drift_compensation: bool,
+    },
 }
 
 /// Tunable parameters for [`StreamClockSynchronizer`].
@@ -78,6 +92,7 @@ enum SyncEngine {
     Tier1(tier1::Tier1State),
     Tier2(SecondOrderPll),
     Tier3 { last_emitted_ns: Option<TimestampNs> },
+    ChannelCounter(channel_sync::ChannelSyncState),
 }
 
 /// Three-tier hybrid clock synchronizer assigning strictly monotonic nanosecond timestamps
@@ -98,7 +113,7 @@ impl StreamClockSynchronizer {
 
     /// Creates a synchronizer for `mode` with explicit `config` parameters.
     pub fn with_config(mode: ClockMode, config: ClockSyncConfig) -> CoreResult<Self> {
-        let engine = match mode {
+        let engine = match &mode {
             ClockMode::Tier1HardwareCounter {
                 tick_hz,
                 counter_bits,
@@ -109,8 +124,8 @@ impl StreamClockSynchronizer {
                     ));
                 }
                 SyncEngine::Tier1(tier1::Tier1State::new(
-                    tick_hz,
-                    counter_bits,
+                    *tick_hz,
+                    *counter_bits,
                     config.drift_window_size,
                     config.drift_ewma_alpha,
                     config.gap_reset_ns,
@@ -119,7 +134,7 @@ impl StreamClockSynchronizer {
             ClockMode::Tier2SoftwarePll {
                 nominal_sample_rate_hz,
             } => SyncEngine::Tier2(SecondOrderPll::new(
-                nominal_sample_rate_hz,
+                *nominal_sample_rate_hz,
                 config.pll_kp,
                 config.pll_ki,
                 config.pll_max_freq_deviation_ratio,
@@ -129,6 +144,20 @@ impl StreamClockSynchronizer {
             ClockMode::Tier3HostArrival => SyncEngine::Tier3 {
                 last_emitted_ns: None,
             },
+            ClockMode::ChannelCounter {
+                channel,
+                ns_per_count,
+                rollover_modulus,
+                drift_compensation,
+            } => SyncEngine::ChannelCounter(channel_sync::ChannelSyncState::new(
+                channel.clone(),
+                *ns_per_count,
+                *rollover_modulus,
+                *drift_compensation,
+                config.drift_window_size,
+                config.drift_ewma_alpha,
+                config.gap_reset_ns,
+            )?),
         };
 
         Ok(Self {
@@ -139,12 +168,44 @@ impl StreamClockSynchronizer {
         })
     }
 
+    /// Binds [`ClockMode::ChannelCounter`] against the protocol's declared channel descriptors.
+    ///
+    /// No-op (`Ok(())`) for other clock modes.
+    pub fn bind_declared_channels(&mut self, descs: &[ChannelDescriptor]) -> CoreResult<()> {
+        if let SyncEngine::ChannelCounter(state) = &mut self.engine {
+            state.bind_declared_channels(descs)?;
+        }
+        Ok(())
+    }
+
+    /// Binds [`ClockMode::ChannelCounter`] directly to column index `col_idx` in [`DecodedBatch`].
+    pub fn bind_channel_index(&mut self, col_idx: usize) {
+        if let SyncEngine::ChannelCounter(state) = &mut self.engine {
+            state.bind_channel_index(col_idx);
+        }
+    }
+
     fn last_emitted_ns(&self) -> Option<TimestampNs> {
         match &self.engine {
             SyncEngine::Tier1(state) => state.last_emitted_ns(),
             SyncEngine::Tier2(pll) => pll.last_emitted_ns(),
             SyncEngine::Tier3 { last_emitted_ns } => *last_emitted_ns,
+            SyncEngine::ChannelCounter(state) => state.last_emitted_ns(),
         }
+    }
+
+    fn compute_effective_recv_ns(&mut self, pkt_recv_ns: TimestampNs) -> TimestampNs {
+        if self.reanchor_pending {
+            self.reanchor_pending = false;
+            if let Some(floor) = self.last_emitted_ns() {
+                if pkt_recv_ns <= floor {
+                    self.recv_offset_ns = floor.saturating_add(1).saturating_sub(pkt_recv_ns);
+                } else {
+                    self.recv_offset_ns = 0;
+                }
+            }
+        }
+        pkt_recv_ns.saturating_add(self.recv_offset_ns)
     }
 
     /// Assigns `count` strictly non-regressing nanosecond timestamps into `out_ns[..count]`.
@@ -165,17 +226,7 @@ impl StreamClockSynchronizer {
             return Ok(());
         }
 
-        if self.reanchor_pending {
-            self.reanchor_pending = false;
-            if let Some(floor) = self.last_emitted_ns() {
-                if pkt_recv_ns <= floor {
-                    self.recv_offset_ns = floor.saturating_add(1).saturating_sub(pkt_recv_ns);
-                } else {
-                    self.recv_offset_ns = 0;
-                }
-            }
-        }
-        let effective_recv_ns = pkt_recv_ns.saturating_add(self.recv_offset_ns);
+        let effective_recv_ns = self.compute_effective_recv_ns(pkt_recv_ns);
 
         match &mut self.engine {
             SyncEngine::Tier1(state) => {
@@ -192,6 +243,15 @@ impl StreamClockSynchronizer {
                 *last_emitted_ns = Some(ts);
                 Ok(())
             }
+            SyncEngine::ChannelCounter(state) => {
+                let values = hw_ticks.ok_or_else(|| {
+                    CoreError::Clock(
+                        "ChannelCounter requires populate_batch_timestamps or explicit hw_ticks slice"
+                            .to_owned(),
+                    )
+                })?;
+                state.assign_raw_slice(effective_recv_ns, values, count, out_ns)
+            }
         }
     }
 
@@ -200,6 +260,17 @@ impl StreamClockSynchronizer {
         let count = batch.sample_rows;
         if count == 0 {
             batch.timestamps_ns.clear();
+            return Ok(());
+        }
+
+        if matches!(self.engine, SyncEngine::ChannelCounter(_)) {
+            let effective_recv_ns = self.compute_effective_recv_ns(batch.packet_recv_ns);
+            if let SyncEngine::ChannelCounter(state) = &mut self.engine {
+                if let Err(err) = state.assign_batch(effective_recv_ns, batch) {
+                    batch.timestamps_ns.clear();
+                    return Err(err);
+                }
+            }
             return Ok(());
         }
 
@@ -230,6 +301,7 @@ impl StreamClockSynchronizer {
             SyncEngine::Tier1(state) => state.reset(),
             SyncEngine::Tier2(pll) => pll.reset(),
             SyncEngine::Tier3 { last_emitted_ns } => *last_emitted_ns = None,
+            SyncEngine::ChannelCounter(state) => state.reset(),
         }
     }
 
@@ -241,6 +313,7 @@ impl StreamClockSynchronizer {
             SyncEngine::Tier1(state) => state.reanchor_preserve_monotonic(),
             SyncEngine::Tier2(pll) => pll.reanchor_preserve_monotonic(),
             SyncEngine::Tier3 { .. } => {}
+            SyncEngine::ChannelCounter(state) => state.reanchor_preserve_monotonic(),
         }
     }
 
@@ -254,12 +327,13 @@ impl StreamClockSynchronizer {
             SyncEngine::Tier3 { last_emitted_ns } => {
                 *last_emitted_ns = Some(last_emitted_ns.map_or(floor_ns, |prev| prev.max(floor_ns)));
             }
+            SyncEngine::ChannelCounter(state) => state.seed_monotonic_floor(floor_ns),
         }
     }
 
     /// Returns the configured [`ClockMode`].
     pub fn mode(&self) -> ClockMode {
-        self.mode
+        self.mode.clone()
     }
 
     /// Returns a snapshot of clock synchronization diagnostics.
@@ -295,6 +369,17 @@ impl StreamClockSynchronizer {
                 gap_resets: 0,
                 locked: last_emitted_ns.is_some(),
             },
+            SyncEngine::ChannelCounter(state) => {
+                let dt = state.estimated_dt_ns();
+                ClockSyncDiagnostics {
+                    estimated_dt_ns: dt,
+                    estimated_rate_hz: if dt > 0.0 { 1e9 / dt } else { 0.0 },
+                    drift_slope: state.drift_slope(),
+                    phase_error_ns: state.phase_error_ns(),
+                    gap_resets: state.gap_resets(),
+                    locked: state.locked(),
+                }
+            }
         }
     }
 }

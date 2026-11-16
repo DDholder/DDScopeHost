@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type {
   ClockConfigDto_Deserialize,
   CreateSourceRequestDto_Deserialize,
@@ -15,6 +15,7 @@ import {
   formatUdpRemoteTxAddr,
   parseUdpRemoteTxAddr,
 } from "../bridge/index.ts";
+import { formatFrequencyHz } from "../scope-engine/time-format.ts";
 import { synthesizeFallbackSourceConfig } from "./config-io.ts";
 import { useWorkspaceStore } from "./store.ts";
 import { useI18n } from "./use-i18n.ts";
@@ -30,7 +31,32 @@ type WizardTransportKind =
 type WizardClockMode =
   | "tier1_hardware_counter"
   | "tier2_software_pll"
-  | "tier3_host_arrival";
+  | "tier3_host_arrival"
+  | "channel_counter";
+
+type RolloverPreset =
+  | "auto"
+  | "256"
+  | "65536"
+  | "16777216"
+  | "4294967296"
+  | "custom";
+
+function rolloverModulusToPreset(mod: number | null | undefined): RolloverPreset {
+  if (mod == null) return "auto";
+  switch (mod) {
+    case 256:
+      return "256";
+    case 65536:
+      return "65536";
+    case 16777216:
+      return "16777216";
+    case 4294967296:
+      return "4294967296";
+    default:
+      return "custom";
+  }
+}
 
 type WizardProtocolCodec =
   | "sim_preset"
@@ -85,6 +111,11 @@ export function SourceWizardModal() {
   const [pllAutoEstimate, setPllAutoEstimate] = useState(false);
   const [nominalRateHz, setNominalRateHz] = useState(500_000);
   const [hwTickHz, setHwTickHz] = useState(1_000_000);
+  const [syncChannel, setSyncChannel] = useState("iq");
+  const [nsPerCount, setNsPerCount] = useState(1_000);
+  const [rolloverPreset, setRolloverPreset] = useState<RolloverPreset>("auto");
+  const [customRolloverModulus, setCustomRolloverModulus] = useState(10_000);
+  const [syncDriftComp, setSyncDriftComp] = useState(true);
   const [channelNamesText, setChannelNamesText] = useState("va, vb, vc, iq");
 
   const [submitting, setSubmitting] = useState(false);
@@ -173,6 +204,19 @@ export function SourceWizardModal() {
             break;
           case "tier3_host_arrival":
             break;
+          case "channel_counter": {
+            const rawCh = existingCfg.clock.channel.trim();
+            const slash = rawCh.indexOf("/");
+            setSyncChannel(slash >= 0 ? rawCh.slice(slash + 1).trim() : rawCh);
+            setNsPerCount(existingCfg.clock.ns_per_count ?? 1_000);
+            const preset = rolloverModulusToPreset(existingCfg.clock.rollover_modulus);
+            setRolloverPreset(preset);
+            if (preset === "custom" && existingCfg.clock.rollover_modulus != null) {
+              setCustomRolloverModulus(existingCfg.clock.rollover_modulus);
+            }
+            setSyncDriftComp(existingCfg.clock.drift_compensation ?? true);
+            break;
+          }
         }
 
         setProtocolCodec(existingCfg.protocol.codec);
@@ -209,6 +253,11 @@ export function SourceWizardModal() {
       setPllAutoEstimate(false);
       setNominalRateHz(500_000);
       setHwTickHz(1_000_000);
+      setSyncChannel("iq");
+      setNsPerCount(1_000);
+      setRolloverPreset("auto");
+      setCustomRolloverModulus(10_000);
+      setSyncDriftComp(true);
       setChannelNamesText("va, vb, vc, iq");
     }
 
@@ -222,6 +271,58 @@ export function SourceWizardModal() {
       })
       .catch(() => {});
   }, [open, editingSourceId, channelGroups, sourceConfigsById, t]);
+
+  const availableSyncChannels = useMemo<string[]>(() => {
+    if (protocolCodec === "just_float" || protocolCodec === "fire_water") {
+      const parsed = channelNamesText
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      return parsed.length > 0 ? parsed : ["ch0", "ch1"];
+    }
+    if (protocolCodec === "fixed_schema_binary") {
+      const baseProtocol = baseConfigRef.current?.protocol;
+      if (baseProtocol?.codec === "fixed_schema_binary") {
+        return baseProtocol.fields
+          .filter((f) => !f.is_state_enum && f.scalar_type !== "bool")
+          .map((f) => f.name);
+      }
+      return ["v_out", "i_out"];
+    }
+    const existingGroup =
+      editingSourceId !== null
+        ? channelGroups.find((g) => g.source.source_id === editingSourceId)
+        : undefined;
+    if (existingGroup) {
+      const scalarPaths = existingGroup.channels
+        .filter((c) => c.modality === "scalar")
+        .map((c) => c.local_path);
+      if (scalarPaths.length === Math.max(1, Math.min(16, simChannels))) {
+        return scalarPaths;
+      }
+    }
+    const count = Math.max(1, Math.min(16, simChannels));
+    if (sourceId.trim() === "sim0" && count === 4) {
+      return ["ia", "ib", "ic", "v_bus"];
+    }
+    return Array.from({ length: count }, (_, i) => `ch${i}`);
+  }, [
+    protocolCodec,
+    channelNamesText,
+    editingSourceId,
+    channelGroups,
+    simChannels,
+    sourceId,
+  ]);
+
+  useEffect(() => {
+    if (
+      availableSyncChannels.length > 0 &&
+      !availableSyncChannels.includes(syncChannel)
+    ) {
+      setSyncChannel(availableSyncChannels[availableSyncChannels.length - 1]);
+    }
+  }, [availableSyncChannels, syncChannel]);
 
   if (!open) return null;
 
@@ -343,6 +444,35 @@ export function SourceWizardModal() {
       case "tier3_host_arrival":
         clock = { mode: "tier3_host_arrival" };
         break;
+      case "channel_counter": {
+        const targetCh = (syncChannel || availableSyncChannels[0] || "").trim();
+        if (!targetCh) {
+          setErrorMsg(t("wizard.errSyncChannel"));
+          return;
+        }
+        if (!Number.isFinite(nsPerCount) || nsPerCount <= 0) {
+          setErrorMsg(t("wizard.errNsPerCount"));
+          return;
+        }
+        let rolloverModulus: number | null = null;
+        if (rolloverPreset === "custom") {
+          if (!Number.isFinite(customRolloverModulus) || customRolloverModulus <= 0) {
+            setErrorMsg(t("wizard.errRolloverModulus"));
+            return;
+          }
+          rolloverModulus = customRolloverModulus;
+        } else if (rolloverPreset !== "auto") {
+          rolloverModulus = Number(rolloverPreset);
+        }
+        clock = {
+          mode: "channel_counter",
+          channel: targetCh,
+          ns_per_count: nsPerCount,
+          rollover_modulus: rolloverModulus,
+          drift_compensation: syncDriftComp,
+        };
+        break;
+      }
     }
 
     const parsedNames = channelNamesText
@@ -467,10 +597,12 @@ export function SourceWizardModal() {
               <select
                 value={clockMode}
                 onChange={(e) => setClockMode(e.target.value as WizardClockMode)}
+                data-testid="wizard-clock-mode"
               >
                 <option value="tier2_software_pll">{t("wizard.clock.tier2")}</option>
                 <option value="tier1_hardware_counter">{t("wizard.clock.tier1")}</option>
                 <option value="tier3_host_arrival">{t("wizard.clock.tier3")}</option>
+                <option value="channel_counter">{t("wizard.clock.channelCounter")}</option>
               </select>
             </label>
           </div>
@@ -689,7 +821,82 @@ export function SourceWizardModal() {
                 />
               </label>
             )}
+
+            {clockMode === "channel_counter" && (
+              <label className="wizard-field">
+                <span>{t("wizard.syncChannel")}</span>
+                <select
+                  value={syncChannel}
+                  onChange={(e) => setSyncChannel(e.target.value)}
+                  data-testid="wizard-sync-channel"
+                >
+                  {availableSyncChannels.map((ch) => (
+                    <option key={ch} value={ch}>
+                      {ch}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
+
+          {clockMode === "channel_counter" && (
+            <div className="wizard-grid">
+              <label className="wizard-field">
+                <span>
+                  {t("wizard.nsPerCount")}
+                  {Number.isFinite(nsPerCount) && nsPerCount > 0
+                    ? ` (≈ ${formatFrequencyHz(1e9 / nsPerCount)})`
+                    : ""}
+                </span>
+                <input
+                  type="number"
+                  min={0.001}
+                  step="any"
+                  value={nsPerCount}
+                  onChange={(e) => setNsPerCount(Number(e.target.value))}
+                  data-testid="wizard-ns-per-count"
+                />
+              </label>
+              <label className="wizard-field">
+                <span>{t("wizard.rolloverMode")}</span>
+                <select
+                  value={rolloverPreset}
+                  onChange={(e) => setRolloverPreset(e.target.value as RolloverPreset)}
+                  data-testid="wizard-rollover-mode"
+                >
+                  <option value="auto">{t("wizard.rollover.auto")}</option>
+                  <option value="256">{t("wizard.rollover.u8")}</option>
+                  <option value="65536">{t("wizard.rollover.u16")}</option>
+                  <option value="16777216">{t("wizard.rollover.u24")}</option>
+                  <option value="4294967296">{t("wizard.rollover.u32")}</option>
+                  <option value="custom">{t("wizard.rollover.custom")}</option>
+                </select>
+              </label>
+              {rolloverPreset === "custom" && (
+                <label className="wizard-field">
+                  <span>{t("wizard.rolloverModulus")}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    step="any"
+                    value={customRolloverModulus}
+                    onChange={(e) => setCustomRolloverModulus(Number(e.target.value))}
+                    data-testid="wizard-rollover-modulus"
+                  />
+                </label>
+              )}
+              <label className="wizard-check">
+                <input
+                  type="checkbox"
+                  checked={syncDriftComp}
+                  onChange={(e) => setSyncDriftComp(e.target.checked)}
+                  data-testid="wizard-sync-drift"
+                />
+                <span>{t("wizard.syncDriftComp")}</span>
+              </label>
+            </div>
+          )}
 
           {(protocolCodec === "just_float" || protocolCodec === "fire_water") && (
             <label className="wizard-field">

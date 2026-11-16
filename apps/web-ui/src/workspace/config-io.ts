@@ -196,6 +196,7 @@ const VALID_CLOCK_MODES = new Set([
   "tier1_hardware_counter",
   "tier2_software_pll",
   "tier3_host_arrival",
+  "channel_counter",
 ]);
 
 const VALID_PROTOCOL_CODECS = new Set([
@@ -401,6 +402,28 @@ function validateAndNormalizeSourcesList(
           isRecord(item.clock) ? item.clock.mode : undefined,
         )}' is invalid.`,
       );
+    }
+    if (item.clock.mode === "channel_counter") {
+      if (typeof item.clock.channel !== "string" || item.clock.channel.trim().length === 0) {
+        throw new Error(`${fieldLabel}[${idx}].clock.channel must be a non-empty string.`);
+      }
+      if (
+        typeof item.clock.ns_per_count !== "number" ||
+        !Number.isFinite(item.clock.ns_per_count) ||
+        item.clock.ns_per_count <= 0
+      ) {
+        throw new Error(`${fieldLabel}[${idx}].clock.ns_per_count must be a finite number > 0.`);
+      }
+      if (
+        item.clock.rollover_modulus != null &&
+        (typeof item.clock.rollover_modulus !== "number" ||
+          !Number.isFinite(item.clock.rollover_modulus) ||
+          item.clock.rollover_modulus <= 0)
+      ) {
+        throw new Error(
+          `${fieldLabel}[${idx}].clock.rollover_modulus must be null or a finite number > 0.`,
+        );
+      }
     }
     if (!isRecord(item.protocol) || !VALID_PROTOCOL_CODECS.has(String(item.protocol.codec))) {
       throw new Error(

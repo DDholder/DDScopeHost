@@ -151,6 +151,10 @@ pub enum TransportConfigDto {
     },
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Per-source hybrid clock synchronization configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -158,6 +162,13 @@ pub enum ClockConfigDto {
     Tier1HardwareCounter { tick_hz: f64, counter_bits: u8 },
     Tier2SoftwarePll { nominal_sample_rate_hz: Option<f64> },
     Tier3HostArrival,
+    ChannelCounter {
+        channel: String,
+        ns_per_count: f64,
+        rollover_modulus: Option<f64>,
+        #[serde(default = "default_true")]
+        drift_compensation: bool,
+    },
 }
 
 /// Field specification used by `FixedSchemaBinary` protocol mode.
