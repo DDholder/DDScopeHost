@@ -13,6 +13,10 @@ export const commands = {
 	listSerialPorts: () => __TAURI_INVOKE<SerialPortInfoDto_Serialize[]>("list_serial_ports"),
 	/**  Registers a new physical or simulated data source. */
 	createSource: (config: CreateSourceRequestDto_Deserialize) => __TAURI_INVOKE<SourceSummaryDto_Serialize>("create_source", { config }),
+	/**  Validates and updates an existing physical or simulated data source configuration. */
+	updateSource: (sourceId: string, config: CreateSourceRequestDto_Deserialize) => __TAURI_INVOKE<SourceSummaryDto_Serialize>("update_source", { sourceId, config }),
+	/**  Returns workspace run-divider boundary timestamps in nanoseconds (`u64` represented as `f64`). */
+	getRunBoundaries: () => __TAURI_INVOKE<(number | null)[]>("get_run_boundaries"),
 	/**  Starts acquisition on an existing source. */
 	startSource: (sourceId: string) => __TAURI_INVOKE<SourceSummaryDto_Serialize>("start_source", { sourceId }),
 	/**  Stops acquisition on an active source without deleting its configuration. */

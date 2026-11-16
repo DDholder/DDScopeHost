@@ -43,6 +43,7 @@ export interface DashboardCanvasProps {
   commands: CommandDefinition[];
   scopes: Record<number, ScopeUiConfig>;
   focusedScopeId: number | null;
+  runBoundariesNs?: ReadonlyArray<number>;
   scopeCallbacks: ScopeCallbacks;
   locale: UiLocale;
   onFocusScope: (scopeId: number) => void;
@@ -149,6 +150,7 @@ export function DashboardCanvas({
   commands,
   scopes,
   focusedScopeId,
+  runBoundariesNs,
   scopeCallbacks,
   locale,
   onFocusScope,
@@ -519,6 +521,7 @@ export function DashboardCanvas({
               callbacks={scopeCallbacks}
               locale={locale}
               isFocused={focusedScopeId === scopeCfg.scopeId}
+              runBoundariesNs={runBoundariesNs}
               onFocusScope={onFocusScope}
               onCanvasWidthChanged={onCanvasWidthChanged}
             />

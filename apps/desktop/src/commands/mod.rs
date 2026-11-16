@@ -37,6 +37,26 @@ pub fn create_source(
     state.create_source(config)
 }
 
+/// Validates and updates an existing physical or simulated data source configuration.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_source(
+    state: tauri::State<'_, DesktopBridgeState>,
+    source_id: String,
+    config: CreateSourceRequestDto,
+) -> Result<SourceSummaryDto, ApiErrorDto> {
+    state.update_source(source_id, config).await
+}
+
+/// Returns workspace run-divider boundary timestamps in nanoseconds (`u64` represented as `f64`).
+#[tauri::command]
+#[specta::specta]
+pub fn get_run_boundaries(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<Vec<f64>, ApiErrorDto> {
+    state.get_run_boundaries()
+}
+
 /// Starts acquisition on an existing source.
 #[tauri::command]
 #[specta::specta]

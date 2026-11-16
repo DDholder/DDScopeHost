@@ -13,18 +13,31 @@ import type { RibbonLabelPlacement } from "./geometry.ts";
 import {
   DEFAULT_Y_AXIS_CONFIG,
   channelValueToY,
+  yToAnalogValue,
+  yToChannelValue,
   type MsoLayout,
   type Rect,
   type ScopeTrackRenderConfig,
   type ScopeYAxisConfig,
 } from "./layout.ts";
 import {
+  formatCursorTimeNs,
   formatFrequencyHz,
   formatMetricValue,
   formatTimeNs,
   formatTimePerDiv,
   rgbaNumberToCss,
 } from "./time-format.ts";
+
+export interface ScopeRunBoundaryOverlay {
+  xNorm: number;
+  runNumber: number;
+}
+
+export type EvaluatedTrackSample =
+  | { kind: "analog"; value: number }
+  | { kind: "digital"; level: 0 | 1 }
+  | { kind: "state"; stateId: number; label: string; colorRgba: number | null };
 
 export interface ScopeHudState {
   locale?: UiLocale;
@@ -48,6 +61,8 @@ export interface ScopeHudState {
   p99FrameMs: number;
   hoverHandle: HudHitTarget;
   draggingHandle: HudHitTarget;
+  pointerHover?: { cssX: number; cssY: number } | null;
+  runBoundaries?: ReadonlyArray<ScopeRunBoundaryOverlay>;
 }
 
 export type HudHitTarget =
@@ -64,41 +79,160 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
-export function evaluateTrackValueAtNorm(
+export function evaluateTrackSampleAtNorm(
   block: DdsfTrackBlockView | undefined,
   xNorm: number,
-): number | null {
-  if (!block || block.elementCount === 0) return null;
+  track?: ScopeTrackRenderConfig,
+  subpixelShiftNorm = 0,
+): EvaluatedTrackSample | null {
+  if (!block) return null;
   const clampedX = clamp(xNorm, 0, 1);
 
   if (block.payload.kind === DdsfBlockKind.AnalogRawXY) {
     const pts = block.payload.points;
     const n = block.elementCount;
-    if (n === 1) return pts[1];
-    for (let i = 1; i < n; i += 1) {
-      const x0 = pts[(i - 1) * 2];
-      const x1 = pts[i * 2];
-      if (clampedX <= x1 || i === n - 1) {
-        const y0 = pts[(i - 1) * 2 + 1];
-        const y1 = pts[i * 2 + 1];
-        const span = x1 - x0;
-        if (Math.abs(span) < 1e-9) return y1;
-        const frac = clamp((clampedX - x0) / span, 0, 1);
-        return y0 + frac * (y1 - y0);
+    if (n <= 0) return null;
+    const xAt = (i: number): number => pts[i * 2] + subpixelShiftNorm;
+    if (n === 1) {
+      return Math.abs(clampedX - xAt(0)) <= 0.015
+        ? { kind: "analog", value: pts[1] }
+        : null;
+    }
+
+    const xFirst = xAt(0);
+    const xLast = xAt(n - 1);
+    const edgeTol = 0.015;
+    if (clampedX < xFirst - edgeTol || clampedX > xLast + edgeTol) {
+      return null;
+    }
+    if (clampedX <= xFirst) {
+      return { kind: "analog", value: pts[1] };
+    }
+    if (clampedX >= xLast) {
+      return { kind: "analog", value: pts[(n - 1) * 2 + 1] };
+    }
+
+    let lo = 0;
+    let hi = n - 1;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (xAt(mid) <= clampedX) {
+        lo = mid;
+      } else {
+        hi = mid;
       }
     }
-    return pts[(n - 1) * 2 + 1];
+    const x0 = xAt(lo);
+    const x1 = xAt(hi);
+    const y0 = pts[lo * 2 + 1];
+    const y1 = pts[hi * 2 + 1];
+    const span = x1 - x0;
+    if (Math.abs(span) < 1e-9) {
+      return { kind: "analog", value: y1 };
+    }
+    const frac = clamp((clampedX - x0) / span, 0, 1);
+    return { kind: "analog", value: y0 + frac * (y1 - y0) };
   }
 
   if (block.payload.kind === DdsfBlockKind.AnalogM4Column) {
     const cols = block.payload.columns;
     const n = block.elementCount;
-    const idx = clamp(Math.round(clampedX * (n - 1)), 0, n - 1);
+    if (n <= 0) return null;
+    const xAt = (i: number): number => cols[i * DDSF_M4_COLUMN_FLOATS] + subpixelShiftNorm;
+    if (n === 1) {
+      if (Math.abs(clampedX - xAt(0)) > 0.015) return null;
+      return { kind: "analog", value: (cols[1] + cols[4]) * 0.5 };
+    }
+
+    const xFirst = xAt(0);
+    const xLast = xAt(n - 1);
+    const colStep = Math.abs(xLast - xFirst) / (n - 1);
+    const edgeTol = Math.min(0.015, Math.max(0.005, colStep * 1.5));
+    if (clampedX < xFirst - edgeTol || clampedX > xLast + edgeTol) {
+      return null;
+    }
+
+    let idx: number;
+    if (clampedX <= xFirst) {
+      idx = 0;
+    } else if (clampedX >= xLast) {
+      idx = n - 1;
+    } else {
+      let lo = 0;
+      let hi = n - 1;
+      while (lo + 1 < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (xAt(mid) <= clampedX) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      idx = Math.abs(clampedX - xAt(lo)) <= Math.abs(xAt(hi) - clampedX) ? lo : hi;
+    }
     const base = idx * DDSF_M4_COLUMN_FLOATS;
-    return (cols[base + 1] + cols[base + 4]) * 0.5;
+    return { kind: "analog", value: (cols[base + 1] + cols[base + 4]) * 0.5 };
+  }
+
+  if (block.payload.kind === DdsfBlockKind.DigitalEdges) {
+    const edges = block.payload.edges;
+    let lo = 0;
+    let hi = edges.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (edges[mid] + subpixelShiftNorm <= clampedX) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    const level: 0 | 1 =
+      lo % 2 === 0 ? block.payload.initLevel : block.payload.initLevel === 1 ? 0 : 1;
+    return { kind: "digital", level };
+  }
+
+  if (block.payload.kind === DdsfBlockKind.StateRibbons) {
+    const n = block.elementCount;
+    if (n <= 0) return null;
+    const floats = block.payload.floats;
+    const stateIds = block.payload.stateIds;
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (floats[mid * 4 + 1] + subpixelShiftNorm < clampedX - 1e-6) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    if (lo < n) {
+      const x0 = floats[lo * 4] + subpixelShiftNorm;
+      const x1 = floats[lo * 4 + 1] + subpixelShiftNorm;
+      if (x1 > x0 && clampedX >= x0 - 1e-6 && clampedX <= x1 + 1e-6) {
+        const stateId = stateIds[lo * 4 + 2];
+        const meta = track?.stateLabels.find((lbl) => lbl.code === stateId);
+        return {
+          kind: "state",
+          stateId,
+          label: meta?.name ?? `S${stateId}`,
+          colorRgba: meta?.color_rgba ?? null,
+        };
+      }
+    }
+    return null;
   }
 
   return null;
+}
+
+export function evaluateTrackValueAtNorm(
+  block: DdsfTrackBlockView | undefined,
+  xNorm: number,
+  subpixelShiftNorm = 0,
+): number | null {
+  const sample = evaluateTrackSampleAtNorm(block, xNorm, undefined, subpixelShiftNorm);
+  return sample?.kind === "analog" ? sample.value : null;
 }
 
 function findAnalogLaneRect(
@@ -217,6 +351,44 @@ function fitTruncatedText(
     }
   }
   return lo > 0 ? text.slice(0, lo) + ellipsis : "";
+}
+
+function formatSampleText(
+  sample: EvaluatedTrackSample | null,
+  track: ScopeTrackRenderConfig,
+): string {
+  if (!sample) return "--";
+  switch (sample.kind) {
+    case "analog":
+      return formatMetricValue(sample.value, track.unit);
+    case "digital":
+      return sample.level === 1 ? "1" : "0";
+    case "state":
+      return sample.label;
+  }
+}
+
+function formatSampleDeltaText(
+  sampleA: EvaluatedTrackSample | null,
+  sampleB: EvaluatedTrackSample | null,
+  track: ScopeTrackRenderConfig,
+): string {
+  if (!sampleA || !sampleB || sampleA.kind !== sampleB.kind) return "--";
+  switch (sampleA.kind) {
+    case "analog":
+      return formatMetricValue(
+        (sampleB as { kind: "analog"; value: number }).value - sampleA.value,
+        track.unit,
+      );
+    case "digital": {
+      const lvlB = (sampleB as { kind: "digital"; level: 0 | 1 }).level;
+      return sampleA.level === lvlB ? "=" : `${sampleA.level}->${lvlB}`;
+    }
+    case "state": {
+      const b = sampleB as { kind: "state"; stateId: number; label: string };
+      return sampleA.stateId === b.stateId ? "=" : `${sampleA.label}->${b.label}`;
+    }
+  }
 }
 
 export function renderScopeHud(
@@ -348,6 +520,43 @@ export function renderScopeHud(
     ctx.fillText(text, centerX, lbl.yCenterCss);
   }
 
+  // 4.5 Acquisition Run Divider Vertical Lines & Badges
+  if (state.runBoundaries && state.runBoundaries.length > 0) {
+    ctx.font = '700 9px "JetBrains Mono", ui-monospace, monospace';
+    for (let i = 0; i < state.runBoundaries.length; i += 1) {
+      const boundary = state.runBoundaries[i];
+      if (boundary.xNorm < 0 || boundary.xNorm > 1) continue;
+      const bx = plotLeft + boundary.xNorm * plotWidth;
+
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = "rgba(52, 211, 153, 0.85)";
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.moveTo(bx, plotTop);
+      ctx.lineTo(bx, plotBottom);
+      ctx.stroke();
+      ctx.restore();
+
+      const tag = translate(locale, "hud.runDivider", { run: boundary.runNumber });
+      const pillW = Math.max(44, ctx.measureText(tag).width + 10);
+      const pillH = 14;
+      const pillX = clamp(bx - pillW * 0.5, plotLeft + 2, plotRight - pillW - 2);
+      const pillY = plotTop + 16;
+
+      ctx.fillStyle = "rgba(6, 78, 59, 0.92)";
+      ctx.fillRect(pillX, pillY, pillW, pillH);
+      ctx.strokeStyle = "#34d399";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(pillX, pillY, pillW, pillH);
+
+      ctx.fillStyle = "#a7f3d0";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(tag, pillX + pillW * 0.5, pillY + pillH * 0.5 + 0.5);
+    }
+  }
+
   // 5. Trigger Line, Hysteresis Band, and Pre-Trigger T0 Anchor
   if (state.sweepMode !== "roll") {
     const t0X = plotLeft + state.preTriggerRatio * plotWidth;
@@ -444,11 +653,26 @@ export function renderScopeHud(
     }
   }
 
-  // 6. Dual Measurement Cursors A / B & Floating Readout
+  // Shared block map and subpixel offset for cursor/hover evaluation
+  const subpixelShiftNorm =
+    state.scopeData && state.scopeData.winTSpanNs > 0
+      ? -state.scopeData.subpixelOffsetNs / state.scopeData.winTSpanNs
+      : 0;
+  const trackBlockById = new Map<number, DdsfTrackBlockView>();
+  if (state.scopeData) {
+    for (let i = 0; i < state.scopeData.tracks.length; i += 1) {
+      const blk = state.scopeData.tracks[i];
+      trackBlockById.set(blk.channelId, blk);
+    }
+  }
+  const visibleTracks = state.tracks.filter((tr) => tr.visible);
+
+  // 6. Dual Measurement Cursors A / B & Multi-Track Floating Readout
   if (state.cursorsEnabled) {
-    const xA = plotLeft + clamp(state.cursorARatio, 0, 1) * plotWidth;
-    const xB = plotLeft + clamp(state.cursorBRatio, 0, 1) * plotWidth;
-    const activeLane = findAnalogLaneRect(layout, state.activeAnalogChannelId);
+    const ratioA = clamp(state.cursorARatio, 0, 1);
+    const ratioB = clamp(state.cursorBRatio, 0, 1);
+    const xA = plotLeft + ratioA * plotWidth;
+    const xB = plotLeft + ratioB * plotWidth;
 
     const drawCursorLine = (x: number, tag: string, color: string, active: boolean) => {
       ctx.save();
@@ -466,6 +690,7 @@ export function renderScopeHud(
       ctx.font = '700 9px "JetBrains Mono", monospace';
       ctx.fillStyle = "#040911";
       ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.fillText(tag, x, plotTop + 6.5);
     };
 
@@ -482,80 +707,293 @@ export function renderScopeHud(
       state.hoverHandle === "cursorB" || state.draggingHandle === "cursorB",
     );
 
-    const tA = (state.cursorARatio - zeroRatio) * state.timeSpanNs + state.panOffsetNs;
-    const tB = (state.cursorBRatio - zeroRatio) * state.timeSpanNs + state.panOffsetNs;
+    const tA = (ratioA - zeroRatio) * state.timeSpanNs + state.panOffsetNs;
+    const tB = (ratioB - zeroRatio) * state.timeSpanNs + state.panOffsetNs;
     const dt = tB - tA;
     const invDt = Math.abs(dt) > 1 ? 1e9 / Math.abs(dt) : 0;
 
-    let yA: number | null = null;
-    let yB: number | null = null;
-    if (activeLane && state.scopeData) {
-      const blk = state.scopeData.tracks.find(
-        (t) => t.channelId === activeLane.track.channelId,
-      );
-      yA = evaluateTrackValueAtNorm(blk, state.cursorARatio);
-      yB = evaluateTrackValueAtNorm(blk, state.cursorBRatio);
-      if (yA !== null) {
+    const evaluatedRows = visibleTracks.map((track) => {
+      const blk = trackBlockById.get(track.channelId);
+      const sampleA = evaluateTrackSampleAtNorm(blk, ratioA, track, subpixelShiftNorm);
+      const sampleB = evaluateTrackSampleAtNorm(blk, ratioB, track, subpixelShiftNorm);
+      return { track, sampleA, sampleB };
+    });
+
+    const evalByChannelId = new Map(evaluatedRows.map((row) => [row.track.channelId, row]));
+
+    // Draw intersection markers on all visible analog lanes
+    for (let i = 0; i < layout.analogSubLanes.length; i += 1) {
+      const lane = layout.analogSubLanes[i];
+      const row = evalByChannelId.get(lane.track.channelId);
+      if (!row) continue;
+      if (row.sampleA?.kind === "analog") {
         const pyA = clamp(
           channelValueToY(
-            yA,
-            activeLane.rect,
+            row.sampleA.value,
+            lane.rect,
             axis,
-            activeLane.track.yScale,
-            activeLane.track.yOffset,
+            lane.track.yScale,
+            lane.track.yOffset,
           ),
-          activeLane.rect.y,
-          activeLane.rect.y + activeLane.rect.height,
+          lane.rect.y,
+          lane.rect.y + lane.rect.height,
         );
         ctx.fillStyle = "#fbbf24";
         ctx.beginPath();
         ctx.arc(xA, pyA, 3.8, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = "#040911";
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
-      if (yB !== null) {
+      if (row.sampleB?.kind === "analog") {
         const pyB = clamp(
           channelValueToY(
-            yB,
-            activeLane.rect,
+            row.sampleB.value,
+            lane.rect,
             axis,
-            activeLane.track.yScale,
-            activeLane.track.yOffset,
+            lane.track.yScale,
+            lane.track.yOffset,
           ),
-          activeLane.rect.y,
-          activeLane.rect.y + activeLane.rect.height,
+          lane.rect.y,
+          lane.rect.y + lane.rect.height,
         );
         ctx.fillStyle = "#38bdf8";
         ctx.beginPath();
         ctx.arc(xB, pyB, 3.8, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = "#040911";
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
     }
 
-    // Floating cursor summary card
-    const unit = activeLane?.track.unit ?? "";
-    const lines = [
-      `A: ${formatTimeNs(tA)}  ${yA !== null ? formatMetricValue(yA, unit) : "--"}`,
-      `B: ${formatTimeNs(tB)}  ${yB !== null ? formatMetricValue(yB, unit) : "--"}`,
-      `Δt: ${formatTimeNs(dt)}  (${formatFrequencyHz(invDt)})`,
-      `Δy: ${yA !== null && yB !== null ? formatMetricValue(yB - yA, unit) : "--"}`,
-    ];
+    // Draw digital transition level markers on digital lanes
+    for (let i = 0; i < layout.digitalLanes.length; i += 1) {
+      const lane = layout.digitalLanes[i];
+      const row = evalByChannelId.get(lane.track.channelId);
+      if (!row) continue;
+      const pad = Math.max(3, lane.rect.height * 0.18);
+      const yHigh = lane.rect.y + pad;
+      const yLow = lane.rect.y + lane.rect.height - pad;
+      if (row.sampleA?.kind === "digital") {
+        ctx.fillStyle = "#fbbf24";
+        ctx.beginPath();
+        ctx.arc(xA, row.sampleA.level === 1 ? yHigh : yLow, 3.0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (row.sampleB?.kind === "digital") {
+        ctx.fillStyle = "#38bdf8";
+        ctx.beginPath();
+        ctx.arc(xB, row.sampleB.level === 1 ? yHigh : yLow, 3.0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
 
-    const boxW = 212;
-    const boxH = 66;
+    // Floating multi-track cursor summary card
+    ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
+    const headerA = `A ${formatCursorTimeNs(tA, state.timeSpanNs)}`;
+    const headerB = `B ${formatCursorTimeNs(tB, state.timeSpanNs)}`;
+    const headerTime = `${headerA}  ${headerB}`;
+    const headerDelta = `Δt ${formatCursorTimeNs(dt, state.timeSpanNs)}  (${formatFrequencyHz(invDt)})`;
+
+    const maxTrackRows = Math.max(
+      0,
+      Math.min(6, Math.floor((layout.plotHeight - 48) / 14)),
+    );
+    const orderedRows =
+      state.activeAnalogChannelId != null
+        ? [
+            ...evaluatedRows.filter((r) => r.track.channelId === state.activeAnalogChannelId),
+            ...evaluatedRows.filter((r) => r.track.channelId !== state.activeAnalogChannelId),
+          ]
+        : evaluatedRows;
+    const shownRows = orderedRows.slice(0, maxTrackRows);
+    const hiddenCount = orderedRows.length - shownRows.length;
+
+    const rowTexts = shownRows.map(({ track, sampleA, sampleB }) => ({
+      track,
+      label: fitTruncatedText(ctx, track.label, 58),
+      valA: formatSampleText(sampleA, track),
+      valB: formatSampleText(sampleB, track),
+      delta: formatSampleDeltaText(sampleA, sampleB, track),
+    }));
+
+    let contentW = Math.max(ctx.measureText(headerTime).width, ctx.measureText(headerDelta).width);
+    for (let i = 0; i < rowTexts.length; i += 1) {
+      const r = rowTexts[i];
+      const lineStr = `   ${r.label}: A ${r.valA} | B ${r.valB} | Δ ${r.delta}`;
+      contentW = Math.max(contentW, ctx.measureText(lineStr).width);
+    }
+
+    const boxW = clamp(Math.ceil(contentW) + 20, 224, Math.max(224, plotWidth - 16));
+    const totalLines = 2 + rowTexts.length + (hiddenCount > 0 ? 1 : 0);
+    const boxH = 12 + totalLines * 14;
     const boxX = plotRight - boxW - 10;
     const boxY = plotTop + 8;
 
-    ctx.fillStyle = "rgba(11, 15, 23, 0.88)";
+    ctx.fillStyle = "rgba(11, 15, 23, 0.90)";
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
     ctx.lineWidth = 1;
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-    ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
+    ctx.textBaseline = "middle";
     ctx.textAlign = "left";
-    for (let i = 0; i < lines.length; i += 1) {
-      ctx.fillStyle = i === 0 ? "#fde68a" : i === 1 ? "#7dd3fc" : "#e2e8f0";
-      ctx.fillText(lines[i], boxX + 8, boxY + 11 + i * 14);
+    ctx.fillStyle = "#fde68a";
+    ctx.fillText(headerA, boxX + 8, boxY + 11);
+    const aWidth = ctx.measureText(headerA + "  ").width;
+    ctx.fillStyle = "#7dd3fc";
+    ctx.fillText(headerB, boxX + 8 + aWidth, boxY + 11);
+
+    ctx.fillStyle = "#e2e8f0";
+    ctx.fillText(headerDelta, boxX + 8, boxY + 25);
+
+    for (let i = 0; i < rowTexts.length; i += 1) {
+      const r = rowTexts[i];
+      const ry = boxY + 39 + i * 14;
+      ctx.fillStyle = rgbaNumberToCss(r.track.colorRgba, 0.95);
+      ctx.fillRect(boxX + 8, ry - 3.5, 6, 7);
+
+      ctx.fillStyle = "#cbd5e1";
+      const rowText = fitTruncatedText(
+        ctx,
+        `${r.label}: A ${r.valA} | B ${r.valB} | Δ ${r.delta}`,
+        boxW - 24,
+      );
+      ctx.fillText(rowText, boxX + 18, ry);
+    }
+
+    if (hiddenCount > 0) {
+      const moreY = boxY + 39 + rowTexts.length * 14;
+      ctx.fillStyle = "#94a3b8";
+      ctx.fillText(`+${hiddenCount} ...`, boxX + 8, moreY);
+    }
+  }
+
+  // 7. Axis Hover Guide Lines (Left Y-Axis & Bottom X-Axis Gutters)
+  if (state.pointerHover && state.draggingHandle === "none") {
+    const { cssX, cssY } = state.pointerHover;
+    const insidePlotY = cssY >= plotTop && cssY <= plotBottom;
+    const insidePlotX = cssX >= plotLeft && cssX <= plotRight;
+
+    if (state.hoverHandle === "yGutter" && insidePlotY) {
+      const startX = clamp(cssX, 2, plotLeft);
+      let labelText: string | null = null;
+
+      const laneEntries = layout.analogSubLanes.filter(
+        (l) => cssY >= l.rect.y && cssY <= l.rect.y + l.rect.height,
+      );
+      if (laneEntries.length > 0) {
+        const laneRect = laneEntries[0].rect;
+        const axisVal = yToAnalogValue(cssY, laneRect, axis.yAxisScale, axis.yAxisOffset);
+        const targetTrack =
+          laneEntries.length === 1
+            ? laneEntries[0].track
+            : laneEntries.find((l) => l.track.channelId === state.activeAnalogChannelId)?.track;
+        if (targetTrack && (targetTrack.yScale !== 1 || targetTrack.yOffset !== 0)) {
+          const chVal = yToChannelValue(
+            cssY,
+            laneRect,
+            axis,
+            targetTrack.yScale,
+            targetTrack.yOffset,
+          );
+          labelText = `${formatMetricValue(axisVal, null)} (${targetTrack.label}: ${formatMetricValue(chVal, targetTrack.unit)})`;
+        } else if (laneEntries.length === 1) {
+          labelText = formatMetricValue(axisVal, laneEntries[0].track.unit);
+        } else {
+          labelText = formatMetricValue(axisVal, null);
+        }
+      } else {
+        const digitalLane = layout.digitalLanes.find(
+          (l) => cssY >= l.rect.y && cssY <= l.rect.y + l.rect.height,
+        );
+        if (digitalLane) {
+          const bit = cssY < digitalLane.rect.y + digitalLane.rect.height * 0.5 ? "1" : "0";
+          labelText = `${digitalLane.track.label} (${bit})`;
+        } else {
+          const stateLane = layout.stateLanes.find(
+            (l) => cssY >= l.rect.y && cssY <= l.rect.y + l.rect.height,
+          );
+          if (stateLane) {
+            labelText = stateLane.track.label;
+          } else {
+            const fallbackVal = yToAnalogValue(
+              cssY,
+              layout.analogRegion,
+              axis.yAxisScale,
+              axis.yAxisOffset,
+            );
+            labelText = formatMetricValue(fallbackVal, null);
+          }
+        }
+      }
+
+      ctx.save();
+      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = "#38bdf8";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(startX, cssY);
+      ctx.lineTo(plotRight, cssY);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.fillStyle = "#38bdf8";
+      ctx.beginPath();
+      ctx.arc(startX, cssY, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = '600 10px "JetBrains Mono", ui-monospace, monospace';
+      const badgeW = Math.ceil(ctx.measureText(labelText).width) + 12;
+      const badgeH = 17;
+      const badgeX = plotLeft + 8;
+      const badgeY = clamp(cssY - badgeH - 2, plotTop + 2, plotBottom - badgeH - 2);
+      ctx.fillStyle = "rgba(11, 15, 23, 0.94)";
+      ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+      ctx.strokeStyle = "#38bdf8";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(badgeX, badgeY, badgeW, badgeH);
+      ctx.fillStyle = "#e0f2fe";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(labelText, badgeX + 6, badgeY + badgeH * 0.5 + 0.5);
+    } else if (state.hoverHandle === "xGutter" && insidePlotX) {
+      const startY = clamp(cssY, plotBottom, canvasHeight - 2);
+      const ratio = clamp((cssX - plotLeft) / Math.max(1, plotWidth), 0, 1);
+      const relNs = (ratio - zeroRatio) * state.timeSpanNs + state.panOffsetNs;
+      const timeText = formatCursorTimeNs(relNs, state.timeSpanNs);
+
+      ctx.save();
+      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = "#38bdf8";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(cssX, startY);
+      ctx.lineTo(cssX, plotTop);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.fillStyle = "#38bdf8";
+      ctx.beginPath();
+      ctx.arc(cssX, startY, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = '600 10px "JetBrains Mono", ui-monospace, monospace';
+      const badgeW = Math.ceil(ctx.measureText(timeText).width) + 12;
+      const badgeH = 17;
+      const badgeX = clamp(cssX - badgeW * 0.5, plotLeft + 2, plotRight - badgeW - 2);
+      const badgeY = Math.max(plotTop + 2, plotBottom - badgeH - 4);
+      ctx.fillStyle = "rgba(11, 15, 23, 0.94)";
+      ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+      ctx.strokeStyle = "#38bdf8";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(badgeX, badgeY, badgeW, badgeH);
+      ctx.fillStyle = "#e0f2fe";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(timeText, badgeX + badgeW * 0.5, badgeY + badgeH * 0.5 + 0.5);
     }
   }
 

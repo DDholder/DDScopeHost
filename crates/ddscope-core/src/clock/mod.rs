@@ -244,6 +244,19 @@ impl StreamClockSynchronizer {
         }
     }
 
+    /// Seeds the minimum monotonic timestamp floor (used when replacing/editing a source)
+    /// so rebuilt clock engines continue smoothly without timestamp regression.
+    pub fn seed_monotonic_floor(&mut self, floor_ns: TimestampNs) {
+        self.reanchor_pending = true;
+        match &mut self.engine {
+            SyncEngine::Tier1(state) => state.seed_monotonic_floor(floor_ns),
+            SyncEngine::Tier2(pll) => pll.seed_monotonic_floor(floor_ns),
+            SyncEngine::Tier3 { last_emitted_ns } => {
+                *last_emitted_ns = Some(last_emitted_ns.map_or(floor_ns, |prev| prev.max(floor_ns)));
+            }
+        }
+    }
+
     /// Returns the configured [`ClockMode`].
     pub fn mode(&self) -> ClockMode {
         self.mode

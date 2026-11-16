@@ -17,6 +17,34 @@ export function formatTimeNs(ns: number): string {
   return `${sign}${mins.toFixed(1)} min`;
 }
 
+/**
+ * Formats a cursor or axis-hover timestamp offset with higher fractional precision
+ * so pixel-level cursor movements remain distinguishable against the active time span.
+ */
+export function formatCursorTimeNs(ns: number, spanNs?: number): string {
+  if (!Number.isFinite(ns)) return "--";
+  const abs = Math.abs(ns);
+  const sign = ns < 0 ? "-" : "";
+  const fineRatio = spanNs !== undefined && spanNs > 0 && abs > 0 && spanNs / abs < 0.05;
+  if (abs < 1_000) {
+    return `${sign}${Math.round(abs)} ns`;
+  }
+  if (abs < 1_000_000) {
+    const decimals = fineRatio || (spanNs !== undefined && spanNs < 20_000) ? 3 : 2;
+    return `${sign}${(abs / 1_000).toFixed(decimals)} µs`;
+  }
+  if (abs < 1_000_000_000) {
+    const decimals = fineRatio || (spanNs !== undefined && spanNs < 20_000_000) ? 4 : 3;
+    return `${sign}${(abs / 1_000_000).toFixed(decimals)} ms`;
+  }
+  if (abs < 60_000_000_000) {
+    const decimals = fineRatio || (spanNs !== undefined && spanNs < 200_000_000) ? 4 : 3;
+    return `${sign}${(abs / 1_000_000_000).toFixed(decimals)} s`;
+  }
+  const mins = abs / 60_000_000_000;
+  return `${sign}${mins.toFixed(fineRatio ? 4 : 3)} min`;
+}
+
 export function formatTimePerDiv(spanNs: number, divisions = 10): string {
   const perDiv = spanNs / Math.max(1, divisions);
   return `${formatTimeNs(perDiv)}/div`;

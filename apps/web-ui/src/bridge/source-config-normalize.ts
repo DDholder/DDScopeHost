@@ -82,3 +82,104 @@ export function normalizeSourceConfigToSerialize(
     auto_start: req.auto_start,
   };
 }
+
+function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
+}
+
+/**
+ * Checks whether `raw` looks like a valid `host:port` or `[ipv6]:port` socket target.
+ */
+export function isValidUdpSocketAddr(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const bracketed = /^\[([^\]]+)\]:(\d+)$/.exec(trimmed);
+  if (bracketed) {
+    return bracketed[1].trim().length > 0 && isValidPort(Number(bracketed[2]));
+  }
+  const colonCount = (trimmed.match(/:/g) ?? []).length;
+  if (colonCount !== 1) return false;
+  const hostPort = /^([^:]+):(\d+)$/.exec(trimmed);
+  return Boolean(hostPort && hostPort[1].trim().length > 0 && isValidPort(Number(hostPort[2])));
+}
+
+/**
+ * Formats an optional UDP target IP + port into a validated `SocketAddr` string, or `null` if blank.
+ */
+export function formatUdpRemoteTxAddr(ipInput: string, portInput: number | string): string | null {
+  const trimmed = ipInput.trim();
+  if (!trimmed) return null;
+
+  const bracketed = /^\[([^\]]+)\]:(\d+)$/.exec(trimmed);
+  if (bracketed) {
+    const port = Number(bracketed[2]);
+    if (!isValidPort(port)) {
+      throw new Error("UDP target port must be between 1 and 65535.");
+    }
+    return trimmed;
+  }
+
+  const colonCount = (trimmed.match(/:/g) ?? []).length;
+  if (colonCount === 1) {
+    const hostPort = /^([^:]+):(\d+)$/.exec(trimmed);
+    if (hostPort) {
+      const port = Number(hostPort[2]);
+      if (!isValidPort(port)) {
+        throw new Error("UDP target port must be between 1 and 65535.");
+      }
+      return trimmed;
+    }
+    throw new Error(`Invalid UDP target address '${trimmed}': expected IP or host:port.`);
+  }
+
+  const portNum =
+    typeof portInput === "number" ? portInput : Number.parseInt(String(portInput).trim(), 10);
+  if (!isValidPort(portNum)) {
+    throw new Error("UDP target port must be between 1 and 65535.");
+  }
+
+  if (colonCount > 1 && !trimmed.startsWith("[")) {
+    return `[${trimmed}]:${portNum}`;
+  }
+  const cleanHost = trimmed.replace(/^\[|\]$/g, "");
+  return `${cleanHost}:${portNum}`;
+}
+
+/**
+ * Splits a `SocketAddr` string (`127.0.0.1:9002` or `[::1]:9002`) into separate IP & port fields.
+ */
+export function parseUdpRemoteTxAddr(
+  remoteTxAddr: string | null | undefined,
+  defaultPort = 9002,
+): { ip: string; port: number } {
+  const trimmed = remoteTxAddr?.trim() ?? "";
+  if (!trimmed) {
+    return { ip: "", port: defaultPort };
+  }
+
+  const bracketed = /^\[([^\]]+)\]:(\d+)$/.exec(trimmed);
+  if (bracketed) {
+    const port = Number(bracketed[2]);
+    return {
+      ip: bracketed[1],
+      port: isValidPort(port) ? port : defaultPort,
+    };
+  }
+
+  const colonCount = (trimmed.match(/:/g) ?? []).length;
+  if (colonCount === 1) {
+    const hostPort = /^([^:]+):(\d+)$/.exec(trimmed);
+    if (hostPort) {
+      const port = Number(hostPort[2]);
+      return {
+        ip: hostPort[1],
+        port: isValidPort(port) ? port : defaultPort,
+      };
+    }
+  }
+
+  return {
+    ip: trimmed.replace(/^\[|\]$/g, ""),
+    port: defaultPort,
+  };
+}

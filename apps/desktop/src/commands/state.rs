@@ -137,6 +137,28 @@ impl DesktopBridgeState {
         Ok(convert::source_summary_to_dto(summary))
     }
 
+    /// Implements `update_source`.
+    pub async fn update_source(
+        &self,
+        source_id: String,
+        config: CreateSourceRequestDto,
+    ) -> Result<SourceSummaryDto, ApiErrorDto> {
+        let ws = self.require_live_workspace("update_source")?;
+        let core_cfg = convert::create_source_dto_to_core(config)?;
+        let summary = ws
+            .update_source(&SourceId::new(source_id), core_cfg)
+            .await
+            .map_err(ApiErrorDto::from)?;
+        Ok(convert::source_summary_to_dto(summary))
+    }
+
+    /// Implements `get_run_boundaries`.
+    pub fn get_run_boundaries(&self) -> Result<Vec<f64>, ApiErrorDto> {
+        Ok(self.workspace().map_or_else(Vec::new, |ws| {
+            ws.run_boundaries_ns().into_iter().map(|t| t as f64).collect()
+        }))
+    }
+
     /// Implements `start_source`.
     pub fn start_source(&self, source_id: String) -> Result<SourceSummaryDto, ApiErrorDto> {
         let ws = self.require_live_workspace("start_source")?;

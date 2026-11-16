@@ -1,6 +1,7 @@
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import type {
   ChannelNodeDto_Serialize,
+  ChannelTreeSnapshotDto_Serialize,
   CreateSourceRequestDto_Deserialize,
   CreateSourceRequestDto_Serialize,
   DownlinkReceiptDto,
@@ -125,6 +126,8 @@ export interface WorkspaceStoreState {
   sidebarTab: "sources" | "toolbox" | "commands";
   downlinkBarCollapsed: boolean;
   sourceWizardOpen: boolean;
+  editingSourceId: string | null;
+  runBoundariesNs: number[];
   downlinkConfig: DownlinkUiConfig;
   pendingDockviewLayout: Record<string, unknown> | null;
   layoutRestoreSeq: number;
@@ -137,6 +140,8 @@ export interface WorkspaceStoreState {
   setSidebarTab: (tab: "sources" | "toolbox" | "commands") => void;
   setDownlinkBarCollapsed: (collapsed: boolean) => void;
   setSourceWizardOpen: (open: boolean) => void;
+  openCreateSourceWizard: () => void;
+  openEditSourceWizard: (sourceId: string) => void;
   setFocusedScopeId: (scopeId: number | null) => void;
   updateDownlinkConfig: (patch: Partial<DownlinkUiConfig>) => void;
   registerDockviewLayoutAccessor: (
@@ -144,6 +149,7 @@ export interface WorkspaceStoreState {
   ) => void;
 
   createSource: (req: CreateSourceRequestDto_Deserialize) => Promise<void>;
+  updateSource: (sourceId: string, req: CreateSourceRequestDto_Deserialize) => Promise<void>;
   startSource: (sourceId: string) => Promise<void>;
   stopSource: (sourceId: string) => Promise<void>;
   removeSource: (sourceId: string) => Promise<void>;
@@ -858,6 +864,225 @@ export function createWorkspaceStore(
       };
     };
 
+    const reconcileAndSyncAfterSourceMutation = async (params: {
+      channelsBefore: Record<number, ChannelNodeDto_Serialize>;
+      tree: ChannelTreeSnapshotDto_Serialize;
+      overrides?: Record<string, CreateSourceRequestDto_Serialize>;
+      rebindChannelId: (
+        oldChannelId: number,
+        chMap: Record<number, ChannelNodeDto_Serialize>,
+        channelByFullPath: Map<string, ChannelNodeDto_Serialize>,
+      ) => number | null;
+      remapSourceId?: (oldSourceId: string) => string;
+    }) => {
+      const { channelsBefore, tree, overrides, rebindChannelId, remapSourceId } = params;
+      const chMap: Record<number, ChannelNodeDto_Serialize> = {};
+      const channelByFullPath = new Map<string, ChannelNodeDto_Serialize>();
+      for (const grp of tree.sources) {
+        for (const ch of grp.channels) {
+          chMap[ch.channel_id] = ch;
+          channelByFullPath.set(ch.full_path, ch);
+        }
+      }
+      const nextSourceConfigs = await fetchSourceConfigMap(tree.sources, overrides);
+      const nextRunBoundaries = await client
+        .getRunBoundaries()
+        .catch(() => get().runBoundariesNs);
+
+      const resolveChannel = (oldChannelId: number) =>
+        rebindChannelId(oldChannelId, chMap, channelByFullPath);
+
+      const latest = get();
+      const changedScopesToSync: Array<{ scope: ScopeUiConfig; canvasW: number }> = [];
+      const nextScopes: Record<number, ScopeUiConfig> = {};
+
+      for (const [idStr, sc] of Object.entries(latest.scopes)) {
+        const scopeId = Number(idStr);
+        const seenTrackIds = new Set<number>();
+        const nextTracks: ScopeTrackUiBinding[] = [];
+        let tracksChanged = false;
+
+        for (const tr of sc.tracks) {
+          const reboundId = resolveChannel(tr.channelId);
+          if (reboundId === null) {
+            tracksChanged = true;
+            continue;
+          }
+          if (reboundId !== tr.channelId) {
+            tracksChanged = true;
+          }
+          if (seenTrackIds.has(reboundId)) {
+            tracksChanged = true;
+            continue;
+          }
+          seenTrackIds.add(reboundId);
+          nextTracks.push({ ...tr, channelId: reboundId });
+        }
+
+        let nextTrigger = sc.trigger;
+        let triggerChanged = false;
+        if (sc.trigger) {
+          const reboundTrigId = resolveChannel(sc.trigger.channel_id);
+          if (reboundTrigId === null) {
+            nextTrigger = null;
+            triggerChanged = true;
+          } else if (reboundTrigId !== sc.trigger.channel_id) {
+            nextTrigger = { ...sc.trigger, channel_id: reboundTrigId };
+            triggerChanged = true;
+          }
+        }
+
+        const reboundActiveId =
+          sc.activeAnalogChannelId !== null ? resolveChannel(sc.activeAnalogChannelId) : null;
+        const activeStillValid =
+          reboundActiveId !== null &&
+          nextTracks.some((tr) => tr.channelId === reboundActiveId && tr.lane === "analog");
+        const nextActiveAnalog = activeStillValid
+          ? reboundActiveId
+          : (nextTracks.find((tr) => tr.lane === "analog")?.channelId ?? null);
+        const activeChanged = nextActiveAnalog !== sc.activeAnalogChannelId;
+
+        if (tracksChanged || triggerChanged || activeChanged) {
+          const updatedScope: ScopeUiConfig = {
+            ...sc,
+            tracks: nextTracks,
+            trigger: nextTrigger,
+            activeAnalogChannelId: nextActiveAnalog,
+          };
+          nextScopes[scopeId] = updatedScope;
+          if (nextTracks.length === 0) {
+            client.topicBus.deleteScopeCache(scopeId);
+          }
+          changedScopesToSync.push({
+            scope: updatedScope,
+            canvasW: latest.canvasWidthsByScope[scopeId] ?? 760,
+          });
+        } else {
+          nextScopes[scopeId] = sc;
+        }
+      }
+
+      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
+      for (const [idStr, cv] of Object.entries(latest.canvases)) {
+        const canvasId = Number(idStr);
+        let canvasChanged = false;
+        const nextWidgets = cv.widgets.map((w) => {
+          let updated = w;
+          if (w.primaryBinding) {
+            const reboundPrimary = resolveChannel(w.primaryBinding.channelId);
+            if (reboundPrimary === null) {
+              updated = { ...updated, primaryBinding: null };
+              canvasChanged = true;
+            } else if (reboundPrimary !== w.primaryBinding.channelId) {
+              updated = {
+                ...updated,
+                primaryBinding: { ...w.primaryBinding, channelId: reboundPrimary },
+              };
+              canvasChanged = true;
+            }
+          }
+          if (w.bindings.length > 0) {
+            const seenBindingIds = new Set<number>();
+            const nextBindings: typeof w.bindings = [];
+            let bindingsChanged = false;
+            for (const b of w.bindings) {
+              const reboundId = resolveChannel(b.channelId);
+              if (reboundId === null) {
+                bindingsChanged = true;
+                continue;
+              }
+              if (reboundId !== b.channelId) {
+                bindingsChanged = true;
+              }
+              if (seenBindingIds.has(reboundId)) {
+                bindingsChanged = true;
+                continue;
+              }
+              seenBindingIds.add(reboundId);
+              nextBindings.push({ ...b, channelId: reboundId });
+            }
+            if (bindingsChanged) {
+              updated = { ...updated, bindings: nextBindings };
+              canvasChanged = true;
+            }
+          }
+          if (remapSourceId && w.sliderConfig) {
+            const mappedSliderSrc = remapSourceId(w.sliderConfig.sourceId);
+            if (mappedSliderSrc !== w.sliderConfig.sourceId) {
+              updated = {
+                ...updated,
+                sliderConfig: { ...w.sliderConfig, sourceId: mappedSliderSrc },
+              };
+              canvasChanged = true;
+            }
+          }
+          if (remapSourceId && w.buttonConfig) {
+            const mappedBtnSrc = remapSourceId(w.buttonConfig.sourceId);
+            if (mappedBtnSrc !== w.buttonConfig.sourceId) {
+              updated = {
+                ...updated,
+                buttonConfig: { ...w.buttonConfig, sourceId: mappedBtnSrc },
+              };
+              canvasChanged = true;
+            }
+          }
+          return updated;
+        });
+        nextCanvases[canvasId] = canvasChanged ? { ...cv, widgets: nextWidgets } : cv;
+      }
+
+      const activeSourceIds = new Set(tree.sources.map((g) => g.source.source_id));
+      const nextTelemetry: Record<string, SourceTelemetryDto> = {};
+      for (const [srcId, tel] of Object.entries(latest.telemetryBySource)) {
+        if (activeSourceIds.has(srcId)) {
+          nextTelemetry[srcId] = tel;
+        }
+      }
+
+      const nextCommands = remapSourceId
+        ? latest.commands.map((cmd) => {
+            const mapped = remapSourceId(cmd.targetSourceId);
+            return mapped === cmd.targetSourceId ? cmd : { ...cmd, targetSourceId: mapped };
+          })
+        : latest.commands;
+      const nextDownlinkTarget = remapSourceId
+        ? remapSourceId(latest.downlinkConfig.targetSource)
+        : latest.downlinkConfig.targetSource;
+
+      set({
+        channelGroups: tree.sources,
+        channelsById: chMap,
+        sourceConfigsById: nextSourceConfigs,
+        runBoundariesNs: nextRunBoundaries,
+        telemetryBySource: nextTelemetry,
+        scopes: nextScopes,
+        canvases: nextCanvases,
+        commands: nextCommands,
+        ...(nextDownlinkTarget !== latest.downlinkConfig.targetSource
+          ? {
+              downlinkConfig: {
+                ...latest.downlinkConfig,
+                targetSource: nextDownlinkTarget,
+              },
+            }
+          : {}),
+        quota: {
+          usedBytes: tree.quota_used_bytes ?? 0,
+          limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
+          pinnedBytes: tree.pinned_bytes ?? 0,
+        },
+      });
+
+      await Promise.all(
+        changedScopesToSync.map(({ scope, canvasW }) =>
+          client.upsertScopeViewport(toViewportDto(scope, canvasW)).catch(() => {}),
+        ),
+      );
+
+      // Avoid unused variable warning on channelsBefore when unused by caller closure
+      void channelsBefore;
+    };
+
     const applyProjectFile = async (projectFile: ProjectConfigFileV1) => {
       const existingTree = await client.getChannelTree();
       for (const grp of existingTree.sources) {
@@ -875,10 +1100,12 @@ export function createWorkspaceStore(
         }
       }
       const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+      const runBoundariesNs = await client.getRunBoundaries().catch(() => []);
       set({
         channelGroups: tree.sources,
         channelsById: chMap,
         sourceConfigsById: sourceConfigs,
+        runBoundariesNs,
         quota: {
           usedBytes: tree.quota_used_bytes ?? 0,
           limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
@@ -947,6 +1174,8 @@ export function createWorkspaceStore(
     sidebarTab: "sources",
     downlinkBarCollapsed: false,
     sourceWizardOpen: false,
+    editingSourceId: null,
+    runBoundariesNs: [],
     downlinkConfig: { ...DEFAULT_DOWNLINK_UI_CONFIG },
     pendingDockviewLayout: null,
     layoutRestoreSeq: 0,
@@ -999,6 +1228,12 @@ export function createWorkspaceStore(
 
         if (!telemetryUnsub) {
           telemetryUnsub = client.subscribeTelemetry((telemetry, downlinkStats) => {
+            const isActiveState = (st: string) =>
+              st === "running" || st === "connecting" || st === "reconnecting";
+            const hadRunningBefore = Object.values(get().telemetryBySource).some((t) =>
+              isActiveState(t.state),
+            );
+            const hasRunningNow = telemetry.sources.some((s) => isActiveState(s.state));
             const telMap: Record<string, SourceTelemetryDto> = {};
             for (const s of telemetry.sources) {
               telMap[s.source_id] = s;
@@ -1012,6 +1247,12 @@ export function createWorkspaceStore(
               },
               downlinkStats,
             });
+            if (!hadRunningBefore && hasRunningNow) {
+              void client
+                .getRunBoundaries()
+                .then((runBoundariesNs) => set({ runBoundariesNs }))
+                .catch(() => {});
+            }
           });
         }
 
@@ -1059,6 +1300,7 @@ export function createWorkspaceStore(
           );
 
           const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+          const runBoundariesNs = await client.getRunBoundaries().catch(() => []);
           const defaultCanvas = buildDefaultDashboardCanvas(chMap, get().locale);
 
           set({
@@ -1068,6 +1310,7 @@ export function createWorkspaceStore(
             channelGroups: tree.sources,
             channelsById: chMap,
             sourceConfigsById: sourceConfigs,
+            runBoundariesNs,
             quota: {
               usedBytes: tree.quota_used_bytes ?? 0,
               limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
@@ -1100,10 +1343,14 @@ export function createWorkspaceStore(
         }
       }
       const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+      const runBoundariesNs = await client
+        .getRunBoundaries()
+        .catch(() => get().runBoundariesNs);
       set({
         channelGroups: tree.sources,
         channelsById: chMap,
         sourceConfigsById: sourceConfigs,
+        runBoundariesNs,
         quota: {
           usedBytes: tree.quota_used_bytes ?? 0,
           limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
@@ -1120,7 +1367,14 @@ export function createWorkspaceStore(
     setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
     setSidebarTab: (tab) => set({ sidebarTab: tab }),
     setDownlinkBarCollapsed: (collapsed) => set({ downlinkBarCollapsed: collapsed }),
-    setSourceWizardOpen: (open) => set({ sourceWizardOpen: open }),
+    setSourceWizardOpen: (open) =>
+      set((s) => ({
+        sourceWizardOpen: open,
+        editingSourceId: open ? s.editingSourceId : null,
+      })),
+    openCreateSourceWizard: () => set({ editingSourceId: null, sourceWizardOpen: true }),
+    openEditSourceWizard: (sourceId) =>
+      set({ editingSourceId: sourceId, sourceWizardOpen: true }),
     setFocusedScopeId: (scopeId) => set({ focusedScopeId: scopeId }),
     updateDownlinkConfig: (patch) =>
       set((s) => ({
@@ -1145,6 +1399,33 @@ export function createWorkspaceStore(
       await get().refreshChannelTree();
     },
 
+    updateSource: async (sourceId, req) => {
+      const channelsBefore = get().channelsById;
+      await client.updateSource(sourceId, req);
+      const norm = normalizeSourceConfigForExport(req);
+      const newSourceId = norm.source_id;
+      const tree = await client.getChannelTree();
+
+      await reconcileAndSyncAfterSourceMutation({
+        channelsBefore,
+        tree,
+        overrides: { [newSourceId]: norm },
+        rebindChannelId: (oldChannelId, chMap, channelByFullPath) => {
+          const oldCh = channelsBefore[oldChannelId];
+          if (!oldCh) {
+            return chMap[oldChannelId] ? oldChannelId : null;
+          }
+          if (oldCh.source_id !== sourceId) {
+            return chMap[oldChannelId] ? oldChannelId : null;
+          }
+          const matched = channelByFullPath.get(`${newSourceId}/${oldCh.local_path}`);
+          return matched ? matched.channel_id : null;
+        },
+        remapSourceId:
+          newSourceId !== sourceId ? (id) => (id === sourceId ? newSourceId : id) : undefined,
+      });
+    },
+
     startSource: async (sourceId) => {
       await client.startSource(sourceId);
       await get().refreshChannelTree();
@@ -1156,120 +1437,16 @@ export function createWorkspaceStore(
     },
 
     removeSource: async (sourceId) => {
+      const channelsBefore = get().channelsById;
       await client.removeSource(sourceId);
       const tree = await client.getChannelTree();
-      const chMap: Record<number, ChannelNodeDto_Serialize> = {};
-      for (const grp of tree.sources) {
-        for (const ch of grp.channels) {
-          chMap[ch.channel_id] = ch;
-        }
-      }
-
-      const state = get();
-      const nextTelemetry = { ...state.telemetryBySource };
-      delete nextTelemetry[sourceId];
-
       const fallbackSourceId = tree.sources[0]?.source.source_id ?? "";
-      const changedScopesToSync: Array<{ scope: ScopeUiConfig; canvasW: number }> = [];
-      const nextScopes: Record<number, ScopeUiConfig> = {};
-      for (const [idStr, sc] of Object.entries(state.scopes)) {
-        const scopeId = Number(idStr);
-        const remainingTracks = sc.tracks.filter((t) => Boolean(chMap[t.channelId]));
-        const nextTrigger =
-          sc.trigger && chMap[sc.trigger.channel_id] ? sc.trigger : null;
-        const tracksChanged = remainingTracks.length !== sc.tracks.length;
-        const triggerChanged = nextTrigger !== sc.trigger;
-
-        if (tracksChanged || triggerChanged) {
-          const activeStillPresent =
-            sc.activeAnalogChannelId !== null &&
-            remainingTracks.some((t) => t.channelId === sc.activeAnalogChannelId);
-          const nextActiveAnalog = activeStillPresent
-            ? sc.activeAnalogChannelId
-            : (remainingTracks.find((t) => t.lane === "analog")?.channelId ?? null);
-          const updatedScope: ScopeUiConfig = {
-            ...sc,
-            tracks: remainingTracks,
-            trigger: nextTrigger,
-            activeAnalogChannelId: nextActiveAnalog,
-          };
-          nextScopes[scopeId] = updatedScope;
-          if (remainingTracks.length === 0) {
-            client.topicBus.deleteScopeCache(scopeId);
-          }
-          changedScopesToSync.push({
-            scope: updatedScope,
-            canvasW: state.canvasWidthsByScope[scopeId] ?? 760,
-          });
-        } else {
-          nextScopes[scopeId] = sc;
-        }
-      }
-
-      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
-      for (const [idStr, cv] of Object.entries(state.canvases)) {
-        const canvasId = Number(idStr);
-        let canvasChanged = false;
-        const nextWidgets = cv.widgets.map((w) => {
-          let updated = w;
-          if (w.primaryBinding && !chMap[w.primaryBinding.channelId]) {
-            updated = { ...updated, primaryBinding: null };
-            canvasChanged = true;
-          }
-          if (w.bindings.some((b) => !chMap[b.channelId])) {
-            updated = {
-              ...updated,
-              bindings: w.bindings.filter((b) => Boolean(chMap[b.channelId])),
-            };
-            canvasChanged = true;
-          }
-          if (w.sliderConfig && w.sliderConfig.sourceId === sourceId) {
-            updated = {
-              ...updated,
-              sliderConfig: { ...w.sliderConfig, sourceId: fallbackSourceId },
-            };
-            canvasChanged = true;
-          }
-          if (w.buttonConfig && w.buttonConfig.sourceId === sourceId) {
-            updated = {
-              ...updated,
-              buttonConfig: { ...w.buttonConfig, sourceId: fallbackSourceId },
-            };
-            canvasChanged = true;
-          }
-          return updated;
-        });
-        nextCanvases[canvasId] = canvasChanged ? { ...cv, widgets: nextWidgets } : cv;
-      }
-
-      const sourceConfigs = await fetchSourceConfigMap(tree.sources);
-      set({
-        channelGroups: tree.sources,
-        channelsById: chMap,
-        sourceConfigsById: sourceConfigs,
-        telemetryBySource: nextTelemetry,
-        scopes: nextScopes,
-        canvases: nextCanvases,
-        ...(state.downlinkConfig.targetSource === sourceId
-          ? {
-              downlinkConfig: {
-                ...state.downlinkConfig,
-                targetSource: fallbackSourceId,
-              },
-            }
-          : {}),
-        quota: {
-          usedBytes: tree.quota_used_bytes ?? 0,
-          limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
-          pinnedBytes: tree.pinned_bytes ?? 0,
-        },
+      await reconcileAndSyncAfterSourceMutation({
+        channelsBefore,
+        tree,
+        rebindChannelId: (oldChannelId, chMap) => (chMap[oldChannelId] ? oldChannelId : null),
+        remapSourceId: (id) => (id === sourceId ? fallbackSourceId : id),
       });
-
-      await Promise.all(
-        changedScopesToSync.map(({ scope, canvasW }) =>
-          client.upsertScopeViewport(toViewportDto(scope, canvasW)).catch(() => {}),
-        ),
-      );
     },
 
     toggleRawRecorder: async (sourceId, enabled) => {
@@ -1326,174 +1503,22 @@ export function createWorkspaceStore(
       }
 
       const tree = await client.getChannelTree();
-      const chMap: Record<number, ChannelNodeDto_Serialize> = {};
-      const channelByFullPath = new Map<string, ChannelNodeDto_Serialize>();
-      for (const grp of tree.sources) {
-        for (const ch of grp.channels) {
-          chMap[ch.channel_id] = ch;
-          channelByFullPath.set(ch.full_path, ch);
-        }
-      }
-      const nextSourceConfigs = await fetchSourceConfigMap(tree.sources, importedOverrides);
-
-      const rebindChannelId = (oldChannelId: number): number | null => {
-        const oldCh = channelsBefore[oldChannelId];
-        if (oldCh) {
-          if (!replacedSourceIds.has(oldCh.source_id) && chMap[oldChannelId]) {
-            return oldChannelId;
-          }
-          const matched = channelByFullPath.get(oldCh.full_path);
-          return matched ? matched.channel_id : null;
-        }
-        return chMap[oldChannelId] ? oldChannelId : null;
-      };
-
-      const latest = get();
-      const changedScopesToSync: Array<{ scope: ScopeUiConfig; canvasW: number }> = [];
-      const nextScopes: Record<number, ScopeUiConfig> = {};
-
-      for (const [idStr, sc] of Object.entries(latest.scopes)) {
-        const scopeId = Number(idStr);
-        const seenTrackIds = new Set<number>();
-        const nextTracks: ScopeTrackUiBinding[] = [];
-        let tracksChanged = false;
-
-        for (const tr of sc.tracks) {
-          const reboundId = rebindChannelId(tr.channelId);
-          if (reboundId === null) {
-            tracksChanged = true;
-            continue;
-          }
-          if (reboundId !== tr.channelId) {
-            tracksChanged = true;
-          }
-          if (seenTrackIds.has(reboundId)) {
-            tracksChanged = true;
-            continue;
-          }
-          seenTrackIds.add(reboundId);
-          nextTracks.push({ ...tr, channelId: reboundId });
-        }
-
-        let nextTrigger = sc.trigger;
-        let triggerChanged = false;
-        if (sc.trigger) {
-          const reboundTrigId = rebindChannelId(sc.trigger.channel_id);
-          if (reboundTrigId === null) {
-            nextTrigger = null;
-            triggerChanged = true;
-          } else if (reboundTrigId !== sc.trigger.channel_id) {
-            nextTrigger = { ...sc.trigger, channel_id: reboundTrigId };
-            triggerChanged = true;
-          }
-        }
-
-        const reboundActiveId =
-          sc.activeAnalogChannelId !== null ? rebindChannelId(sc.activeAnalogChannelId) : null;
-        const activeStillValid =
-          reboundActiveId !== null &&
-          nextTracks.some((tr) => tr.channelId === reboundActiveId && tr.lane === "analog");
-        const nextActiveAnalog = activeStillValid
-          ? reboundActiveId
-          : (nextTracks.find((tr) => tr.lane === "analog")?.channelId ?? null);
-        const activeChanged = nextActiveAnalog !== sc.activeAnalogChannelId;
-
-        if (tracksChanged || triggerChanged || activeChanged) {
-          const updatedScope: ScopeUiConfig = {
-            ...sc,
-            tracks: nextTracks,
-            trigger: nextTrigger,
-            activeAnalogChannelId: nextActiveAnalog,
-          };
-          nextScopes[scopeId] = updatedScope;
-          if (nextTracks.length === 0) {
-            client.topicBus.deleteScopeCache(scopeId);
-          }
-          changedScopesToSync.push({
-            scope: updatedScope,
-            canvasW: latest.canvasWidthsByScope[scopeId] ?? 760,
-          });
-        } else {
-          nextScopes[scopeId] = sc;
-        }
-      }
-
-      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
-      for (const [idStr, cv] of Object.entries(latest.canvases)) {
-        const canvasId = Number(idStr);
-        let canvasChanged = false;
-        const nextWidgets = cv.widgets.map((w) => {
-          let updated = w;
-          if (w.primaryBinding) {
-            const reboundPrimary = rebindChannelId(w.primaryBinding.channelId);
-            if (reboundPrimary === null) {
-              updated = { ...updated, primaryBinding: null };
-              canvasChanged = true;
-            } else if (reboundPrimary !== w.primaryBinding.channelId) {
-              updated = {
-                ...updated,
-                primaryBinding: { ...w.primaryBinding, channelId: reboundPrimary },
-              };
-              canvasChanged = true;
+      await reconcileAndSyncAfterSourceMutation({
+        channelsBefore,
+        tree,
+        overrides: importedOverrides,
+        rebindChannelId: (oldChannelId, chMap, channelByFullPath) => {
+          const oldCh = channelsBefore[oldChannelId];
+          if (oldCh) {
+            if (!replacedSourceIds.has(oldCh.source_id) && chMap[oldChannelId]) {
+              return oldChannelId;
             }
+            const matched = channelByFullPath.get(oldCh.full_path);
+            return matched ? matched.channel_id : null;
           }
-          if (w.bindings.length > 0) {
-            const seenBindingIds = new Set<number>();
-            const nextBindings: typeof w.bindings = [];
-            let bindingsChanged = false;
-            for (const b of w.bindings) {
-              const reboundId = rebindChannelId(b.channelId);
-              if (reboundId === null) {
-                bindingsChanged = true;
-                continue;
-              }
-              if (reboundId !== b.channelId) {
-                bindingsChanged = true;
-              }
-              if (seenBindingIds.has(reboundId)) {
-                bindingsChanged = true;
-                continue;
-              }
-              seenBindingIds.add(reboundId);
-              nextBindings.push({ ...b, channelId: reboundId });
-            }
-            if (bindingsChanged) {
-              updated = { ...updated, bindings: nextBindings };
-              canvasChanged = true;
-            }
-          }
-          return updated;
-        });
-        nextCanvases[canvasId] = canvasChanged ? { ...cv, widgets: nextWidgets } : cv;
-      }
-
-      const activeSourceIds = new Set(tree.sources.map((g) => g.source.source_id));
-      const nextTelemetry: Record<string, SourceTelemetryDto> = {};
-      for (const [srcId, tel] of Object.entries(latest.telemetryBySource)) {
-        if (activeSourceIds.has(srcId)) {
-          nextTelemetry[srcId] = tel;
-        }
-      }
-
-      set({
-        channelGroups: tree.sources,
-        channelsById: chMap,
-        sourceConfigsById: nextSourceConfigs,
-        telemetryBySource: nextTelemetry,
-        scopes: nextScopes,
-        canvases: nextCanvases,
-        quota: {
-          usedBytes: tree.quota_used_bytes ?? 0,
-          limitBytes: tree.quota_limit_bytes ?? 2 * 1024 * 1024 * 1024,
-          pinnedBytes: tree.pinned_bytes ?? 0,
+          return chMap[oldChannelId] ? oldChannelId : null;
         },
       });
-
-      await Promise.all(
-        changedScopesToSync.map(({ scope, canvasW }) =>
-          client.upsertScopeViewport(toViewportDto(scope, canvasW)).catch(() => {}),
-        ),
-      );
 
       return { importedIds, skippedIds };
     },

@@ -38,7 +38,10 @@ import {
   type DdsfTrackBuildInput,
   type DdsfTrackStatsView,
 } from "./ddsf-parser.ts";
-import { normalizeSourceConfigToSerialize } from "./source-config-normalize.ts";
+import {
+  isValidUdpSocketAddr,
+  normalizeSourceConfigToSerialize,
+} from "./source-config-normalize.ts";
 
 interface InternalChannelDef {
   channelId: number;
@@ -162,11 +165,13 @@ export class MockSimulationCore {
   private readonly scopes = new Map<number, InternalScopeState>();
   private readonly coalescedQueue = new Map<string, CoalescedEntry>();
   private readonly manualGlitchesNs: number[] = [];
+  private readonly runBoundariesNs: number[] = [];
 
   private nextChannelId = 101;
   private frameSeq = 0;
   private simTimeNs = 0;
   private prevSimTimeNs = 0;
+  private lastBoundarySimNs = 0;
   private lastDrainMs = 0;
 
   // Controllable motor parameters via downlink
@@ -181,36 +186,61 @@ export class MockSimulationCore {
     this.seedDefaultSimSource(options?.autoStartDefaultSim ?? true);
   }
 
-  private buildSimPresetChannels(sourceId: string, analogCount: number): InternalChannelDef[] {
+  private buildSimPresetChannels(
+    sourceId: string,
+    analogCount: number,
+    prevByLocalPath?: Map<string, InternalChannelDef>,
+  ): InternalChannelDef[] {
+    const pickId = (
+      localPath: string,
+      modality: ChannelModalityDto,
+      scalarType: string | null,
+      unit: string | null,
+    ): number | undefined => {
+      const prev = prevByLocalPath?.get(localPath);
+      if (
+        prev &&
+        prev.modality === modality &&
+        prev.scalarType === scalarType &&
+        prev.unit === unit
+      ) {
+        return prev.channelId;
+      }
+      return undefined;
+    };
+
     const channels: InternalChannelDef[] = [];
     if (sourceId === "sim0" && analogCount === 4) {
       channels.push(
-        this.makeChannel(sourceId, "ia", "Phase Current Ia", "A", "scalar", "f32", [], "ia", 0),
-        this.makeChannel(sourceId, "ib", "Phase Current Ib", "A", "scalar", "f32", [], "ib", 1),
-        this.makeChannel(sourceId, "ic", "Phase Current Ic", "A", "scalar", "f32", [], "ic", 2),
-        this.makeChannel(sourceId, "v_bus", "DC Bus Voltage", "V", "scalar", "f32", [], "v_bus", 3),
+        this.makeChannel(sourceId, "ia", "Phase Current Ia", "A", "scalar", "f32", [], "ia", 0, pickId("ia", "scalar", "f32", "A")),
+        this.makeChannel(sourceId, "ib", "Phase Current Ib", "A", "scalar", "f32", [], "ib", 1, pickId("ib", "scalar", "f32", "A")),
+        this.makeChannel(sourceId, "ic", "Phase Current Ic", "A", "scalar", "f32", [], "ic", 2, pickId("ic", "scalar", "f32", "A")),
+        this.makeChannel(sourceId, "v_bus", "DC Bus Voltage", "V", "scalar", "f32", [], "v_bus", 3, pickId("v_bus", "scalar", "f32", "V")),
       );
     } else {
       for (let i = 0; i < analogCount; i += 1) {
+        const lp = `ch${i}`;
+        const unit = i === 3 ? "V" : "A";
         channels.push(
           this.makeChannel(
             sourceId,
-            `ch${i}`,
+            lp,
             `Channel ${i}`,
-            i === 3 ? "V" : "A",
+            unit,
             "scalar",
             "f32",
             [],
             i === 3 ? "v_bus" : i % 2 === 0 ? "aux_sine" : "aux_cos",
             i,
+            pickId(lp, "scalar", "f32", unit),
           ),
         );
       }
     }
 
     channels.push(
-      this.makeChannel(sourceId, "pwm_a", "Gate PWM A", null, "digital_bool", "bool", [], "pwm_a", analogCount),
-      this.makeChannel(sourceId, "pwm_b", "Gate PWM B", null, "digital_bool", "bool", [], "pwm_b", analogCount + 1),
+      this.makeChannel(sourceId, "pwm_a", "Gate PWM A", null, "digital_bool", "bool", [], "pwm_a", analogCount, pickId("pwm_a", "digital_bool", "bool", null)),
+      this.makeChannel(sourceId, "pwm_b", "Gate PWM B", null, "digital_bool", "bool", [], "pwm_b", analogCount + 1, pickId("pwm_b", "digital_bool", "bool", null)),
       this.makeChannel(
         sourceId,
         "fault_pin",
@@ -221,6 +251,7 @@ export class MockSimulationCore {
         [],
         "fault_pin",
         analogCount + 2,
+        pickId("fault_pin", "digital_bool", "bool", null),
       ),
       this.makeChannel(
         sourceId,
@@ -232,6 +263,7 @@ export class MockSimulationCore {
         DEFAULT_STATE_LABELS,
         "ctrl_state",
         analogCount + 3,
+        pickId("ctrl_state", "state_machine", "i32", null),
       ),
     );
     return channels;
@@ -290,9 +322,14 @@ export class MockSimulationCore {
     stateLabels: StateLabelEntryDto_Serialize[],
     signalRole: InternalChannelDef["signalRole"],
     channelIndex: number,
+    channelIdOverride?: number,
   ): InternalChannelDef {
-    const channelId = this.nextChannelId;
-    this.nextChannelId += 1;
+    const channelId = channelIdOverride ?? this.nextChannelId;
+    if (channelIdOverride !== undefined) {
+      this.nextChannelId = Math.max(this.nextChannelId, channelIdOverride + 1);
+    } else {
+      this.nextChannelId += 1;
+    }
     const def: InternalChannelDef = {
       channelId,
       sourceId,
@@ -308,6 +345,144 @@ export class MockSimulationCore {
     };
     this.channelsById.set(channelId, def);
     return def;
+  }
+
+  private hasRunningSource(): boolean {
+    for (const src of this.sources.values()) {
+      if (
+        src.summary.state === "running" ||
+        src.summary.state === "connecting" ||
+        src.summary.state === "reconnecting"
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private recordRunBoundaryIfResuming(wasAnyRunning: boolean): void {
+    if (!wasAnyRunning && this.hasRunningSource() && this.simTimeNs > this.lastBoundarySimNs) {
+      this.runBoundariesNs.push(BASE_HOST_NS + this.simTimeNs);
+      if (this.runBoundariesNs.length > 256) {
+        this.runBoundariesNs.shift();
+      }
+      this.lastBoundarySimNs = this.simTimeNs;
+    }
+  }
+
+  getRunBoundaries(): number[] {
+    return [...this.runBoundariesNs];
+  }
+
+  private validateSourceRequest(req: CreateSourceRequestDto_Deserialize): void {
+    if (!req.source_id.trim()) {
+      throw new Error("source_id must not be empty");
+    }
+    if (req.transport.kind === "udp") {
+      if (!isValidUdpSocketAddr(req.transport.bind_addr)) {
+        throw new Error(`invalid UDP bind_addr '${req.transport.bind_addr}'`);
+      }
+      if (req.transport.remote_tx_addr && req.transport.remote_tx_addr.trim().length > 0) {
+        if (!isValidUdpSocketAddr(req.transport.remote_tx_addr)) {
+          throw new Error(`invalid UDP remote_tx_addr '${req.transport.remote_tx_addr}'`);
+        }
+      }
+    }
+  }
+
+  private buildChannelDefsForRequest(
+    req: CreateSourceRequestDto_Deserialize,
+    prevByLocalPath?: Map<string, InternalChannelDef>,
+  ): InternalChannelDef[] {
+    const pickId = (
+      localPath: string,
+      modality: ChannelModalityDto,
+      scalarType: string | null,
+      unit: string | null,
+    ): number | undefined => {
+      const prev = prevByLocalPath?.get(localPath);
+      if (
+        prev &&
+        prev.modality === modality &&
+        prev.scalarType === scalarType &&
+        prev.unit === unit
+      ) {
+        return prev.channelId;
+      }
+      return undefined;
+    };
+
+    const channels: InternalChannelDef[] = [];
+    if (req.protocol.codec === "just_float" || req.protocol.codec === "fire_water") {
+      const names =
+        req.protocol.channel_names.length > 0 ? req.protocol.channel_names : ["ch0", "ch1", "ch2"];
+      names.forEach((name, idx) => {
+        const unit = idx === 0 ? "V" : "A";
+        channels.push(
+          this.makeChannel(
+            req.source_id,
+            name,
+            name.toUpperCase(),
+            unit,
+            "scalar",
+            "f32",
+            [],
+            idx % 2 === 0 ? "aux_sine" : "aux_cos",
+            idx,
+            pickId(name, "scalar", "f32", unit),
+          ),
+        );
+      });
+    } else if (req.protocol.codec === "fixed_schema_binary") {
+      req.protocol.fields.forEach((field, idx) => {
+        const modality: ChannelModalityDto = field.is_state_enum
+          ? "state_machine"
+          : field.scalar_type === "bool"
+            ? "digital_bool"
+            : "scalar";
+        const role: InternalChannelDef["signalRole"] =
+          modality === "state_machine"
+            ? "aux_state"
+            : modality === "digital_bool"
+              ? "aux_bool"
+              : idx % 2 === 0
+                ? "aux_sine"
+                : "aux_cos";
+        const unit = field.unit ?? null;
+        channels.push(
+          this.makeChannel(
+            req.source_id,
+            field.name,
+            field.name,
+            unit,
+            modality,
+            field.scalar_type,
+            modality === "state_machine" ? DEFAULT_STATE_LABELS : [],
+            role,
+            idx,
+            pickId(field.name, modality, field.scalar_type, unit),
+          ),
+        );
+      });
+    } else {
+      const analogCount =
+        req.transport.kind === "sim" ? clamp(req.transport.analog_channels, 1, 16) : 4;
+      channels.push(...this.buildSimPresetChannels(req.source_id, analogCount, prevByLocalPath));
+    }
+    return channels;
+  }
+
+  private resolveSampleRateHz(req: CreateSourceRequestDto_Deserialize): number {
+    if (req.transport.kind === "sim") {
+      return req.transport.sample_rate_hz ?? 1_000_000;
+    }
+    if (req.clock.mode === "tier2_software_pll" && req.clock.nominal_sample_rate_hz) {
+      return req.clock.nominal_sample_rate_hz;
+    }
+    if (req.clock.mode === "tier1_hardware_counter" && req.clock.tick_hz) {
+      return req.clock.tick_hz;
+    }
+    return 250_000;
   }
 
   getNowNs(): number {
@@ -340,71 +515,15 @@ export class MockSimulationCore {
   }
 
   createSource(req: CreateSourceRequestDto_Deserialize): SourceSummaryDto_Serialize {
+    this.validateSourceRequest(req);
     if (this.sources.has(req.source_id)) {
       throw new Error(`Source '${req.source_id}' already exists`);
     }
 
+    const wasRunning = this.hasRunningSource();
     const transportKind = req.transport.kind;
-    let sampleRateHz = 250_000;
-    if (req.transport.kind === "sim") {
-      sampleRateHz = req.transport.sample_rate_hz ?? 1_000_000;
-    } else if (req.clock.mode === "tier2_software_pll" && req.clock.nominal_sample_rate_hz) {
-      sampleRateHz = req.clock.nominal_sample_rate_hz;
-    }
-
-    const channels: InternalChannelDef[] = [];
-    if (req.protocol.codec === "just_float" || req.protocol.codec === "fire_water") {
-      const names =
-        req.protocol.channel_names.length > 0 ? req.protocol.channel_names : ["ch0", "ch1", "ch2"];
-      names.forEach((name, idx) => {
-        channels.push(
-          this.makeChannel(
-            req.source_id,
-            name,
-            name.toUpperCase(),
-            idx === 0 ? "V" : "A",
-            "scalar",
-            "f32",
-            [],
-            idx % 2 === 0 ? "aux_sine" : "aux_cos",
-            idx,
-          ),
-        );
-      });
-    } else if (req.protocol.codec === "fixed_schema_binary") {
-      req.protocol.fields.forEach((field, idx) => {
-        const modality: ChannelModalityDto = field.is_state_enum
-          ? "state_machine"
-          : field.scalar_type === "bool"
-            ? "digital_bool"
-            : "scalar";
-        const role: InternalChannelDef["signalRole"] =
-          modality === "state_machine"
-            ? "aux_state"
-            : modality === "digital_bool"
-              ? "aux_bool"
-              : idx % 2 === 0
-                ? "aux_sine"
-                : "aux_cos";
-        channels.push(
-          this.makeChannel(
-            req.source_id,
-            field.name,
-            field.name,
-            field.unit ?? null,
-            modality,
-            field.scalar_type,
-            modality === "state_machine" ? DEFAULT_STATE_LABELS : [],
-            role,
-            idx,
-          ),
-        );
-      });
-    } else {
-      const analogCount =
-        req.transport.kind === "sim" ? clamp(req.transport.analog_channels, 1, 16) : 4;
-      channels.push(...this.buildSimPresetChannels(req.source_id, analogCount));
-    }
+    const sampleRateHz = this.resolveSampleRateHz(req);
+    const channels = this.buildChannelDefsForRequest(req);
 
     const summary: SourceSummaryDto_Serialize = {
       source_id: req.source_id,
@@ -428,13 +547,74 @@ export class MockSimulationCore {
       droppedPackets: 0,
     });
 
+    this.recordRunBoundaryIfResuming(wasRunning);
+    return { ...summary };
+  }
+
+  updateSource(
+    sourceId: string,
+    req: CreateSourceRequestDto_Deserialize,
+  ): SourceSummaryDto_Serialize {
+    this.validateSourceRequest(req);
+    const existing = this.sources.get(sourceId);
+    if (!existing) {
+      throw new Error(`Unknown source '${sourceId}'`);
+    }
+    if (req.source_id !== sourceId && this.sources.has(req.source_id)) {
+      throw new Error(`Source '${req.source_id}' already exists`);
+    }
+
+    const wasRunning = this.hasRunningSource();
+    const prevByLocalPath = new Map<string, InternalChannelDef>();
+    for (const ch of existing.channels) {
+      prevByLocalPath.set(ch.localPath, ch);
+    }
+
+    const preserveMap = req.source_id === sourceId ? prevByLocalPath : undefined;
+    // Remove old channel entries before registering the reconciled/replacement set
+    for (const oldCh of existing.channels) {
+      this.channelsById.delete(oldCh.channelId);
+    }
+
+    const transportKind = req.transport.kind;
+    const sampleRateHz = this.resolveSampleRateHz(req);
+    const channels = this.buildChannelDefsForRequest(req, preserveMap);
+
+    const summary: SourceSummaryDto_Serialize = {
+      source_id: req.source_id,
+      display_name: req.display_name?.trim() || `${req.source_id} (${transportKind})`,
+      transport_kind: transportKind,
+      state: req.auto_start ? "running" : "stopped",
+      raw_recording_path: null,
+    };
+
+    if (req.source_id !== sourceId) {
+      this.sources.delete(sourceId);
+    }
+    this.sources.set(req.source_id, {
+      summary,
+      config: normalizeSourceConfigToSerialize(req),
+      sampleRateHz,
+      replayTotalBytes: req.transport.kind === "raw_file_replay" ? 128 * 1024 * 1024 : 0,
+      replayProgressRatio: req.source_id === sourceId ? existing.replayProgressRatio : 0,
+      replaySpeed: req.transport.kind === "raw_file_replay" ? (req.transport.playback_speed ?? 1) : 1,
+      replayPaused: false,
+      replayLoop: req.transport.kind === "raw_file_replay" ? req.transport.loop_playback : true,
+      isReplay: req.transport.kind === "raw_file_replay",
+      channels,
+      droppedPackets: existing.droppedPackets,
+    });
+
+    this.recordRunBoundaryIfResuming(wasRunning);
     return { ...summary };
   }
 
   startSource(sourceId: string): SourceSummaryDto_Serialize {
     const src = this.sources.get(sourceId);
     if (!src) throw new Error(`Unknown source '${sourceId}'`);
+    const wasRunning = this.hasRunningSource();
     src.summary = { ...src.summary, state: "running" };
+    this.recordRunBoundaryIfResuming(wasRunning);
     return { ...src.summary };
   }
 
@@ -452,11 +632,18 @@ export class MockSimulationCore {
       this.channelsById.delete(ch.channelId);
     }
     this.sources.delete(sourceId);
+    if (this.sources.size === 0) {
+      this.runBoundariesNs.length = 0;
+      this.lastBoundarySimNs = 0;
+      this.simTimeNs = 0;
+      this.prevSimTimeNs = 0;
+    }
   }
 
   seekReplaySource(req: SeekReplayRequestDto_Deserialize): void {
     const src = this.sources.get(req.source_id);
     if (!src) throw new Error(`Unknown source '${req.source_id}'`);
+    const wasRunning = this.hasRunningSource();
     if (req.offset_ratio != null) {
       src.replayProgressRatio = clamp(req.offset_ratio, 0, 1);
     }
@@ -470,6 +657,7 @@ export class MockSimulationCore {
     if (req.playback_speed != null) {
       src.replaySpeed = clamp(req.playback_speed, 0.1, 20);
     }
+    this.recordRunBoundaryIfResuming(wasRunning);
   }
 
   setRawRecorder(req: RawRecorderRequestDto_Deserialize): SourceSummaryDto_Serialize {
@@ -609,6 +797,17 @@ export class MockSimulationCore {
   }
 
   sendDownlink(req: SendDownlinkRequestDto_Deserialize, nowMs = Date.now()): DownlinkReceiptDto {
+    const targetSrc = this.sources.get(req.source_id);
+    if (
+      targetSrc &&
+      targetSrc.config.transport.kind === "udp" &&
+      !targetSrc.config.transport.remote_tx_addr
+    ) {
+      throw new Error(
+        `UDP source '${req.source_id}' has no remote_tx_addr configured for outbound TX`,
+      );
+    }
+
     this.totalDownlinkCount += 1;
 
     if (req.priority === "normal" && req.coalesce_key) {
@@ -677,9 +876,12 @@ export class MockSimulationCore {
   step(dtMs: number, nowMs = Date.now()): MockStepResult {
     this.drainCoalescedQueue(nowMs);
 
+    const anyRunning = this.hasRunningSource();
     const safeDtMs = clamp(dtMs, 1, 100);
     this.prevSimTimeNs = this.simTimeNs;
-    this.simTimeNs += Math.round(safeDtMs * 1_000_000);
+    if (anyRunning) {
+      this.simTimeNs += Math.round(safeDtMs * 1_000_000);
+    }
     this.frameSeq = (this.frameSeq + 1) >>> 0;
 
     // Advance replay progress
@@ -1051,20 +1253,22 @@ export class MockSimulationCore {
     const winTEndNs = winTStartNs + winTSpanNs;
 
     const tracks: DdsfTrackBuildInput[] = [];
-    for (let i = 0; i < scope.tracks.length; i += 1) {
-      const binding = scope.tracks[i];
-      if (!binding.visible) continue;
-      const ch = this.channelsById.get(binding.channel_id);
-      if (!ch) continue;
-      const src = this.sources.get(ch.sourceId);
-      const sampleRateHz = src?.sampleRateHz ?? 2_000_000;
+    if (this.simTimeNs > 0 || this.hasRunningSource()) {
+      for (let i = 0; i < scope.tracks.length; i += 1) {
+        const binding = scope.tracks[i];
+        if (!binding.visible) continue;
+        const ch = this.channelsById.get(binding.channel_id);
+        if (!ch) continue;
+        const src = this.sources.get(ch.sourceId);
+        const sampleRateHz = src?.sampleRateHz ?? 2_000_000;
 
-      if (binding.lane === "analog" || ch.modality === "scalar") {
-        tracks.push(this.extractAnalogTrack(ch, sampleRateHz, winTStartNs, winTSpanNs, scope.canvasWidthPx));
-      } else if (binding.lane === "digital" || ch.modality === "digital_bool") {
-        tracks.push(this.extractDigitalTrack(ch, winTStartNs, winTEndNs));
-      } else if (binding.lane === "state_ribbon" || ch.modality === "state_machine") {
-        tracks.push(this.extractStateRibbonTrack(ch, winTStartNs, winTEndNs));
+        if (binding.lane === "analog" || ch.modality === "scalar") {
+          tracks.push(this.extractAnalogTrack(ch, sampleRateHz, winTStartNs, winTSpanNs, scope.canvasWidthPx));
+        } else if (binding.lane === "digital" || ch.modality === "digital_bool") {
+          tracks.push(this.extractDigitalTrack(ch, winTStartNs, winTEndNs));
+        } else if (binding.lane === "state_ribbon" || ch.modality === "state_machine") {
+          tracks.push(this.extractStateRibbonTrack(ch, winTStartNs, winTEndNs));
+        }
       }
     }
 

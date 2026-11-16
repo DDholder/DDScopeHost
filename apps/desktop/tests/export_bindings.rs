@@ -11,6 +11,8 @@ fn export_specta_bindings() {
         "getEngineInfo",
         "listSerialPorts",
         "createSource",
+        "updateSource",
+        "getRunBoundaries",
         "startSource",
         "stopSource",
         "removeSource",

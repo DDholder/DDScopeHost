@@ -271,6 +271,17 @@ export class MockDdsfController {
     return this.callRpc<SourceSummaryDto_Serialize>("createSource", config);
   }
 
+  updateSource(
+    sourceId: string,
+    config: CreateSourceRequestDto_Deserialize,
+  ): Promise<SourceSummaryDto_Serialize> {
+    return this.callRpc<SourceSummaryDto_Serialize>("updateSource", sourceId, config);
+  }
+
+  getRunBoundaries(): Promise<number[]> {
+    return this.callRpc<number[]>("getRunBoundaries");
+  }
+
   startSource(sourceId: string): Promise<SourceSummaryDto_Serialize> {
     return this.callRpc<SourceSummaryDto_Serialize>("startSource", sourceId);
   }

@@ -63,7 +63,8 @@ export function ChannelTreeSidebar() {
   const telemetryBySource = useWorkspaceStore((s) => s.telemetryBySource);
   const focusedScopeId = useWorkspaceStore((s) => s.focusedScopeId);
   const scopeOrder = useWorkspaceStore((s) => s.scopeOrder);
-  const setSourceWizardOpen = useWorkspaceStore((s) => s.setSourceWizardOpen);
+  const openCreateSourceWizard = useWorkspaceStore((s) => s.openCreateSourceWizard);
+  const openEditSourceWizard = useWorkspaceStore((s) => s.openEditSourceWizard);
   const startSource = useWorkspaceStore((s) => s.startSource);
   const stopSource = useWorkspaceStore((s) => s.stopSource);
   const removeSource = useWorkspaceStore((s) => s.removeSource);
@@ -296,7 +297,7 @@ export function ChannelTreeSidebar() {
             type="button"
             className="scope-btn scope-btn-accent"
             data-testid="add-source-btn"
-            onClick={() => setSourceWizardOpen(true)}
+            onClick={() => openCreateSourceWizard()}
           >
             {t("sidebar.newSource")}
           </button>
@@ -416,7 +417,7 @@ export function ChannelTreeSidebar() {
                 <button
                   type="button"
                   className="scope-btn scope-btn-accent"
-                  onClick={() => setSourceWizardOpen(true)}
+                  onClick={() => openCreateSourceWizard()}
                 >
                   {t("sidebar.newSource")}
                 </button>
@@ -481,6 +482,15 @@ export function ChannelTreeSidebar() {
                           onClick={() => toggleRawRecorder(src.source_id, !isRecording)}
                         >
                           {isRecording ? t("sidebar.recActive") : t("sidebar.recIdle")}
+                        </button>
+                        <button
+                          type="button"
+                          className="scope-btn-xs"
+                          title={t("sidebar.editTitle")}
+                          data-testid={`edit-source-${src.source_id}`}
+                          onClick={() => openEditSourceWizard(src.source_id)}
+                        >
+                          {t("sidebar.edit")}
                         </button>
                         <button
                           type="button"

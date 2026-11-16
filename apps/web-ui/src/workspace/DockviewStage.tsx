@@ -39,6 +39,7 @@ function MsoScopePanel(props: IDockviewPanelProps<ScopePanelParams>) {
   const scopeId = props.params.scopeId;
   const config = useWorkspaceStore((s) => s.scopes[scopeId]);
   const channelsById = useWorkspaceStore((s) => s.channelsById);
+  const runBoundariesNs = useWorkspaceStore((s) => s.runBoundariesNs);
   const focusedScopeId = useWorkspaceStore((s) => s.focusedScopeId);
   const setFocusedScopeId = useWorkspaceStore((s) => s.setFocusedScopeId);
   const updateScope = useWorkspaceStore((s) => s.updateScope);
@@ -78,6 +79,7 @@ function MsoScopePanel(props: IDockviewPanelProps<ScopePanelParams>) {
       callbacks={callbacks}
       locale={locale}
       isFocused={focusedScopeId === scopeId}
+      runBoundariesNs={runBoundariesNs}
       onFocusScope={setFocusedScopeId}
       onCanvasWidthChanged={setScopeCanvasWidth}
     />
@@ -92,6 +94,7 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
   const channelGroups = useWorkspaceStore((s) => s.channelGroups);
   const commands = useWorkspaceStore((s) => s.commands);
   const scopes = useWorkspaceStore((s) => s.scopes);
+  const runBoundariesNs = useWorkspaceStore((s) => s.runBoundariesNs);
   const focusedScopeId = useWorkspaceStore((s) => s.focusedScopeId);
   const setFocusedScopeId = useWorkspaceStore((s) => s.setFocusedScopeId);
   const updateScope = useWorkspaceStore((s) => s.updateScope);
@@ -146,6 +149,7 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
       commands={commands}
       scopes={scopes}
       focusedScopeId={focusedScopeId}
+      runBoundariesNs={runBoundariesNs}
       scopeCallbacks={scopeCallbacks}
       locale={locale}
       onFocusScope={setFocusedScopeId}

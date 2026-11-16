@@ -17,6 +17,8 @@ pub fn create_specta_builder() -> Builder<tauri::Wry> {
             commands::get_engine_info,
             commands::list_serial_ports,
             commands::create_source,
+            commands::update_source,
+            commands::get_run_boundaries,
             commands::start_source,
             commands::stop_source,
             commands::remove_source,

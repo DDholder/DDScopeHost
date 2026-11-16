@@ -26,6 +26,7 @@ import {
   hitTestHudHandle,
   renderScopeHud,
   type HudHitTarget,
+  type ScopeRunBoundaryOverlay,
 } from "./hud-overlay.ts";
 import {
   DEFAULT_Y_AXIS_CONFIG,
@@ -59,6 +60,7 @@ export interface ScopeViewportWidgetProps {
   callbacks: ScopeCallbacks;
   locale?: UiLocale;
   isFocused?: boolean;
+  runBoundariesNs?: ReadonlyArray<number>;
   onFocusScope?: (scopeId: number) => void;
   onCanvasWidthChanged?: (scopeId: number, widthPx: number) => void;
 }
@@ -155,6 +157,7 @@ export function ScopeViewportWidget({
   callbacks,
   locale = "en",
   isFocused = false,
+  runBoundariesNs = [],
   onFocusScope,
   onCanvasWidthChanged,
 }: ScopeViewportWidgetProps) {
@@ -230,6 +233,9 @@ export function ScopeViewportWidget({
   });
 
   const hoverHandleRef = useRef<HudHitTarget>("none");
+  const pointerHoverRef = useRef<{ cssX: number; cssY: number } | null>(null);
+  const runBoundariesRef = useRef<ReadonlyArray<number>>(runBoundariesNs);
+  runBoundariesRef.current = runBoundariesNs;
   const dragStateRef = useRef<{
     target: HudHitTarget;
     startCssX: number;
@@ -291,7 +297,7 @@ export function ScopeViewportWidget({
 
   useEffect(() => {
     dirtyRef.current = true;
-  }, [config, trackRenderConfigs, locale]);
+  }, [config, trackRenderConfigs, locale, runBoundariesNs]);
 
   // Subscribe to zero-copy DDSF frames for this scope without triggering React re-renders
   useEffect(() => {
@@ -493,7 +499,29 @@ export function ScopeViewportWidget({
           yAxisScale: cfg.yAxisScale ?? DEFAULT_Y_AXIS_CONFIG.yAxisScale,
           yAxisOffset: cfg.yAxisOffset ?? DEFAULT_Y_AXIS_CONFIG.yAxisOffset,
         };
-        const built = geometryRef.current.build(layout, dpr, scopeData, tracks, axisCfg);
+        const runBoundaries = runBoundariesRef.current;
+        const visibleBoundaries: ScopeRunBoundaryOverlay[] = [];
+        if (scopeData && scopeData.winTSpanNs > 0 && runBoundaries.length > 0) {
+          for (let i = 0; i < runBoundaries.length; i += 1) {
+            const bNs = runBoundaries[i];
+            const xNorm =
+              (bNs - scopeData.winTStartNs - scopeData.subpixelOffsetNs) /
+              scopeData.winTSpanNs;
+            if (xNorm >= 0 && xNorm <= 1) {
+              visibleBoundaries.push({ xNorm, runNumber: i + 2 });
+            }
+          }
+        }
+        const runBoundariesNorm =
+          visibleBoundaries.length > 0 ? visibleBoundaries.map((b) => b.xNorm) : undefined;
+        const built = geometryRef.current.build(
+          layout,
+          dpr,
+          scopeData,
+          tracks,
+          axisCfg,
+          runBoundariesNorm,
+        );
 
         const physW = Math.round(cssW * dpr);
         const physH = Math.round(cssH * dpr);
@@ -541,6 +569,8 @@ export function ScopeViewportWidget({
             p99FrameMs: perf.p99Ms,
             hoverHandle: hoverHandleRef.current,
             draggingHandle: dragStateRef.current.target,
+            pointerHover: pointerHoverRef.current,
+            runBoundaries: visibleBoundaries,
           });
         }
 
@@ -800,13 +830,20 @@ export function ScopeViewportWidget({
         yAxisScale: cfg.yAxisScale,
         yAxisOffset: cfg.yAxisOffset,
       });
-      if (hoverHandleRef.current !== hit) {
+      const isAxisGutter = hit === "yGutter" || hit === "xGutter";
+      pointerHoverRef.current = isAxisGutter ? { cssX, cssY } : null;
+      const handleChanged = hoverHandleRef.current !== hit;
+      if (handleChanged) {
         hoverHandleRef.current = hit;
         hudCanvas.style.cursor = cursorForHit(hit);
+      }
+      if (handleChanged || isAxisGutter) {
         dirtyRef.current = true;
       }
       return;
     }
+
+    pointerHoverRef.current = null;
 
     const ratio = clamp((cssX - layout.plotLeft) / Math.max(1, layout.plotWidth), 0, 1);
 
@@ -930,8 +967,32 @@ export function ScopeViewportWidget({
         hudCanvas.releasePointerCapture(ev.pointerId);
       }
       if (hudCanvas) {
+        const rect = hudCanvas.getBoundingClientRect();
+        pointerHoverRef.current = {
+          cssX: ev.clientX - rect.left,
+          cssY: ev.clientY - rect.top,
+        };
         hudCanvas.style.cursor = cursorForHit(hoverHandleRef.current);
       }
+      dirtyRef.current = true;
+    }
+  }, []);
+
+  const handlePointerLeave = useCallback(() => {
+    if (dragStateRef.current.target !== "none") return;
+    let changed = false;
+    if (pointerHoverRef.current !== null) {
+      pointerHoverRef.current = null;
+      changed = true;
+    }
+    if (hoverHandleRef.current !== "none") {
+      hoverHandleRef.current = "none";
+      changed = true;
+    }
+    if (hudCanvasRef.current) {
+      hudCanvasRef.current.style.cursor = "default";
+    }
+    if (changed) {
       dirtyRef.current = true;
     }
   }, []);
@@ -1655,6 +1716,7 @@ export function ScopeViewportWidget({
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
         />
         {dropActive && (
           <div className="scope-drop-banner">{t("scope.dropBanner")}</div>

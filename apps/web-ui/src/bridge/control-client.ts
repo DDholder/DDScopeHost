@@ -36,6 +36,11 @@ export interface ControlPlaneCommands {
   createSource(
     config: CreateSourceRequestDto_Deserialize,
   ): Promise<SourceSummaryDto_Serialize>;
+  updateSource?(
+    sourceId: string,
+    config: CreateSourceRequestDto_Deserialize,
+  ): Promise<SourceSummaryDto_Serialize>;
+  getRunBoundaries?(): Promise<(number | null)[]>;
   startSource(sourceId: string): Promise<SourceSummaryDto_Serialize>;
   stopSource(sourceId: string): Promise<SourceSummaryDto_Serialize>;
   removeSource(sourceId: string): Promise<null>;
@@ -360,6 +365,30 @@ export class BridgeClient {
       () => this.host.commands.createSource(config),
       () => this.mock.createSource(config),
     );
+  }
+
+  updateSource(
+    sourceId: string,
+    config: CreateSourceRequestDto_Deserialize,
+  ): Promise<SourceSummaryDto_Serialize> {
+    return this.withTauriOrMock(
+      () =>
+        this.host.commands.updateSource
+          ? this.host.commands.updateSource(sourceId, config)
+          : Promise.reject(new Error("updateSource command is unavailable on this host")),
+      () => this.mock.updateSource(sourceId, config),
+    );
+  }
+
+  async getRunBoundaries(): Promise<number[]> {
+    const raw = await this.withTauriOrMock<(number | null)[]>(
+      () =>
+        this.host.commands.getRunBoundaries
+          ? this.host.commands.getRunBoundaries()
+          : Promise.resolve([]),
+      () => this.mock.getRunBoundaries(),
+    );
+    return raw.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
   }
 
   startSource(sourceId: string): Promise<SourceSummaryDto_Serialize> {

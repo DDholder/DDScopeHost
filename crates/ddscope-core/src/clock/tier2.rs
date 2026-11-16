@@ -324,6 +324,15 @@ impl SecondOrderPll {
         }
     }
 
+    /// Seeds the monotonic timestamp floor before starting/replacing a stream session.
+    pub fn seed_monotonic_floor(&mut self, floor_ns: TimestampNs) {
+        self.last_emitted_ns = Some(
+            self.last_emitted_ns
+                .map_or(floor_ns, |prev| prev.max(floor_ns)),
+        );
+        self.reanchor_preserve_monotonic();
+    }
+
     /// Returns the most recently emitted sample timestamp, if any.
     pub fn last_emitted_ns(&self) -> Option<TimestampNs> {
         self.last_emitted_ns

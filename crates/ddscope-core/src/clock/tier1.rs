@@ -398,6 +398,14 @@ impl Tier1State {
         self.gap_resets = gaps;
     }
 
+    pub(crate) fn seed_monotonic_floor(&mut self, floor_ns: TimestampNs) {
+        self.last_emitted_ns = Some(
+            self.last_emitted_ns
+                .map_or(floor_ns, |prev| prev.max(floor_ns)),
+        );
+        self.reanchor_preserve_monotonic();
+    }
+
     pub(crate) fn last_emitted_ns(&self) -> Option<TimestampNs> {
         self.last_emitted_ns
     }

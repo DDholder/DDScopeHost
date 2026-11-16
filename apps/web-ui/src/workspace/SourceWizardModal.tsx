@@ -1,6 +1,8 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
   ClockConfigDto_Deserialize,
+  CreateSourceRequestDto_Deserialize,
+  CreateSourceRequestDto_Serialize,
   ProtocolConfigDto_Deserialize,
   SerialFlowControlDto,
   SerialParityDto,
@@ -8,7 +10,12 @@ import type {
   SerialStopBitsDto,
   TransportConfigDto_Deserialize,
 } from "../bridge/bindings.ts";
-import { bridgeClient } from "../bridge/control-client.ts";
+import {
+  bridgeClient,
+  formatUdpRemoteTxAddr,
+  parseUdpRemoteTxAddr,
+} from "../bridge/index.ts";
+import { synthesizeFallbackSourceConfig } from "./config-io.ts";
 import { useWorkspaceStore } from "./store.ts";
 import { useI18n } from "./use-i18n.ts";
 
@@ -34,9 +41,13 @@ type WizardProtocolCodec =
 export function SourceWizardModal() {
   const { t } = useI18n();
   const open = useWorkspaceStore((s) => s.sourceWizardOpen);
+  const editingSourceId = useWorkspaceStore((s) => s.editingSourceId);
   const setOpen = useWorkspaceStore((s) => s.setSourceWizardOpen);
   const createSource = useWorkspaceStore((s) => s.createSource);
+  const updateSource = useWorkspaceStore((s) => s.updateSource);
   const channelGroups = useWorkspaceStore((s) => s.channelGroups);
+  const sourceConfigsById = useWorkspaceStore((s) => s.sourceConfigsById);
+  const isEditMode = editingSourceId !== null;
 
   const [sourceId, setSourceId] = useState("sim1");
   const [displayName, setDisplayName] = useState("Auxiliary Test Source");
@@ -60,6 +71,8 @@ export function SourceWizardModal() {
 
   // Network fields
   const [udpBindAddr, setUdpBindAddr] = useState("0.0.0.0:9001");
+  const [udpRemoteIp, setUdpRemoteIp] = useState("");
+  const [udpRemotePort, setUdpRemotePort] = useState(9002);
   const [tcpAddr, setTcpAddr] = useState("127.0.0.1:9100");
 
   // Replay fields
@@ -77,26 +90,138 @@ export function SourceWizardModal() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const prevOpenRef = useRef(false);
+  const prevEditingIdRef = useRef<string | null>(null);
+  const baseConfigRef = useRef<CreateSourceRequestDto_Serialize | null>(null);
+
   useEffect(() => {
-    if (!open) return;
-    const existingIds = new Set(channelGroups.map((g) => g.source.source_id));
-    let idx = channelGroups.length;
-    while (existingIds.has(`src${idx}`)) {
-      idx += 1;
+    if (!open) {
+      prevOpenRef.current = false;
+      prevEditingIdRef.current = null;
+      baseConfigRef.current = null;
+      return;
     }
-    setSourceId(`src${idx}`);
-    setDisplayName(t("wizard.defaultName", { index: idx }));
+
+    const sessionChanged =
+      !prevOpenRef.current || prevEditingIdRef.current !== editingSourceId;
+    if (!sessionChanged) {
+      return;
+    }
+    prevOpenRef.current = true;
+    prevEditingIdRef.current = editingSourceId;
     setErrorMsg(null);
+
+    if (editingSourceId !== null) {
+      const grp = channelGroups.find((g) => g.source.source_id === editingSourceId);
+      const existingCfg =
+        sourceConfigsById[editingSourceId] ??
+        (grp ? synthesizeFallbackSourceConfig(grp) : null);
+      baseConfigRef.current = existingCfg;
+
+      if (existingCfg) {
+        setSourceId(existingCfg.source_id);
+        setDisplayName(existingCfg.display_name ?? "");
+        setAutoStart(existingCfg.auto_start);
+
+        setTransportKind(existingCfg.transport.kind);
+        switch (existingCfg.transport.kind) {
+          case "sim":
+            setSimRateHz(existingCfg.transport.sample_rate_hz ?? 1_000_000);
+            setSimChannels(existingCfg.transport.analog_channels);
+            setSimGlitch(existingCfg.transport.enable_glitch);
+            break;
+          case "serial":
+            setPortName(existingCfg.transport.port_name);
+            setBaudRate(existingCfg.transport.baud_rate);
+            setParity(existingCfg.transport.parity);
+            setStopBits(existingCfg.transport.stop_bits);
+            setFlowControl(existingCfg.transport.flow_control);
+            break;
+          case "udp": {
+            setUdpBindAddr(existingCfg.transport.bind_addr);
+            const parsed = parseUdpRemoteTxAddr(existingCfg.transport.remote_tx_addr, 9002);
+            setUdpRemoteIp(parsed.ip);
+            setUdpRemotePort(parsed.port);
+            break;
+          }
+          case "tcp_client":
+            setTcpAddr(existingCfg.transport.remote_addr);
+            break;
+          case "tcp_server":
+            setTcpAddr(existingCfg.transport.listen_addr);
+            break;
+          case "raw_file_replay":
+            setReplayPath(existingCfg.transport.file_path);
+            setReplayFullSpeed(existingCfg.transport.full_speed_offline);
+            setReplaySpeed(existingCfg.transport.playback_speed ?? 1.0);
+            setReplayLoop(existingCfg.transport.loop_playback);
+            break;
+        }
+
+        setClockMode(existingCfg.clock.mode);
+        switch (existingCfg.clock.mode) {
+          case "tier1_hardware_counter":
+            setHwTickHz(existingCfg.clock.tick_hz ?? 1_000_000);
+            break;
+          case "tier2_software_pll":
+            if (existingCfg.clock.nominal_sample_rate_hz == null) {
+              setPllAutoEstimate(true);
+            } else {
+              setPllAutoEstimate(false);
+              setNominalRateHz(existingCfg.clock.nominal_sample_rate_hz);
+            }
+            break;
+          case "tier3_host_arrival":
+            break;
+        }
+
+        setProtocolCodec(existingCfg.protocol.codec);
+        if (
+          existingCfg.protocol.codec === "just_float" ||
+          existingCfg.protocol.codec === "fire_water"
+        ) {
+          setChannelNamesText(existingCfg.protocol.channel_names.join(", "));
+        }
+      } else {
+        setSourceId(editingSourceId);
+        setDisplayName("");
+      }
+    } else {
+      baseConfigRef.current = null;
+      const existingIds = new Set(channelGroups.map((g) => g.source.source_id));
+      let idx = channelGroups.length;
+      while (existingIds.has(`src${idx}`)) {
+        idx += 1;
+      }
+      setSourceId(`src${idx}`);
+      setDisplayName(t("wizard.defaultName", { index: idx }));
+      setTransportKind("sim");
+      setClockMode("tier2_software_pll");
+      setProtocolCodec("sim_preset");
+      setAutoStart(true);
+      setSimRateHz(1_000_000);
+      setSimChannels(4);
+      setSimGlitch(true);
+      setUdpBindAddr("0.0.0.0:9001");
+      setUdpRemoteIp("");
+      setUdpRemotePort(9002);
+      setTcpAddr("127.0.0.1:9100");
+      setPllAutoEstimate(false);
+      setNominalRateHz(500_000);
+      setHwTickHz(1_000_000);
+      setChannelNamesText("va, vb, vc, iq");
+    }
+
     bridgeClient
       .listSerialPorts()
       .then((ports) => {
         setSerialPorts(ports);
-        if (ports.length > 0) {
+        if (editingSourceId === null && ports.length > 0) {
           setPortName(ports[0].port_name);
         }
       })
       .catch(() => {});
-  }, [open, channelGroups, t]);
+  }, [open, editingSourceId, channelGroups, sourceConfigsById, t]);
 
   if (!open) return null;
 
@@ -121,6 +246,21 @@ export function SourceWizardModal() {
       return;
     }
 
+    const baseCfg = baseConfigRef.current;
+    const baseTransport = baseCfg?.transport;
+    const baseClock = baseCfg?.clock;
+    const baseProtocol = baseCfg?.protocol;
+
+    let udpRemoteTxAddr: string | null = null;
+    if (transportKind === "udp" && udpRemoteIp.trim().length > 0) {
+      try {
+        udpRemoteTxAddr = formatUdpRemoteTxAddr(udpRemoteIp, udpRemotePort);
+      } catch {
+        setErrorMsg(t("wizard.errUdpPort"));
+        return;
+      }
+    }
+
     let transport: TransportConfigDto_Deserialize;
     switch (transportKind) {
       case "sim":
@@ -129,7 +269,8 @@ export function SourceWizardModal() {
           sample_rate_hz: simRateHz,
           analog_channels: simChannels,
           enable_glitch: simGlitch,
-          glitch_period_samples: 500_000,
+          glitch_period_samples:
+            baseTransport?.kind === "sim" ? baseTransport.glitch_period_samples : 500_000,
         };
         break;
       case "serial":
@@ -137,35 +278,36 @@ export function SourceWizardModal() {
           kind: "serial",
           port_name: portName,
           baud_rate: baudRate,
-          data_bits: 8,
+          data_bits: baseTransport?.kind === "serial" ? baseTransport.data_bits : 8,
           parity,
           stop_bits: stopBits,
           flow_control: flowControl,
-          auto_reconnect: true,
+          auto_reconnect: baseTransport?.kind === "serial" ? baseTransport.auto_reconnect : true,
         };
         break;
       case "udp":
         transport = {
           kind: "udp",
           bind_addr: udpBindAddr,
-          multicast_group: null,
-          recv_buffer_bytes: 4 * 1024 * 1024,
-          remote_tx_addr: null,
+          multicast_group: baseTransport?.kind === "udp" ? baseTransport.multicast_group : null,
+          recv_buffer_bytes:
+            baseTransport?.kind === "udp" ? baseTransport.recv_buffer_bytes : 4 * 1024 * 1024,
+          remote_tx_addr: udpRemoteTxAddr,
         };
         break;
       case "tcp_client":
         transport = {
           kind: "tcp_client",
           remote_addr: tcpAddr,
-          auto_reconnect: true,
-          tcp_nodelay: true,
+          auto_reconnect: baseTransport?.kind === "tcp_client" ? baseTransport.auto_reconnect : true,
+          tcp_nodelay: baseTransport?.kind === "tcp_client" ? baseTransport.tcp_nodelay : true,
         };
         break;
       case "tcp_server":
         transport = {
           kind: "tcp_server",
           listen_addr: tcpAddr,
-          tcp_nodelay: true,
+          tcp_nodelay: baseTransport?.kind === "tcp_server" ? baseTransport.tcp_nodelay : true,
         };
         break;
       case "raw_file_replay":
@@ -175,7 +317,10 @@ export function SourceWizardModal() {
           full_speed_offline: replayFullSpeed,
           playback_speed: replaySpeed,
           loop_playback: replayLoop,
-          nominal_byte_rate: 4_000_000,
+          nominal_byte_rate:
+            baseTransport?.kind === "raw_file_replay"
+              ? baseTransport.nominal_byte_rate
+              : 4_000_000,
         };
         break;
     }
@@ -186,7 +331,7 @@ export function SourceWizardModal() {
         clock = {
           mode: "tier1_hardware_counter",
           tick_hz: hwTickHz,
-          counter_bits: 32,
+          counter_bits: baseClock?.mode === "tier1_hardware_counter" ? baseClock.counter_bits : 32,
         };
         break;
       case "tier2_software_pll":
@@ -223,31 +368,40 @@ export function SourceWizardModal() {
         };
         break;
       case "fixed_schema_binary":
-        protocol = {
-          codec: "fixed_schema_binary",
-          header_magic: [0xaa, 0x55],
-          has_hw_tick_first_col: true,
-          fields: [
-            { name: "v_out", scalar_type: "f32", scale: 1, offset: 0, unit: "V", is_state_enum: false },
-            { name: "i_out", scalar_type: "f32", scale: 1, offset: 0, unit: "A", is_state_enum: false },
-            { name: "en_flag", scalar_type: "bool", scale: 1, offset: 0, unit: null, is_state_enum: false },
-            { name: "fsm", scalar_type: "u8", scale: 1, offset: 0, unit: null, is_state_enum: true },
-          ],
-        };
+        protocol =
+          baseProtocol?.codec === "fixed_schema_binary"
+            ? baseProtocol
+            : {
+                codec: "fixed_schema_binary",
+                header_magic: [0xaa, 0x55],
+                has_hw_tick_first_col: true,
+                fields: [
+                  { name: "v_out", scalar_type: "f32", scale: 1, offset: 0, unit: "V", is_state_enum: false },
+                  { name: "i_out", scalar_type: "f32", scale: 1, offset: 0, unit: "A", is_state_enum: false },
+                  { name: "en_flag", scalar_type: "bool", scale: 1, offset: 0, unit: null, is_state_enum: false },
+                  { name: "fsm", scalar_type: "u8", scale: 1, offset: 0, unit: null, is_state_enum: true },
+                ],
+              };
         break;
     }
+
+    const payload: CreateSourceRequestDto_Deserialize = {
+      source_id: trimmedId,
+      display_name: displayName.trim() || null,
+      transport,
+      clock,
+      protocol,
+      auto_start: autoStart,
+    };
 
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      await createSource({
-        source_id: trimmedId,
-        display_name: displayName.trim() || null,
-        transport,
-        clock,
-        protocol,
-        auto_start: autoStart,
-      });
+      if (isEditMode && editingSourceId !== null) {
+        await updateSource(editingSourceId, payload);
+      } else {
+        await createSource(payload);
+      }
       setOpen(false);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -257,10 +411,15 @@ export function SourceWizardModal() {
   };
 
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={t("wizard.ariaLabel")}>
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={isEditMode ? t("wizard.editAriaLabel") : t("wizard.ariaLabel")}
+    >
       <div className="modal-panel">
         <div className="modal-header">
-          <h2>{t("wizard.title")}</h2>
+          <h2>{isEditMode ? t("wizard.editTitle", { sourceId: editingSourceId }) : t("wizard.title")}</h2>
           <button type="button" className="icon-btn" onClick={() => setOpen(false)}>
             ×
           </button>
@@ -400,14 +559,38 @@ export function SourceWizardModal() {
           )}
 
           {transportKind === "udp" && (
-            <label className="wizard-field">
-              <span>{t("wizard.udpBind")}</span>
-              <input
-                type="text"
-                value={udpBindAddr}
-                onChange={(e) => setUdpBindAddr(e.target.value)}
-              />
-            </label>
+            <div className="wizard-grid">
+              <label className="wizard-field">
+                <span>{t("wizard.udpBind")}</span>
+                <input
+                  type="text"
+                  value={udpBindAddr}
+                  onChange={(e) => setUdpBindAddr(e.target.value)}
+                  data-testid="wizard-udp-bind"
+                />
+              </label>
+              <label className="wizard-field">
+                <span>{t("wizard.udpRemoteIp")}</span>
+                <input
+                  type="text"
+                  value={udpRemoteIp}
+                  placeholder={t("wizard.udpRemotePlaceholder")}
+                  onChange={(e) => setUdpRemoteIp(e.target.value)}
+                  data-testid="wizard-udp-remote-ip"
+                />
+              </label>
+              <label className="wizard-field">
+                <span>{t("wizard.udpRemotePort")}</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={udpRemotePort}
+                  onChange={(e) => setUdpRemotePort(Number(e.target.value) || 0)}
+                  data-testid="wizard-udp-remote-port"
+                />
+              </label>
+            </div>
           )}
 
           {(transportKind === "tcp_client" || transportKind === "tcp_server") && (
@@ -525,7 +708,7 @@ export function SourceWizardModal() {
               checked={autoStart}
               onChange={(e) => setAutoStart(e.target.checked)}
             />
-            <span>{t("wizard.autoStart")}</span>
+            <span>{isEditMode ? t("wizard.autoStartEdit") : t("wizard.autoStart")}</span>
           </label>
 
           {errorMsg && <div className="wizard-error">{errorMsg}</div>}
@@ -540,7 +723,13 @@ export function SourceWizardModal() {
               disabled={submitting}
               data-testid="wizard-submit-btn"
             >
-              {submitting ? t("wizard.creating") : t("wizard.create")}
+              {submitting
+                ? isEditMode
+                  ? t("wizard.saving")
+                  : t("wizard.creating")
+                : isEditMode
+                  ? t("wizard.save")
+                  : t("wizard.create")}
             </button>
           </div>
         </form>

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle as ThreadJoinHandle;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwapOption;
 use bytes::{Bytes, BytesMut};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -34,13 +35,13 @@ use crate::storage::{
     NativeScalarSeries, PinnedGuard, ViewportExtract,
 };
 use crate::transport::{
-    list_serial_ports, OutboundFrame, PacketReceiver, PendingSchedulerStop, RawByteRecorder,
-    RawByteTap, RawFileReplayConfig, RawFileReplayTransport, RawTapDirection, ReplayControlHandle,
-    SerialConfig, SerialPortInfo, SerialTransport, SharedRawTap, SimConfig, SimControlHandle,
-    SimSignalTransport, TcpClientConfig, TcpClientTransport, TcpServerConfig, TcpServerTransport,
-    Transport, TransportCaps, TransportKind, TransportMetrics, TransportMetricsSnapshot,
-    TransportRegistry, TransportRuntimeConfig, TransportScheduler, TransportState, TxPriority,
-    UdpConfig, UdpTransport,
+    host_monotonic_ns, list_serial_ports, OutboundFrame, PacketReceiver, PendingSchedulerStop,
+    RawByteRecorder, RawByteTap, RawFileReplayConfig, RawFileReplayTransport, RawTapDirection,
+    ReplayControlHandle, SerialConfig, SerialPortInfo, SerialTransport, SharedRawTap, SimConfig,
+    SimControlHandle, SimSignalTransport, TcpClientConfig, TcpClientTransport, TcpServerConfig,
+    TcpServerTransport, Transport, TransportCaps, TransportKind, TransportMetrics,
+    TransportMetricsSnapshot, TransportRegistry, TransportRuntimeConfig, TransportScheduler,
+    TransportState, TxPriority, UdpConfig, UdpTransport,
 };
 use crate::types::{
     ChannelDescriptor, ChannelId, ChannelKind, CoreError, CoreResult, DataChunk, DecodedBatch,
@@ -414,6 +415,153 @@ impl WorkerTelemetryState {
     }
 }
 
+const MAX_RUN_BOUNDARIES: usize = 256;
+
+#[derive(Debug, Default)]
+struct TimelineInner {
+    active_runs: usize,
+    paused_virtual_ns: TimestampNs,
+    active_since_wall_ns: Option<TimestampNs>,
+    samples_at_last_boundary: u64,
+    ever_started: bool,
+    last_returned_virtual_ns: TimestampNs,
+    run_boundaries_ns: Vec<TimestampNs>,
+}
+
+/// Shared workspace acquisition clock that freezes whenever 0 sources are active
+/// and records seamless boundary dividers when a new run resumes after captured samples.
+#[derive(Debug, Default)]
+pub(crate) struct WorkspaceTimeline {
+    inner: Mutex<TimelineInner>,
+}
+
+impl WorkspaceTimeline {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn activate_locked(
+        inner: &mut TimelineInner,
+        live_running: usize,
+        wall_ns: TimestampNs,
+        hub_max_ts: Option<TimestampNs>,
+        hub_total_samples: u64,
+    ) {
+        let base_ns = inner
+            .paused_virtual_ns
+            .max(hub_max_ts.unwrap_or(0))
+            .max(inner.last_returned_virtual_ns);
+        if inner.ever_started && hub_total_samples > inner.samples_at_last_boundary {
+            if inner.run_boundaries_ns.last() != Some(&base_ns) {
+                inner.run_boundaries_ns.push(base_ns);
+                if inner.run_boundaries_ns.len() > MAX_RUN_BOUNDARIES {
+                    let excess = inner.run_boundaries_ns.len() - MAX_RUN_BOUNDARIES;
+                    inner.run_boundaries_ns.drain(..excess);
+                }
+            }
+            inner.samples_at_last_boundary = hub_total_samples;
+            inner.paused_virtual_ns = base_ns.saturating_add(1);
+        } else {
+            inner.paused_virtual_ns = base_ns;
+        }
+        inner.active_since_wall_ns = Some(wall_ns);
+        inner.active_runs = live_running.max(1);
+        inner.ever_started = true;
+    }
+
+    fn on_source_starting(
+        &self,
+        wall_ns: TimestampNs,
+        hub_max_ts: Option<TimestampNs>,
+        hub_total_samples: u64,
+    ) {
+        let mut inner = self.inner.lock();
+        if inner.active_runs == 0 {
+            Self::activate_locked(&mut inner, 1, wall_ns, hub_max_ts, hub_total_samples);
+        } else {
+            inner.active_runs += 1;
+            inner.ever_started = true;
+        }
+    }
+
+    fn sync_active_count(
+        &self,
+        live_running: usize,
+        wall_ns: TimestampNs,
+        hub_max_ts: Option<TimestampNs>,
+        hub_total_samples: u64,
+    ) -> TimestampNs {
+        let mut inner = self.inner.lock();
+        if live_running == 0 {
+            if let Some(since) = inner.active_since_wall_ns.take() {
+                let cur = inner.paused_virtual_ns.saturating_add(wall_ns.saturating_sub(since));
+                inner.paused_virtual_ns = cur.max(hub_max_ts.unwrap_or(0));
+            } else {
+                inner.paused_virtual_ns = inner.paused_virtual_ns.max(hub_max_ts.unwrap_or(0));
+            }
+            inner.active_runs = 0;
+            let ret = inner.paused_virtual_ns.max(inner.last_returned_virtual_ns);
+            inner.last_returned_virtual_ns = ret;
+            inner.paused_virtual_ns = ret;
+            ret
+        } else {
+            if inner.active_since_wall_ns.is_none() {
+                Self::activate_locked(
+                    &mut inner,
+                    live_running,
+                    wall_ns,
+                    hub_max_ts,
+                    hub_total_samples,
+                );
+            } else {
+                inner.active_runs = live_running;
+            }
+            let since = inner.active_since_wall_ns.unwrap_or(wall_ns);
+            let cur = inner
+                .paused_virtual_ns
+                .saturating_add(wall_ns.saturating_sub(since))
+                .max(hub_max_ts.unwrap_or(0))
+                .max(inner.last_returned_virtual_ns);
+            inner.last_returned_virtual_ns = cur;
+            cur
+        }
+    }
+
+    fn current_virtual_ns(&self, wall_ns: TimestampNs) -> TimestampNs {
+        let inner = self.inner.lock();
+        match inner.active_since_wall_ns {
+            Some(since) => inner
+                .paused_virtual_ns
+                .saturating_add(wall_ns.saturating_sub(since)),
+            None => inner.paused_virtual_ns,
+        }
+    }
+
+    fn ever_started(&self) -> bool {
+        self.inner.lock().ever_started
+    }
+
+    fn run_boundaries_ns(&self) -> Vec<TimestampNs> {
+        self.inner.lock().run_boundaries_ns.clone()
+    }
+
+    fn reset(&self) {
+        *self.inner.lock() = TimelineInner::default();
+    }
+}
+
+fn hub_timeline_metrics(hub: &ChannelHub) -> (Option<TimestampNs>, u64) {
+    let mut max_ts: Option<TimestampNs> = None;
+    let mut total_samples: u64 = 0;
+    for entry in hub.all_channels() {
+        total_samples = total_samples.saturating_add(entry.total_samples());
+        if let Some((ts, _)) = entry.latest_value() {
+            max_ts = Some(max_ts.map_or(ts, |prev| prev.max(ts)));
+        }
+    }
+    (max_ts, total_samples)
+}
+
 /// Pre-built components for constructing a [`SourceSession`] with custom or mock transports/codecs.
 pub struct SourceSessionComponents {
     pub source_id: SourceId,
@@ -424,6 +572,112 @@ pub struct SourceSessionComponents {
     pub runtime_config: TransportRuntimeConfig,
     pub sim_control: Option<SimControlHandle>,
     pub replay_control: Option<ReplayControlHandle>,
+}
+
+fn build_source_session_components(
+    config: SourceConfig,
+    transport_registry: &TransportRegistry,
+    protocol_registry: &ProtocolRegistry,
+) -> CoreResult<(SourceConfig, SourceSessionComponents)> {
+    if config.source_id.as_str().trim().is_empty() {
+        return Err(CoreError::InvalidConfig(
+            "SourceConfig source_id must not be empty".into(),
+        ));
+    }
+
+    let stored_config = config.clone();
+
+    let (transport, sim_control, replay_control): (
+        Box<dyn Transport>,
+        Option<SimControlHandle>,
+        Option<ReplayControlHandle>,
+    ) = match config.transport {
+        SourceTransportConfig::Sim(sim_cfg) => {
+            let sim = SimSignalTransport::new(sim_cfg)?;
+            let ctrl = sim.control_handle();
+            (Box::new(sim), Some(ctrl), None)
+        }
+        SourceTransportConfig::Serial(ser_cfg) => {
+            let ser = SerialTransport::new(ser_cfg)?;
+            (Box::new(ser), None, None)
+        }
+        SourceTransportConfig::Udp(udp_cfg) => {
+            let udp = UdpTransport::new(udp_cfg)?;
+            (Box::new(udp), None, None)
+        }
+        SourceTransportConfig::TcpClient(tcp_cfg) => {
+            let tcp = TcpClientTransport::new(tcp_cfg)?;
+            (Box::new(tcp), None, None)
+        }
+        SourceTransportConfig::TcpServer(srv_cfg) => {
+            let srv = TcpServerTransport::new(srv_cfg)?;
+            (Box::new(srv), None, None)
+        }
+        SourceTransportConfig::RawFileReplay(rep_cfg) => {
+            let rep = RawFileReplayTransport::new(rep_cfg)?;
+            let ctrl = rep.control_handle();
+            (Box::new(rep), None, Some(ctrl))
+        }
+        SourceTransportConfig::Custom {
+            transport_kind,
+            json_config,
+        } => {
+            let t = transport_registry.create(transport_kind, &json_config)?;
+            (t, None, None)
+        }
+    };
+
+    let clock = StreamClockSynchronizer::with_config(config.clock_mode, config.clock_config)?;
+
+    let codec: Box<dyn ProtocolCodec> = match config.protocol {
+        SourceProtocolConfig::SimPreset(mut p_cfg) => {
+            p_cfg.source_id = config.source_id.as_str().to_owned();
+            Box::new(SimPresetCodec::new(p_cfg)?)
+        }
+        SourceProtocolConfig::JustFloat(mut jf_cfg) => {
+            jf_cfg.source_id = config.source_id.as_str().to_owned();
+            Box::new(JustFloatCodec::new(jf_cfg)?)
+        }
+        SourceProtocolConfig::FixedSchemaBinary(mut fb_cfg) => {
+            fb_cfg.source_id = config.source_id.as_str().to_owned();
+            Box::new(FixedSchemaBinaryCodec::new(fb_cfg)?)
+        }
+        SourceProtocolConfig::FireWater(mut fw_cfg) => {
+            fw_cfg.source_id = config.source_id.as_str().to_owned();
+            Box::new(FireWaterCsvCodec::new(fw_cfg)?)
+        }
+        SourceProtocolConfig::Custom {
+            codec_id,
+            json_config,
+        } => protocol_registry.create(&codec_id, &json_config)?,
+    };
+
+    Ok((
+        stored_config,
+        SourceSessionComponents {
+            source_id: config.source_id,
+            display_name: config.display_name,
+            transport,
+            clock,
+            codec,
+            runtime_config: config.runtime,
+            sim_control,
+            replay_control,
+        },
+    ))
+}
+
+fn declared_descriptors_for_components(components: &SourceSessionComponents) -> Vec<ChannelDescriptor> {
+    components
+        .codec
+        .declared_channels()
+        .iter()
+        .cloned()
+        .map(|mut d| {
+            d.source_id = components.source_id.clone();
+            d
+        })
+        .collect()
 }
 
 /// Per-source acquisition, clock synchronization, protocol decoding, and storage ingestion pipeline (`TB6`).
@@ -443,6 +697,7 @@ pub struct SourceSession {
     replay_control: Option<ReplayControlHandle>,
     active_recorder: Option<(PathBuf, Arc<RawByteRecorder>)>,
     source_config: Option<SourceConfig>,
+    timeline: Arc<ArcSwapOption<WorkspaceTimeline>>,
 }
 
 impl std::fmt::Debug for SourceSession {
@@ -474,92 +729,9 @@ impl SourceSession {
         transport_registry: &TransportRegistry,
         protocol_registry: &ProtocolRegistry,
     ) -> CoreResult<Self> {
-        if config.source_id.as_str().trim().is_empty() {
-            return Err(CoreError::InvalidConfig(
-                "SourceConfig source_id must not be empty".into(),
-            ));
-        }
-
-        let stored_config = config.clone();
-
-        let (transport, sim_control, replay_control): (
-            Box<dyn Transport>,
-            Option<SimControlHandle>,
-            Option<ReplayControlHandle>,
-        ) = match config.transport {
-            SourceTransportConfig::Sim(sim_cfg) => {
-                let sim = SimSignalTransport::new(sim_cfg)?;
-                let ctrl = sim.control_handle();
-                (Box::new(sim), Some(ctrl), None)
-            }
-            SourceTransportConfig::Serial(ser_cfg) => {
-                let ser = SerialTransport::new(ser_cfg)?;
-                (Box::new(ser), None, None)
-            }
-            SourceTransportConfig::Udp(udp_cfg) => {
-                let udp = UdpTransport::new(udp_cfg)?;
-                (Box::new(udp), None, None)
-            }
-            SourceTransportConfig::TcpClient(tcp_cfg) => {
-                let tcp = TcpClientTransport::new(tcp_cfg)?;
-                (Box::new(tcp), None, None)
-            }
-            SourceTransportConfig::TcpServer(srv_cfg) => {
-                let srv = TcpServerTransport::new(srv_cfg)?;
-                (Box::new(srv), None, None)
-            }
-            SourceTransportConfig::RawFileReplay(rep_cfg) => {
-                let rep = RawFileReplayTransport::new(rep_cfg)?;
-                let ctrl = rep.control_handle();
-                (Box::new(rep), None, Some(ctrl))
-            }
-            SourceTransportConfig::Custom {
-                transport_kind,
-                json_config,
-            } => {
-                let t = transport_registry.create(transport_kind, &json_config)?;
-                (t, None, None)
-            }
-        };
-
-        let clock = StreamClockSynchronizer::with_config(config.clock_mode, config.clock_config)?;
-
-        let codec: Box<dyn ProtocolCodec> = match config.protocol {
-            SourceProtocolConfig::SimPreset(mut p_cfg) => {
-                p_cfg.source_id = config.source_id.as_str().to_owned();
-                Box::new(SimPresetCodec::new(p_cfg)?)
-            }
-            SourceProtocolConfig::JustFloat(mut jf_cfg) => {
-                jf_cfg.source_id = config.source_id.as_str().to_owned();
-                Box::new(JustFloatCodec::new(jf_cfg)?)
-            }
-            SourceProtocolConfig::FixedSchemaBinary(mut fb_cfg) => {
-                fb_cfg.source_id = config.source_id.as_str().to_owned();
-                Box::new(FixedSchemaBinaryCodec::new(fb_cfg)?)
-            }
-            SourceProtocolConfig::FireWater(mut fw_cfg) => {
-                fw_cfg.source_id = config.source_id.as_str().to_owned();
-                Box::new(FireWaterCsvCodec::new(fw_cfg)?)
-            }
-            SourceProtocolConfig::Custom {
-                codec_id,
-                json_config,
-            } => protocol_registry.create(&codec_id, &json_config)?,
-        };
-
-        let mut sess = Self::from_components(
-            SourceSessionComponents {
-                source_id: config.source_id,
-                display_name: config.display_name,
-                transport,
-                clock,
-                codec,
-                runtime_config: config.runtime,
-                sim_control,
-                replay_control,
-            },
-            hub,
-        )?;
+        let (stored_config, components) =
+            build_source_session_components(config, transport_registry, protocol_registry)?;
+        let mut sess = Self::from_components(components, hub)?;
         sess.source_config = Some(stored_config);
         Ok(sess)
     }
@@ -570,6 +742,7 @@ impl SourceSession {
         components: SourceSessionComponents,
         hub: Arc<ChannelHub>,
     ) -> CoreResult<Self> {
+        let declared_descriptors = declared_descriptors_for_components(&components);
         let source_id = components.source_id;
         if source_id.as_str().trim().is_empty() {
             return Err(CoreError::InvalidConfig(
@@ -583,16 +756,6 @@ impl SourceSession {
             .unwrap_or_else(|| source_id.as_str().to_owned());
 
         let protocol_name = components.codec.protocol_name();
-        let declared_descriptors: Vec<ChannelDescriptor> = components
-            .codec
-            .declared_channels()
-            .iter()
-            .cloned()
-            .map(|mut d| {
-                d.source_id = source_id.clone();
-                d
-            })
-            .collect();
 
         let channels = hub.register_channels(&declared_descriptors)?;
         let scheduler = TransportScheduler::new(components.transport, components.runtime_config);
@@ -613,6 +776,7 @@ impl SourceSession {
             replay_control: components.replay_control,
             active_recorder: None,
             source_config: None,
+            timeline: Arc::new(ArcSwapOption::empty()),
         })
     }
 
@@ -789,6 +953,11 @@ impl SourceSession {
             }
         };
 
+        if let Some(tl) = self.timeline.load_full() {
+            let (hub_max_ts, hub_total_samples) = hub_timeline_metrics(&self.hub);
+            tl.on_source_starting(host_monotonic_ns(), hub_max_ts, hub_total_samples);
+        }
+
         let worker_join = self.spawn_worker_thread(rx)?;
         self.worker_handle = Some(worker_join);
 
@@ -806,6 +975,7 @@ impl SourceSession {
             telemetry: Arc::clone(&self.telemetry),
             raw_tap: Arc::clone(self.scheduler.raw_tap()),
             sched_metrics: Arc::clone(self.scheduler.metrics()),
+            timeline: Arc::clone(&self.timeline),
         };
 
         std::thread::Builder::new()
@@ -1402,6 +1572,7 @@ pub struct CoreWorkspace {
     sources: RwLock<HashMap<SourceId, Arc<Mutex<SourceSession>>>>,
     scopes: Mutex<BTreeMap<ScopeId, ManagedScope>>,
     sync_groups: SyncGroupCoordinator,
+    timeline: Arc<WorkspaceTimeline>,
     frame_seq: AtomicU64,
     last_frame_pack_ns: AtomicU64,
     packer: Mutex<DdsfFramePacker>,
@@ -1437,6 +1608,7 @@ impl CoreWorkspace {
             sources: RwLock::new(HashMap::new()),
             scopes: Mutex::new(BTreeMap::new()),
             sync_groups: SyncGroupCoordinator::new(),
+            timeline: Arc::new(WorkspaceTimeline::new()),
             frame_seq: AtomicU64::new(0),
             last_frame_pack_ns: AtomicU64::new(0),
             packer: Mutex::new(DdsfFramePacker::new(DEFAULT_DDSF_PACKER_CAPACITY)),
@@ -1478,6 +1650,38 @@ impl CoreWorkspace {
         list_serial_ports()
     }
 
+    /// Returns all workspace run-divider boundary timestamps (nanoseconds on the unified clock).
+    pub fn run_boundaries_ns(&self) -> Vec<TimestampNs> {
+        self.timeline.run_boundaries_ns()
+    }
+
+    fn count_running_sources(&self) -> usize {
+        let arcs: Vec<_> = self.sources.read().values().cloned().collect();
+        arcs.into_iter().filter(|a| a.lock().is_running()).count()
+    }
+
+    fn resolve_workspace_now_ns(&self, caller_now_ns: TimestampNs) -> (TimestampNs, bool) {
+        if self.sources.read().is_empty() && !self.timeline.ever_started() {
+            return (caller_now_ns, true);
+        }
+        let live_running = self.count_running_sources();
+        let (hub_max_ts, hub_total_samples) = hub_timeline_metrics(&self.hub);
+        let v_now = self.timeline.sync_active_count(
+            live_running,
+            caller_now_ns,
+            hub_max_ts,
+            hub_total_samples,
+        );
+        (v_now, live_running > 0)
+    }
+
+    fn sync_timeline_state(&self, wall_ns: TimestampNs) -> TimestampNs {
+        let live_running = self.count_running_sources();
+        let (hub_max_ts, hub_total_samples) = hub_timeline_metrics(&self.hub);
+        self.timeline
+            .sync_active_count(live_running, wall_ns, hub_max_ts, hub_total_samples)
+    }
+
     /// Registers a new [`SourceSession`] from `config`, optionally auto-starting it.
     pub fn create_source(&self, config: SourceConfig) -> CoreResult<SourceSummary> {
         let source_id = config.source_id.clone();
@@ -1492,6 +1696,7 @@ impl CoreWorkspace {
             &self.transport_registry,
             &self.protocol_registry,
         )?;
+        session.timeline.store(Some(Arc::clone(&self.timeline)));
         if auto_start {
             session.start_on(&self.tokio_handle)?;
         }
@@ -1509,6 +1714,10 @@ impl CoreWorkspace {
             return Err(CoreError::SourceAlreadyExists(source_id));
         }
         sources.insert(source_id, entry);
+        drop(sources);
+        if auto_start {
+            self.sync_timeline_state(host_monotonic_ns());
+        }
         Ok(summary)
     }
 
@@ -1522,6 +1731,7 @@ impl CoreWorkspace {
                 "SourceSession must share CoreWorkspace::hub()".into(),
             ));
         }
+        session.timeline.store(Some(Arc::clone(&self.timeline)));
         let source_id = session.source_id().clone();
         let summary = session.summary();
         let entry = Arc::new(Mutex::new(session));
@@ -1536,6 +1746,8 @@ impl CoreWorkspace {
             return Err(CoreError::SourceAlreadyExists(source_id));
         }
         sources.insert(source_id, entry);
+        drop(sources);
+        self.sync_timeline_state(host_monotonic_ns());
         Ok(summary)
     }
 
@@ -1547,11 +1759,113 @@ impl CoreWorkspace {
             .ok_or_else(|| CoreError::SourceNotFound(source_id.clone()))
     }
 
+    /// Validates `config`, cleanly stops the existing `source_id` session, reconciles its
+    /// channels in [`ChannelHub`] (preserving compatible channel IDs and buffered history),
+    /// seeds the monotonic clock floor, and installs/restarts the updated session.
+    pub async fn update_source(
+        &self,
+        source_id: &SourceId,
+        config: SourceConfig,
+    ) -> CoreResult<SourceSummary> {
+        {
+            let sources = self.sources.read();
+            if !sources.contains_key(source_id) {
+                return Err(CoreError::SourceNotFound(source_id.clone()));
+            }
+            if config.source_id != *source_id && sources.contains_key(&config.source_id) {
+                return Err(CoreError::SourceAlreadyExists(config.source_id));
+            }
+        }
+
+        // Validate new transport, clock, and protocol before touching the running session.
+        let auto_start = config.auto_start;
+        let (stored_config, mut components) = build_source_session_components(
+            config,
+            &self.transport_registry,
+            &self.protocol_registry,
+        )?;
+        let new_source_id = components.source_id.clone();
+
+        let old_arc = self
+            .sources
+            .write()
+            .remove(source_id)
+            .ok_or_else(|| CoreError::SourceNotFound(source_id.clone()))?;
+
+        let pending = {
+            let mut old_sess = old_arc.lock();
+            old_sess.begin_stop()
+        };
+        pending.finish().await?;
+
+        let old_max_ts = {
+            let mut old_sess = old_arc.lock();
+            let _ = old_sess.disable_raw_recorder();
+            let mut best: Option<TimestampNs> = None;
+            for ch in old_sess.channels() {
+                if let Some((ts, _)) = ch.latest_value() {
+                    best = Some(best.map_or(ts, |prev| prev.max(ts)));
+                }
+            }
+            best
+        };
+        let (hub_max_ts, _) = hub_timeline_metrics(&self.hub);
+        let timeline_floor = {
+            let v = self.sync_timeline_state(host_monotonic_ns());
+            (v > 0).then_some(v)
+        };
+        let max_prev_ts = [old_max_ts, hub_max_ts, timeline_floor]
+            .into_iter()
+            .flatten()
+            .max();
+
+        let declared_descriptors = declared_descriptors_for_components(&components);
+        if new_source_id != *source_id {
+            self.hub.remove_source_channels(source_id);
+        } else {
+            self.hub
+                .reconcile_source_channels(source_id, &declared_descriptors);
+        }
+
+        if let Some(floor_ns) = max_prev_ts {
+            components.clock.seed_monotonic_floor(floor_ns);
+        }
+
+        let mut new_sess = SourceSession::from_components(components, Arc::clone(&self.hub))?;
+        new_sess.source_config = Some(stored_config);
+        new_sess.timeline.store(Some(Arc::clone(&self.timeline)));
+        if auto_start {
+            new_sess.start_on(&self.tokio_handle)?;
+        }
+        let summary = new_sess.summary();
+        let entry = Arc::new(Mutex::new(new_sess));
+
+        {
+            let mut sources = self.sources.write();
+            if sources.contains_key(&new_source_id) {
+                drop(sources);
+                if let Ok(orphan) = Arc::try_unwrap(entry) {
+                    let mut orphan_sess = orphan.into_inner();
+                    let _ = orphan_sess.stop_blocking(&self.tokio_handle);
+                }
+                return Err(CoreError::SourceAlreadyExists(new_source_id));
+            }
+            sources.insert(new_source_id, entry);
+        }
+
+        self.sync_timeline_state(host_monotonic_ns());
+        Ok(summary)
+    }
+
     /// Starts (or restarts) a registered source session on the workspace Tokio runtime.
     pub fn start_source(&self, source_id: &SourceId) -> CoreResult<SourceSummary> {
         let arc = self.get_source_arc(source_id)?;
-        let mut sess = arc.lock();
-        sess.start_on(&self.tokio_handle)
+        let summary = {
+            let mut sess = arc.lock();
+            sess.start_on(&self.tokio_handle)?
+        };
+        self.sync_timeline_state(host_monotonic_ns());
+        Ok(summary)
     }
 
     /// Gracefully stops a source session without holding workspace/session locks across `.await`.
@@ -1562,8 +1876,12 @@ impl CoreWorkspace {
             sess.begin_stop()
         };
         pending.finish().await?;
-        let sess = arc.lock();
-        Ok(sess.summary())
+        let summary = {
+            let sess = arc.lock();
+            sess.summary()
+        };
+        self.sync_timeline_state(host_monotonic_ns());
+        Ok(summary)
     }
 
     /// Synchronously stops a source session on `self.tokio_handle` (must not be called directly
@@ -1575,8 +1893,12 @@ impl CoreWorkspace {
             sess.begin_stop()
         };
         pending.finish_blocking(&self.tokio_handle)?;
-        let sess = arc.lock();
-        Ok(sess.summary())
+        let summary = {
+            let sess = arc.lock();
+            sess.summary()
+        };
+        self.sync_timeline_state(host_monotonic_ns());
+        Ok(summary)
     }
 
     /// Stops (if running) and removes a source session, along with its registered channels.
@@ -1592,6 +1914,11 @@ impl CoreWorkspace {
         };
         pending.finish().await?;
         self.hub.remove_source_channels(source_id);
+        if self.sources.read().is_empty() && self.hub.channel_count() == 0 {
+            self.timeline.reset();
+        } else {
+            self.sync_timeline_state(host_monotonic_ns());
+        }
         Ok(())
     }
 
@@ -2046,11 +2373,12 @@ impl CoreWorkspace {
     ///
     /// Also enforces global chunk memory quota so unpinned roll-over never stalls.
     pub fn tick_scopes(&self, now_ns: TimestampNs) -> Vec<ScopeSummary> {
+        let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
         let mut scopes = self.scopes.lock();
         let mut summaries = Vec::with_capacity(scopes.len());
 
         for scope in scopes.values_mut() {
-            step_managed_scope(&self.hub, scope, now_ns);
+            step_managed_scope(&self.hub, scope, effective_now_ns);
             summaries.push(scope.summary());
         }
         drop(scopes);
@@ -2068,12 +2396,13 @@ impl CoreWorkspace {
         now_ns: TimestampNs,
         f: impl FnOnce(&[u8]) -> R,
     ) -> CoreResult<R> {
+        let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
         let payloads = {
             let mut scopes = self.scopes.lock();
             let mut list = Vec::with_capacity(scopes.len());
             for scope in scopes.values_mut() {
-                step_managed_scope(&self.hub, scope, now_ns);
-                if let Some(vp) = extract_scope_viewport(&self.hub, scope, now_ns) {
+                step_managed_scope(&self.hub, scope, effective_now_ns);
+                if let Some(vp) = extract_scope_viewport(&self.hub, scope, effective_now_ns) {
                     list.push(vp);
                 }
             }
@@ -2081,7 +2410,7 @@ impl CoreWorkspace {
         };
 
         self.hub.enforce_global_quota();
-        self.pack_prepared_viewports_with(now_ns, &payloads, f)
+        self.pack_prepared_viewports_with(effective_now_ns, &payloads, f)
     }
 
     /// Convenience wrapper around [`Self::step_and_pack_ddsf_with`] returning an owned [`Bytes`]
@@ -2097,17 +2426,18 @@ impl CoreWorkspace {
         now_ns: TimestampNs,
         f: impl FnOnce(&[u8]) -> R,
     ) -> CoreResult<R> {
+        let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
         let payloads = {
             let scopes = self.scopes.lock();
             let mut list = Vec::with_capacity(scopes.len());
             for scope in scopes.values() {
-                if let Some(vp) = extract_scope_viewport(&self.hub, scope, now_ns) {
+                if let Some(vp) = extract_scope_viewport(&self.hub, scope, effective_now_ns) {
                     list.push(vp);
                 }
             }
             list
         };
-        self.pack_prepared_viewports_with(now_ns, &payloads, f)
+        self.pack_prepared_viewports_with(effective_now_ns, &payloads, f)
     }
 
     /// Owned [`Bytes`] variant of [`Self::pack_ddsf_frame_with`].
@@ -2731,16 +3061,52 @@ struct WorkerPipelineCtx {
     telemetry: Arc<WorkerTelemetryState>,
     raw_tap: SharedRawTap,
     sched_metrics: Arc<TransportMetrics>,
+    timeline: Arc<ArcSwapOption<WorkspaceTimeline>>,
+}
+
+#[derive(Default)]
+struct PacketSegmentAnchor {
+    active: bool,
+    first_raw_ns: TimestampNs,
+    virtual_base_ns: TimestampNs,
+    last_virtual_ns: Option<TimestampNs>,
+}
+
+impl PacketSegmentAnchor {
+    fn reset_segment(&mut self) {
+        self.active = false;
+    }
+
+    fn map_raw_recv_ns(
+        &mut self,
+        raw_recv_ns: TimestampNs,
+        virtual_now_ns: TimestampNs,
+    ) -> TimestampNs {
+        if !self.active || raw_recv_ns < self.first_raw_ns {
+            let floor = self.last_virtual_ns.map_or(0, |p| p.saturating_add(1));
+            self.first_raw_ns = raw_recv_ns;
+            self.virtual_base_ns = virtual_now_ns.max(floor);
+            self.active = true;
+        }
+        let mapped = self
+            .virtual_base_ns
+            .saturating_add(raw_recv_ns.saturating_sub(self.first_raw_ns));
+        let mono = self.last_virtual_ns.map_or(mapped, |prev| mapped.max(prev));
+        self.last_virtual_ns = Some(mono);
+        mono
+    }
 }
 
 fn run_source_worker_loop(rx: PacketReceiver, ctx: WorkerPipelineCtx) {
     let mut batch = DecodedBatch::from_descriptors(&ctx.descs, 4_096);
+    let mut anchor = PacketSegmentAnchor::default();
 
     loop {
         if ctx.telemetry.seek_reset_requested.swap(false, Ordering::AcqRel) {
             ctx.codec.lock().reset_state();
             ctx.clock.lock().reanchor_preserve_monotonic();
             ctx.telemetry.has_prev_raw_recv.store(false, Ordering::Release);
+            anchor.reset_segment();
         }
 
         let first_pkt = match rx.recv_timeout(Duration::from_millis(5)) {
@@ -2759,7 +3125,7 @@ fn run_source_worker_loop(rx: PacketReceiver, ctx: WorkerPipelineCtx) {
             }
         };
 
-        process_single_packet(first_pkt, &ctx, &mut batch);
+        process_single_packet(first_pkt, &ctx, &mut batch, &mut anchor);
 
         // Drain up to 32 immediately available packets in the ring before re-checking control flags
         for _ in 0..32 {
@@ -2767,10 +3133,11 @@ fn run_source_worker_loop(rx: PacketReceiver, ctx: WorkerPipelineCtx) {
                 ctx.codec.lock().reset_state();
                 ctx.clock.lock().reanchor_preserve_monotonic();
                 ctx.telemetry.has_prev_raw_recv.store(false, Ordering::Release);
+                anchor.reset_segment();
             }
             match rx.try_recv() {
                 Ok(pkt) => {
-                    process_single_packet(pkt, &ctx, &mut batch);
+                    process_single_packet(pkt, &ctx, &mut batch, &mut anchor);
                 }
                 Err(_) => break,
             }
@@ -2784,6 +3151,7 @@ fn process_single_packet(
     pkt: crate::transport::RawPacket,
     ctx: &WorkerPipelineCtx,
     batch: &mut DecodedBatch,
+    anchor: &mut PacketSegmentAnchor,
 ) {
     let raw_recv_ns = pkt.host_recv_ns;
     ctx.sched_metrics.record_rx(pkt.bytes.len());
@@ -2805,20 +3173,28 @@ fn process_single_packet(
     if discontinuity {
         ctx.codec.lock().reset_state();
         ctx.clock.lock().reanchor_preserve_monotonic();
+        anchor.reset_segment();
     }
     ctx.telemetry
         .prev_raw_recv_ns
         .store(raw_recv_ns, Ordering::Relaxed);
     ctx.telemetry.has_prev_raw_recv.store(true, Ordering::Release);
 
+    let effective_recv_ns = if let Some(tl) = ctx.timeline.load_full() {
+        let virtual_now_ns = tl.current_virtual_ns(host_monotonic_ns());
+        anchor.map_raw_recv_ns(raw_recv_ns, virtual_now_ns)
+    } else {
+        raw_recv_ns
+    };
+
     batch.clear();
-    batch.packet_recv_ns = raw_recv_ns;
+    batch.packet_recv_ns = effective_recv_ns;
     let feed_res = {
         let mut c = ctx.codec.lock();
-        c.feed_bytes(&pkt.bytes, raw_recv_ns, batch)
+        c.feed_bytes(&pkt.bytes, effective_recv_ns, batch)
     };
-    if batch.packet_recv_ns == 0 && raw_recv_ns != 0 {
-        batch.packet_recv_ns = raw_recv_ns;
+    if batch.packet_recv_ns == 0 && effective_recv_ns != 0 {
+        batch.packet_recv_ns = effective_recv_ns;
     }
 
     let rows = match feed_res {
@@ -2900,5 +3276,230 @@ mod tests {
         assert_eq!(configs[0].1, cfg_a);
         assert_eq!(configs[1].0.source_id.as_str(), "sim_b");
         assert_eq!(configs[1].1, cfg_b);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_timeline_freezes_when_all_sources_stopped_and_records_run_boundary_on_restart() {
+        let ws = CoreWorkspace::new(tokio::runtime::Handle::current());
+        let sim_id = SourceId::new("sim_tl");
+        let cfg = SourceConfig::sim(
+            sim_id.clone(),
+            SimConfig {
+                sample_rate_hz: 10_000.0,
+                analog_channels: 2,
+                ..SimConfig::default()
+            },
+        );
+        ws.create_source(cfg).expect("create sim_tl");
+
+        // While 0 sources are active, workspace acquisition time stays frozen and no dividers exist.
+        let (t0, running0) = ws.resolve_workspace_now_ns(host_monotonic_ns());
+        assert!(!running0);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let (t1, running1) = ws.resolve_workspace_now_ns(host_monotonic_ns());
+        assert!(!running1);
+        assert_eq!(t0, t1, "timeline must stay frozen before any source starts");
+        assert!(ws.run_boundaries_ns().is_empty());
+
+        // Start Run #1 and wait until samples are ingested into ChannelHub.
+        ws.start_source(&sim_id).expect("start run 1");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let total: u64 = ws
+                .hub()
+                .channels_for_source(&sim_id)
+                .iter()
+                .map(|c| c.total_samples())
+                .sum();
+            if total > 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for sim_tl samples"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        ws.stop_source(&sim_id).await.expect("stop run 1");
+        let (frozen_a, running_stopped) = ws.resolve_workspace_now_ns(host_monotonic_ns());
+        assert!(!running_stopped);
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        let (frozen_b, _) = ws.resolve_workspace_now_ns(host_monotonic_ns());
+        assert_eq!(
+            frozen_a, frozen_b,
+            "workspace time must not advance while all sources remain stopped"
+        );
+        assert!(
+            ws.run_boundaries_ns().is_empty(),
+            "run boundary is recorded on restarting next run, not on initial stop"
+        );
+
+        // Start Run #2 -> must record a run divider without any wall-clock jump.
+        ws.start_source(&sim_id).expect("start run 2");
+        let boundaries = ws.run_boundaries_ns();
+        assert_eq!(boundaries.len(), 1);
+        let boundary = boundaries[0];
+        assert!(
+            boundary >= frozen_a,
+            "run boundary ({boundary}) should be >= previous frozen timestamp ({frozen_a})"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let (resumed_now, running2) = ws.resolve_workspace_now_ns(host_monotonic_ns());
+        assert!(running2);
+        assert!(
+            resumed_now > boundary,
+            "resumed timeline ({resumed_now}) should advance beyond divider ({boundary})"
+        );
+
+        ws.shutdown().await.expect("shutdown workspace");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_source_preserves_channel_ids_rolls_back_on_invalid_config_and_enables_udp_tx() {
+        let ws = CoreWorkspace::new(tokio::runtime::Handle::current());
+        let sim_id = SourceId::new("sim_edit");
+        let initial_cfg = SourceConfig::sim(
+            sim_id.clone(),
+            SimConfig {
+                sample_rate_hz: 10_000.0,
+                analog_channels: 2,
+                ..SimConfig::default()
+            },
+        )
+        .with_display_name("Initial Sim");
+        ws.create_source(initial_cfg).expect("create sim_edit");
+
+        let before_channels = ws.hub().channels_for_source(&sim_id);
+        let before_id_by_path: HashMap<String, ChannelId> = before_channels
+            .iter()
+            .map(|c| (c.descriptor().local_path.clone(), c.id()))
+            .collect();
+        assert!(!before_id_by_path.is_empty());
+
+        // 1. Validation error must abort without mutating existing source or channels.
+        let invalid_cfg = SourceConfig::new(
+            sim_id.clone(),
+            SourceTransportConfig::Udp(UdpConfig {
+                bind_addr: "not-a-socket-addr".to_string(),
+                ..UdpConfig::default()
+            }),
+            ClockMode::Tier3HostArrival,
+            SourceProtocolConfig::JustFloat(JustFloatConfig::new(
+                sim_id.as_str(),
+                vec!["u0".to_string()],
+            )),
+        );
+        let err = ws
+            .update_source(&sim_id, invalid_cfg)
+            .await
+            .expect_err("invalid bind_addr must fail validation");
+        assert!(matches!(err, CoreError::InvalidConfig(_)));
+        assert!(ws
+            .list_sources()
+            .iter()
+            .any(|s| s.source_id == sim_id && s.display_name == "Initial Sim"));
+
+        // 2. Same-ID edit expanding analog_channels from 2 -> 4 preserves original ChannelIds.
+        let expanded_cfg = SourceConfig::sim(
+            sim_id.clone(),
+            SimConfig {
+                sample_rate_hz: 20_000.0,
+                analog_channels: 4,
+                ..SimConfig::default()
+            },
+        )
+        .with_display_name("Expanded Sim");
+        let summary = ws
+            .update_source(&sim_id, expanded_cfg)
+            .await
+            .expect("update sim_edit channels 2 -> 4");
+        assert_eq!(summary.display_name, "Expanded Sim");
+        let after_channels = ws.hub().channels_for_source(&sim_id);
+        assert!(after_channels.len() > before_id_by_path.len());
+        for entry in &after_channels {
+            if let Some(&orig_id) = before_id_by_path.get(&entry.descriptor().local_path) {
+                assert_eq!(
+                    entry.id(),
+                    orig_id,
+                    "compatible channel '{}' must retain its ChannelId across edit",
+                    entry.descriptor().local_path
+                );
+            }
+        }
+
+        // 3. Rename sim_edit -> sim_renamed via update_source.
+        let renamed_id = SourceId::new("sim_renamed");
+        let renamed_cfg = SourceConfig::sim(
+            renamed_id.clone(),
+            SimConfig {
+                sample_rate_hz: 20_000.0,
+                analog_channels: 4,
+                ..SimConfig::default()
+            },
+        )
+        .with_display_name("Renamed Sim");
+        let renamed_summary = ws
+            .update_source(&sim_id, renamed_cfg)
+            .await
+            .expect("rename sim_edit -> sim_renamed");
+        assert_eq!(renamed_summary.source_id, renamed_id);
+        assert!(ws.hub().channels_for_source(&sim_id).is_empty());
+        assert!(!ws.hub().channels_for_source(&renamed_id).is_empty());
+        let retained_cfgs = ws.list_source_configs();
+        assert!(!retained_cfgs.iter().any(|(s, _)| s.source_id == sim_id));
+        assert!(retained_cfgs
+            .iter()
+            .any(|(s, c)| s.source_id == renamed_id && c.display_name.as_deref() == Some("Renamed Sim")));
+
+        // 4. UDP source without remote_tx_addr rejects TX; adding remote_tx_addr via update_source enables TX.
+        let udp_id = SourceId::new("udp_tx_test");
+        let udp_rx_only = SourceConfig::new(
+            udp_id.clone(),
+            SourceTransportConfig::Udp(UdpConfig {
+                bind_addr: "127.0.0.1:0".to_string(),
+                remote_tx_addr: None,
+                ..UdpConfig::default()
+            }),
+            ClockMode::Tier3HostArrival,
+            SourceProtocolConfig::JustFloat(JustFloatConfig::new(
+                udp_id.as_str(),
+                vec!["ch0".to_string()],
+            )),
+        )
+        .with_auto_start(true);
+        ws.create_source(udp_rx_only).expect("create udp rx-only");
+        let dl_req = DownlinkRequest::from_ascii("PING", true, TxPriority::Normal);
+        let rx_only_err = ws
+            .send_downlink(&udp_id, &dl_req)
+            .expect_err("UDP without remote_tx_addr must reject downlink TX");
+        assert!(matches!(
+            rx_only_err,
+            CoreError::Unsupported(_) | CoreError::Transport(_)
+        ));
+
+        let udp_with_tx = SourceConfig::new(
+            udp_id.clone(),
+            SourceTransportConfig::Udp(UdpConfig {
+                bind_addr: "127.0.0.1:0".to_string(),
+                remote_tx_addr: Some("127.0.0.1:19999".to_string()),
+                ..UdpConfig::default()
+            }),
+            ClockMode::Tier3HostArrival,
+            SourceProtocolConfig::JustFloat(JustFloatConfig::new(
+                udp_id.as_str(),
+                vec!["ch0".to_string()],
+            )),
+        )
+        .with_auto_start(true);
+        ws.update_source(&udp_id, udp_with_tx)
+            .await
+            .expect("update UDP with remote_tx_addr");
+        let receipt = ws
+            .send_downlink(&udp_id, &dl_req)
+            .expect("UDP TX must succeed once remote_tx_addr is configured");
+        assert!(receipt.accepted);
+
+        ws.shutdown().await.expect("shutdown workspace");
     }
 }

@@ -373,3 +373,181 @@ fn downlink_ascii_append_newline_false_preserves_exact_raw_bytes() {
         DownlinkPayload::AsciiLine("123\n".to_string())
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_source_and_run_boundaries_roundtrip() {
+    use ddscope_core::types::SourceId;
+    use std::collections::HashMap;
+
+    let stub = DesktopBridgeState::new_stub();
+    assert_eq!(
+        stub.get_run_boundaries().expect("stub run boundaries"),
+        Vec::<f64>::new()
+    );
+    let stub_update_err = stub
+        .update_source("sim0".to_string(), make_sim_create_request("sim0"))
+        .await
+        .expect_err("stub update_source must return NOT_IMPLEMENTED");
+    assert_eq!(stub_update_err.code, "NOT_IMPLEMENTED");
+
+    let ws = Arc::new(CoreWorkspace::new(tokio::runtime::Handle::current()));
+    let state = DesktopBridgeState::with_workspace(Arc::clone(&ws));
+
+    state
+        .create_source(make_sim_create_request("sim0"))
+        .expect("create sim0");
+    let before_tree = state.get_channel_tree().expect("initial channel tree");
+    let before_sim = before_tree
+        .sources
+        .iter()
+        .find(|g| g.source.source_id == "sim0")
+        .expect("sim0 group present");
+    let before_ids: HashMap<String, u32> = before_sim
+        .channels
+        .iter()
+        .map(|c| (c.local_path.clone(), c.channel_id))
+        .collect();
+
+    // Start Run #1, wait for samples to arrive, then stop and restart Run #2 -> divider recorded.
+    state.start_source("sim0".to_string()).expect("start run 1");
+    let sim_core_id = SourceId::new("sim0");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let total: u64 = ws
+            .hub()
+            .channels_for_source(&sim_core_id)
+            .iter()
+            .map(|c| c.total_samples())
+            .sum();
+        if total > 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for sim0 samples"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    state
+        .stop_source("sim0".to_string())
+        .await
+        .expect("stop run 1");
+    assert!(
+        state
+            .get_run_boundaries()
+            .expect("boundaries before run 2")
+            .is_empty(),
+        "no divider before Run #2 begins"
+    );
+
+    state.start_source("sim0".to_string()).expect("start run 2");
+    let boundaries = state.get_run_boundaries().expect("boundaries after run 2");
+    assert_eq!(boundaries.len(), 1);
+    assert!(boundaries[0] > 0.0);
+
+    // Update sim0 display_name + expand analog_channels 2 -> 3 while preserving channel IDs.
+    let updated_sim = CreateSourceRequestDto {
+        source_id: "sim0".to_string(),
+        display_name: Some("Updated Sim0".to_string()),
+        transport: TransportConfigDto::Sim {
+            sample_rate_hz: 2_000.0,
+            analog_channels: 3,
+            enable_glitch: false,
+            glitch_period_samples: 0,
+        },
+        clock: ClockConfigDto::Tier3HostArrival,
+        protocol: ProtocolConfigDto::SimPreset,
+        auto_start: true,
+    };
+    let updated_summary = state
+        .update_source("sim0".to_string(), updated_sim)
+        .await
+        .expect("update sim0");
+    assert_eq!(updated_summary.display_name, "Updated Sim0");
+
+    let cfgs = state.get_source_configs().expect("source configs after edit");
+    assert_eq!(cfgs.len(), 1);
+    assert_eq!(cfgs[0].display_name.as_deref(), Some("Updated Sim0"));
+    match &cfgs[0].transport {
+        TransportConfigDto::Sim {
+            analog_channels,
+            sample_rate_hz,
+            ..
+        } => {
+            assert_eq!(*analog_channels, 3);
+            assert_eq!(*sample_rate_hz, 2_000.0);
+        }
+        other => panic!("expected Sim transport after update, got {other:?}"),
+    }
+
+    let after_tree = state.get_channel_tree().expect("channel tree after edit");
+    let after_sim = after_tree
+        .sources
+        .iter()
+        .find(|g| g.source.source_id == "sim0")
+        .expect("sim0 still present");
+    for ch in &after_sim.channels {
+        if let Some(&orig_id) = before_ids.get(&ch.local_path) {
+            assert_eq!(ch.channel_id, orig_id);
+        }
+    }
+
+    // Create UDP rx-only source, then update with remote_tx_addr and verify downlink succeeds.
+    state
+        .create_source(CreateSourceRequestDto {
+            source_id: "udp_edit".to_string(),
+            display_name: Some("UDP Editable".to_string()),
+            transport: TransportConfigDto::Udp {
+                bind_addr: "127.0.0.1:0".to_string(),
+                multicast_group: None,
+                recv_buffer_bytes: 65_536,
+                remote_tx_addr: None,
+            },
+            clock: ClockConfigDto::Tier3HostArrival,
+            protocol: ProtocolConfigDto::FireWater {
+                channel_names: vec!["ch0".to_string()],
+            },
+            auto_start: true,
+        })
+        .expect("create udp_edit");
+
+    state
+        .update_source(
+            "udp_edit".to_string(),
+            CreateSourceRequestDto {
+                source_id: "udp_edit".to_string(),
+                display_name: Some("UDP With TX".to_string()),
+                transport: TransportConfigDto::Udp {
+                    bind_addr: "127.0.0.1:0".to_string(),
+                    multicast_group: None,
+                    recv_buffer_bytes: 65_536,
+                    remote_tx_addr: Some("127.0.0.1:19002".to_string()),
+                },
+                clock: ClockConfigDto::Tier3HostArrival,
+                protocol: ProtocolConfigDto::FireWater {
+                    channel_names: vec!["ch0".to_string()],
+                },
+                auto_start: true,
+            },
+        )
+        .await
+        .expect("update udp_edit with remote_tx_addr");
+
+    let tx_receipt = state
+        .send_downlink(SendDownlinkRequestDto {
+            source_id: "udp_edit".to_string(),
+            payload: DownlinkPayloadDto::AsciiText {
+                text: "CMD".to_string(),
+                append_newline: true,
+            },
+            priority: TxPriorityDto::High,
+            coalesce_key: None,
+        })
+        .expect("UDP downlink after setting remote_tx_addr should succeed");
+    assert!(tx_receipt.accepted);
+
+    state.stop_source("sim0".to_string()).await.ok();
+    state.stop_source("udp_edit".to_string()).await.ok();
+    ws.shutdown().await.expect("shutdown workspace");
+}

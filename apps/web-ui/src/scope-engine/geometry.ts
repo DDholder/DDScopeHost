@@ -33,6 +33,28 @@ const STATE_PALETTE: ReadonlyArray<[number, number, number, number]> = [
   [0.55, 0.36, 0.96, 0.88], // 5: CUSTOM (violet)
 ];
 
+/**
+ * Returns `true` when consecutive normalized X coordinates `(x0Norm, x1Norm)` straddle an
+ * acquisition run boundary, accounting for Float32 quantization at run-start samples.
+ */
+export function crossesRunBoundary(
+  x0Norm: number,
+  x1Norm: number,
+  boundaries?: ReadonlyArray<number>,
+): boolean {
+  if (!boundaries || boundaries.length === 0) return false;
+  const lo = Math.min(x0Norm, x1Norm);
+  const hi = Math.max(x0Norm, x1Norm);
+  const eps = 1e-6;
+  for (let i = 0; i < boundaries.length; i += 1) {
+    const b = boundaries[i];
+    if (b > lo + eps && b <= hi + eps) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface RibbonLabelPlacement {
   x0Css: number;
   x1Css: number;
@@ -222,6 +244,7 @@ export class ScopeGeometryBuilder {
     scopeData: DdsfScopeView | null,
     trackConfigs: ReadonlyArray<ScopeTrackRenderConfig>,
     axisConfig?: ScopeYAxisConfig,
+    runBoundariesNorm?: ReadonlyArray<number>,
   ): BuiltScopeGeometry {
     this.floatCursor = 0;
     const ribbonLabels: RibbonLabelPlacement[] = [];
@@ -258,6 +281,7 @@ export class ScopeGeometryBuilder {
             subpixelShiftNorm,
             dpr,
             axisConfig,
+            runBoundariesNorm,
           );
         } else if (block.payload.kind === DdsfBlockKind.AnalogRawXY) {
           sawRaw = true;
@@ -269,6 +293,7 @@ export class ScopeGeometryBuilder {
             subpixelShiftNorm,
             dpr,
             axisConfig,
+            runBoundariesNorm,
           );
         }
       }
@@ -399,6 +424,7 @@ export class ScopeGeometryBuilder {
     subpixelShiftNorm: number,
     dpr: number,
     axisConfig?: ScopeYAxisConfig,
+    runBoundariesNorm?: ReadonlyArray<number>,
   ): void {
     if (count <= 0) return;
     const [r, g, b, a] = rgbaNumberToFloat4(cfg.colorRgba);
@@ -415,6 +441,7 @@ export class ScopeGeometryBuilder {
 
     let prevLastXPx = 0;
     let prevLastYPx = 0;
+    let prevXNorm = 0;
 
     for (let i = 0; i < count; i += 1) {
       const base = i * DDSF_M4_COLUMN_FLOATS;
@@ -432,8 +459,9 @@ export class ScopeGeometryBuilder {
       const yMax = toYPx(vMax);
       const yLast = toYPx(vLast);
 
-      // Connect previous column exit -> current entry for continuous trace progression
-      if (i > 0) {
+      // Connect previous column exit -> current entry for continuous trace progression,
+      // breaking the connecting stroke across acquisition run divider boundaries.
+      if (i > 0 && !crossesRunBoundary(prevXNorm, xNorm, runBoundariesNorm)) {
         this.pushAaSegment(prevLastXPx, prevLastYPx, xFirstPx, yFirst, aaHalfW, r, g, b, a);
       }
 
@@ -460,6 +488,7 @@ export class ScopeGeometryBuilder {
 
       prevLastXPx = xLastPx;
       prevLastYPx = yLast;
+      prevXNorm = xNorm;
     }
   }
 
@@ -471,6 +500,7 @@ export class ScopeGeometryBuilder {
     subpixelShiftNorm: number,
     dpr: number,
     axisConfig?: ScopeYAxisConfig,
+    runBoundariesNorm?: ReadonlyArray<number>,
   ): void {
     if (count <= 0) return;
     const [r, g, b, a] = rgbaNumberToFloat4(cfg.colorRgba);
@@ -487,6 +517,7 @@ export class ScopeGeometryBuilder {
 
     let prevX = 0;
     let prevY = 0;
+    let prevXNorm = 0;
 
     for (let i = 0; i < count; i += 1) {
       const xNorm = points[i * 2] + subpixelShiftNorm;
@@ -494,7 +525,7 @@ export class ScopeGeometryBuilder {
       const xPx = plotLeftPx + xNorm * plotWidthPx;
       const yPx = toYPx(yVal);
 
-      if (i > 0) {
+      if (i > 0 && !crossesRunBoundary(prevXNorm, xNorm, runBoundariesNorm)) {
         this.pushAaSegment(prevX, prevY, xPx, yPx, halfThick, r, g, b, a);
       }
       if (showDots) {
@@ -512,6 +543,7 @@ export class ScopeGeometryBuilder {
 
       prevX = xPx;
       prevY = yPx;
+      prevXNorm = xNorm;
     }
   }
 

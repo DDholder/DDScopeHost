@@ -821,6 +821,44 @@ impl ChannelHub {
         removed
     }
 
+    /// Reconciles registered channels for `source_id` against `desired`, removing stale or
+    /// incompatible entries while preserving matching [`ChannelEntry`] instances and their IDs.
+    pub fn reconcile_source_channels(
+        &self,
+        source_id: &SourceId,
+        desired: &[ChannelDescriptor],
+    ) -> usize {
+        let _guard = self.registration_lock.lock();
+        let mut desired_by_path = std::collections::HashMap::with_capacity(desired.len());
+        for desc in desired {
+            desired_by_path.insert(desc.full_path(), desc);
+        }
+
+        let existing = self.channels_for_source(source_id);
+        let mut removed = 0;
+        for entry in existing {
+            let keep = desired_by_path
+                .get(entry.path())
+                .is_some_and(|target_desc| {
+                    let scalar_scale_matches = match (&entry.descriptor.kind, &target_desc.kind) {
+                        (
+                            ChannelKind::Scalar { calibration: a, .. },
+                            ChannelKind::Scalar { calibration: b, .. },
+                        ) => a == b,
+                        _ => true,
+                    };
+                    validate_existing_entry(&entry, target_desc).is_ok()
+                        && entry.descriptor().unit == target_desc.unit
+                        && entry.descriptor().display_name == target_desc.display_name
+                        && scalar_scale_matches
+                });
+            if !keep && self.remove_channel(entry.id()).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Appends a batch of scalar values to channel `id` and enforces global memory quota.
     pub fn append_scalar_batch(
         &self,
