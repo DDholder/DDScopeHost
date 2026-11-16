@@ -82,6 +82,7 @@ export function ChannelTreeSidebar() {
   const addCommand = useWorkspaceStore((s) => s.addCommand);
   const updateCommand = useWorkspaceStore((s) => s.updateCommand);
   const removeCommand = useWorkspaceStore((s) => s.removeCommand);
+  const setCommandArgValue = useWorkspaceStore((s) => s.setCommandArgValue);
   const placeCommandOnCanvas = useWorkspaceStore((s) => s.placeCommandOnCanvas);
   const executeCommand = useWorkspaceStore((s) => s.executeCommand);
   const exportCommandsConfig = useWorkspaceStore((s) => s.exportCommandsConfig);
@@ -219,12 +220,16 @@ export function ChannelTreeSidebar() {
     addWidgetToCanvas(targetId, widgetType);
   };
 
-  const handleQuickPlaceCommand = (commandId: string) => {
+  const handleQuickPlaceCommand = (commandId: string, argIndex?: number) => {
     const targetId =
       activeCanvasId !== null && canvasOrder.includes(activeCanvasId)
         ? activeCanvasId
         : (canvasOrder[0] ?? addCanvas());
-    placeCommandOnCanvas(targetId, commandId);
+    placeCommandOnCanvas(
+      targetId,
+      commandId,
+      argIndex !== undefined ? { argIndex } : undefined,
+    );
   };
 
   const sourceIds = useMemo(
@@ -619,6 +624,7 @@ export function ChannelTreeSidebar() {
             onAddCommand={addCommand}
             onUpdateCommand={updateCommand}
             onRemoveCommand={removeCommand}
+            onSetCommandArgValue={setCommandArgValue}
             onPlaceCommandOnCanvas={handleQuickPlaceCommand}
             onExecuteCommand={executeCommand}
             onExportCommandsConfig={exportCommandsConfig}

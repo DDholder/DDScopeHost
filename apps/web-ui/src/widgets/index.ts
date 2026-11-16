@@ -11,3 +11,4 @@ export * from "./StatusLedWidget.tsx";
 export * from "./WatchTableWidget.tsx";
 export * from "./ParamSliderWidget.tsx";
 export * from "./CmdButtonWidget.tsx";
+export * from "./CmdTableWidget.tsx";

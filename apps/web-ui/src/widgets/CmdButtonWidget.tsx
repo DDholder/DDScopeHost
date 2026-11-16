@@ -6,8 +6,9 @@ import type {
 import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
 import {
-  commandUsesValue,
+  buildEffectiveCommandArgs,
   compileCommandPayload,
+  extractCommandPlaceholders,
   type CommandDefinition,
 } from "../workspace/command-system.ts";
 import type { DashboardWidgetItem, WidgetButtonConfig } from "./types.ts";
@@ -18,6 +19,13 @@ export interface CmdButtonWidgetProps {
   commands: CommandDefinition[];
   locale: UiLocale;
   onUpdateWidget: (updater: (prev: DashboardWidgetItem) => DashboardWidgetItem) => void;
+  onBindCommand?: (commandId: string | null, argIndex?: number) => void;
+  onSetCommandArgValue?: (
+    commandId: string,
+    argIndex: number,
+    value: number,
+    sourceWidgetId?: string,
+  ) => void;
   onSendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
     labelSummary?: string,
@@ -46,6 +54,8 @@ export function CmdButtonWidget({
   commands,
   locale,
   onUpdateWidget,
+  onBindCommand,
+  onSetCommandArgValue,
   onSendDownlink,
 }: CmdButtonWidgetProps) {
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
@@ -58,12 +68,28 @@ export function CmdButtonWidget({
   const boundCommand = cfg.commandId
     ? commands.find((c) => c.id === cfg.commandId) ?? null
     : null;
-  const usesValue = boundCommand ? commandUsesValue(boundCommand) : false;
+  const placeholders = boundCommand ? extractCommandPlaceholders(boundCommand) : [];
+  const effectiveSlot =
+    cfg.commandArgIndex === -1
+      ? -1
+      : placeholders.length > 0
+        ? Math.min(Math.max(0, Math.trunc(cfg.commandArgIndex ?? 0)), placeholders.length - 1)
+        : 0;
   const commandValue = cfg.commandValue ?? 0;
   const effectiveTarget =
     boundCommand?.targetSourceId.trim() || cfg.sourceId || sourceIds[0] || "sim0";
   const compiled = boundCommand
-    ? compileCommandPayload(boundCommand, commandValue)
+    ? compileCommandPayload(
+        boundCommand,
+        placeholders.length === 0
+          ? 0
+          : effectiveSlot === -1
+            ? buildEffectiveCommandArgs(boundCommand)
+            : buildEffectiveCommandArgs(boundCommand, {
+                slotIndex: effectiveSlot,
+                value: commandValue,
+              }),
+      )
     : null;
 
   const updateCfg = (patch: Partial<WidgetButtonConfig>) => {
@@ -74,6 +100,18 @@ export function CmdButtonWidget({
         ...patch,
       },
     }));
+  };
+
+  const handleSlotChange = (nextSlot: number) => {
+    if (!boundCommand || !Number.isFinite(nextSlot)) return;
+    if (onBindCommand) {
+      onBindCommand(boundCommand.id, nextSlot);
+    } else {
+      updateCfg({ commandArgIndex: nextSlot });
+      if (nextSlot >= 0) {
+        onSetCommandArgValue?.(boundCommand.id, nextSlot, commandValue, widget.id);
+      }
+    }
   };
 
   const payloadPreview = boundCommand
@@ -92,7 +130,20 @@ export function CmdButtonWidget({
     const target = effectiveTarget;
     try {
       if (boundCommand) {
-        const res = compileCommandPayload(boundCommand, cfg.commandValue ?? 0);
+        if (placeholders.length > 0 && effectiveSlot >= 0) {
+          onSetCommandArgValue?.(boundCommand.id, effectiveSlot, commandValue, widget.id);
+        }
+        const res = compileCommandPayload(
+          boundCommand,
+          placeholders.length === 0
+            ? 0
+            : effectiveSlot === -1
+              ? buildEffectiveCommandArgs(boundCommand)
+              : buildEffectiveCommandArgs(boundCommand, {
+                  slotIndex: effectiveSlot,
+                  value: commandValue,
+                }),
+        );
         if (!res.ok) {
           setStatusMsg(res.error);
           return;
@@ -157,6 +208,22 @@ export function CmdButtonWidget({
             {cfg.sourceId} · {cfg.mode.toUpperCase()}
           </span>
         )}
+        {boundCommand && placeholders.length > 1 && (
+          <select
+            className="widget-slot-select"
+            data-testid={`widget-slot-select-${widget.id}`}
+            title={t("widget.cmdPlaceholderLabel")}
+            value={String(effectiveSlot)}
+            onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
+          >
+            {placeholders.map((ph) => (
+              <option key={ph.index} value={String(ph.index)}>
+                {ph.label}
+              </option>
+            ))}
+            <option value="-1">ALL</option>
+          </select>
+        )}
         <button
           type="button"
           className="scope-btn-xs"
@@ -167,7 +234,7 @@ export function CmdButtonWidget({
       </div>
 
       <div className="widget-cmd-action-row">
-        {boundCommand && usesValue && (
+        {boundCommand && placeholders.length > 0 && effectiveSlot >= 0 && (
           <input
             type="number"
             step="any"
@@ -177,7 +244,10 @@ export function CmdButtonWidget({
             value={commandValue}
             onChange={(ev) => {
               const v = Number.parseFloat(ev.target.value);
-              if (Number.isFinite(v)) updateCfg({ commandValue: v });
+              if (Number.isFinite(v)) {
+                updateCfg({ commandValue: v });
+                onSetCommandArgValue?.(boundCommand.id, effectiveSlot, v, widget.id);
+              }
             }}
             onKeyDown={(ev) => {
               if (ev.key === "Enter") {
@@ -206,8 +276,12 @@ export function CmdButtonWidget({
               value={cfg.commandId ?? ""}
               onChange={(ev) => {
                 const nextId = ev.target.value || null;
-                const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
                 setStatusMsg(null);
+                if (onBindCommand) {
+                  onBindCommand(nextId);
+                  return;
+                }
+                const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
                 onUpdateWidget((prev) => ({
                   ...prev,
                   ...(nextCmd ? { title: nextCmd.name } : {}),
@@ -228,6 +302,26 @@ export function CmdButtonWidget({
               ))}
             </select>
           </label>
+          {boundCommand && placeholders.length > 0 && (
+            <label style={{ gridColumn: "span 2" }}>
+              {t("widget.cmdPlaceholderLabel")}
+              <select
+                data-testid={`btn-arg-select-${widget.id}`}
+                value={String(effectiveSlot)}
+                onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
+              >
+                {placeholders.map((ph) => (
+                  <option key={ph.index} value={String(ph.index)}>
+                    {t("widget.cmdPlaceholderSlot", {
+                      num: ph.index + 1,
+                      token: ph.token,
+                    })}
+                  </option>
+                ))}
+                <option value="-1">{t("widget.cmdPlaceholderTriggerAll")}</option>
+              </select>
+            </label>
+          )}
           {(!boundCommand || !boundCommand.targetSourceId) && (
             <label>
               {t("widget.slider.source")}

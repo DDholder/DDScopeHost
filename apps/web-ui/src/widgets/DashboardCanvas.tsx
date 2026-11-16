@@ -16,10 +16,12 @@ import { ScopeViewportWidget } from "../scope-engine/ScopeViewportWidget.tsx";
 import type { ScopeCallbacks, ScopeUiConfig } from "../scope-engine/types.ts";
 import {
   DDSCOPE_POINTER_DROP_EVENT,
+  parseCommandDragTransfer,
   type PointerDropEventDetail,
 } from "../workspace/pointer-dnd.ts";
 import type { CommandDefinition } from "../workspace/command-system.ts";
 import { CmdButtonWidget } from "./CmdButtonWidget.tsx";
+import { CmdTableWidget } from "./CmdTableWidget.tsx";
 import { DigitalMeterWidget } from "./DigitalMeterWidget.tsx";
 import { ParamSliderWidget } from "./ParamSliderWidget.tsx";
 import { RadialGaugeWidget } from "./RadialGaugeWidget.tsx";
@@ -62,11 +64,22 @@ export interface DashboardCanvasProps {
   ) => void;
   onRemoveWidget: (canvasId: number, widgetId: string) => void;
   onBindChannelToWidget: (canvasId: number, widgetId: string, channelId: number) => void;
-  onBindCommandToWidget?: (canvasId: number, widgetId: string, commandId: string) => void;
+  onBindCommandToWidget?: (
+    canvasId: number,
+    widgetId: string,
+    commandId: string | null,
+    argIndex?: number,
+  ) => void;
+  onSetCommandArgValue?: (
+    commandId: string,
+    argIndex: number,
+    value: number,
+    sourceWidgetId?: string,
+  ) => void;
   onPlaceCommandOnCanvas?: (
     canvasId: number,
     commandId: string,
-    opts?: { col?: number; row?: number },
+    opts?: { col?: number; row?: number; argIndex?: number },
   ) => string;
   onSendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
@@ -76,6 +89,10 @@ export interface DashboardCanvasProps {
 }
 
 const GRID_ROW_STRIDE_PX = DASHBOARD_GRID_ROW_STRIDE_PX;
+
+function isCommandBindableWidget(type: WidgetType): boolean {
+  return type === "param_slider" || type === "cmd_button" || type === "cmd_table";
+}
 
 function parseDroppedWidgetType(ev: DragEvent): WidgetType | null {
   const rawJson = ev.dataTransfer.getData("application/x-ddscope-widget");
@@ -123,26 +140,6 @@ function parseDroppedChannelId(ev: DragEvent): number | null {
   return null;
 }
 
-function parseDroppedCommandId(ev: DragEvent): string | null {
-  const rawJson = ev.dataTransfer.getData("application/x-ddscope-command");
-  if (rawJson) {
-    try {
-      const parsed = JSON.parse(rawJson) as { commandId?: string };
-      if (typeof parsed.commandId === "string" && parsed.commandId.trim().length > 0) {
-        return parsed.commandId.trim();
-      }
-    } catch {
-      // Ignore malformed command payload
-    }
-  }
-  const plain = ev.dataTransfer.getData("text/plain").trim();
-  if (plain.startsWith("command:")) {
-    const id = plain.slice("command:".length).trim();
-    return id.length > 0 ? id : null;
-  }
-  return null;
-}
-
 export function DashboardCanvas({
   canvas,
   channelsById,
@@ -162,6 +159,7 @@ export function DashboardCanvas({
   onRemoveWidget,
   onBindChannelToWidget,
   onBindCommandToWidget,
+  onSetCommandArgValue,
   onPlaceCommandOnCanvas,
   onSendDownlink,
 }: DashboardCanvasProps) {
@@ -246,6 +244,7 @@ export function DashboardCanvas({
             latest.canvasId,
             targetWidget.id,
             detail.payload.commandId,
+            detail.payload.argIndex,
           );
         }
         return;
@@ -273,7 +272,13 @@ export function DashboardCanvas({
           latest.onPlaceCommandOnCanvas?.(
             latest.canvasId,
             detail.payload.commandId,
-            { col: cell.col, row: cell.row },
+            {
+              col: cell.col,
+              row: cell.row,
+              ...(detail.payload.argIndex !== undefined
+                ? { argIndex: detail.payload.argIndex }
+                : {}),
+            },
           );
           return;
         }
@@ -318,13 +323,14 @@ export function DashboardCanvas({
       return;
     }
 
-    const commandId = parseDroppedCommandId(ev);
-    if (commandId) {
+    const cmdDrop = parseCommandDragTransfer(ev);
+    if (cmdDrop) {
       ev.preventDefault();
       ev.stopPropagation();
-      onPlaceCommandOnCanvas?.(canvas.canvasId, commandId, {
+      onPlaceCommandOnCanvas?.(canvas.canvasId, cmdDrop.commandId, {
         col: cell.col,
         row: cell.row,
+        ...(cmdDrop.argIndex !== undefined ? { argIndex: cmdDrop.argIndex } : {}),
       });
       return;
     }
@@ -342,13 +348,18 @@ export function DashboardCanvas({
     if (Array.from(ev.dataTransfer.types).includes("application/x-ddscope-widget")) {
       return;
     }
-    const commandId = parseDroppedCommandId(ev);
-    if (commandId && (widget.type === "param_slider" || widget.type === "cmd_button")) {
+    const cmdDrop = parseCommandDragTransfer(ev);
+    if (cmdDrop && isCommandBindableWidget(widget.type)) {
       ev.preventDefault();
       ev.stopPropagation();
       setCardDragOverId(null);
       setGridDragOver(false);
-      onBindCommandToWidget?.(canvas.canvasId, widget.id, commandId);
+      onBindCommandToWidget?.(
+        canvas.canvasId,
+        widget.id,
+        cmdDrop.commandId,
+        cmdDrop.argIndex,
+      );
       return;
     }
 
@@ -490,6 +501,10 @@ export function DashboardCanvas({
             commands={commands}
             locale={locale}
             onUpdateWidget={handleUpdate}
+            onBindCommand={(cmdId, argIndex) =>
+              onBindCommandToWidget?.(canvas.canvasId, widget.id, cmdId, argIndex)
+            }
+            onSetCommandArgValue={onSetCommandArgValue}
             onSendDownlink={onSendDownlink}
           />
         );
@@ -501,6 +516,25 @@ export function DashboardCanvas({
             commands={commands}
             locale={locale}
             onUpdateWidget={handleUpdate}
+            onBindCommand={(cmdId, argIndex) =>
+              onBindCommandToWidget?.(canvas.canvasId, widget.id, cmdId, argIndex)
+            }
+            onSetCommandArgValue={onSetCommandArgValue}
+            onSendDownlink={onSendDownlink}
+          />
+        );
+      case "cmd_table":
+        return (
+          <CmdTableWidget
+            widget={widget}
+            sourceIds={sourceIds}
+            commands={commands}
+            locale={locale}
+            onUpdateWidget={handleUpdate}
+            onBindCommand={(cmdId) =>
+              onBindCommandToWidget?.(canvas.canvasId, widget.id, cmdId)
+            }
+            onSetCommandArgValue={onSetCommandArgValue}
             onSendDownlink={onSendDownlink}
           />
         );
@@ -589,7 +623,7 @@ export function DashboardCanvas({
                   !canvas.locked ? "is-editable" : ""
                 }`}
                 data-drop-widget-id={widget.id}
-                {...(widget.type === "param_slider" || widget.type === "cmd_button"
+                {...(isCommandBindableWidget(widget.type)
                   ? { "data-drop-command-widget-id": widget.id }
                   : {})}
                 data-drop-canvas-id={canvas.canvasId}
@@ -601,8 +635,7 @@ export function DashboardCanvas({
                 onDragOver={(ev) => {
                   const types = Array.from(ev.dataTransfer.types);
                   const isWidgetDrag = types.includes("application/x-ddscope-widget");
-                  const isCmdWidget =
-                    widget.type === "param_slider" || widget.type === "cmd_button";
+                  const isCmdWidget = isCommandBindableWidget(widget.type);
                   if (
                     !isWidgetDrag &&
                     (types.includes("application/x-ddscope-channel") ||

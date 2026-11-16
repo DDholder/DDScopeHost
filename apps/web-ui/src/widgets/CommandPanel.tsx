@@ -2,8 +2,10 @@ import { useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import type { DownlinkReceiptDto } from "../bridge/bindings.ts";
 import { translate, type MessageKey, type UiLocale } from "../i18n/index.ts";
 import {
-  commandUsesValue,
+  buildEffectiveCommandArgs,
   compileCommandPayload,
+  countCommandPlaceholders,
+  extractCommandPlaceholders,
   type ByteEndian,
   type CommandDefinition,
   type CommandFormat,
@@ -20,10 +22,11 @@ export interface CommandPanelProps {
   onAddCommand: (partial?: Partial<Omit<CommandDefinition, "id">>) => string;
   onUpdateCommand: (commandId: string, patch: Partial<Omit<CommandDefinition, "id">>) => void;
   onRemoveCommand: (commandId: string) => void;
-  onPlaceCommandOnCanvas: (commandId: string) => void;
+  onSetCommandArgValue?: (commandId: string, argIndex: number, value: number) => void;
+  onPlaceCommandOnCanvas: (commandId: string, argIndex?: number) => void;
   onExecuteCommand: (
     commandId: string,
-    opts?: { value?: number },
+    opts?: { value?: number; values?: ReadonlyArray<number>; argIndex?: number | null },
   ) => Promise<DownlinkReceiptDto>;
   onExportCommandsConfig: () => string;
   onImportCommandsConfig: (jsonText: string) => { importedCount: number };
@@ -37,6 +40,7 @@ export function CommandPanel({
   onAddCommand,
   onUpdateCommand,
   onRemoveCommand,
+  onSetCommandArgValue,
   onPlaceCommandOnCanvas,
   onExecuteCommand,
   onExportCommandsConfig,
@@ -47,19 +51,60 @@ export function CommandPanel({
 
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [editingIds, setEditingIds] = useState<Record<string, boolean>>({});
-  const [testValues, setTestValues] = useState<Record<string, number>>({});
+  const [fallbackArgValues, setFallbackArgValues] = useState<Record<string, number[]>>({});
   const [sendStatus, setSendStatus] = useState<Record<string, { ok: boolean; text: string }>>({});
   const [ioNotice, setIoNotice] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   const boundCounts = new Map<string, number>();
+  const slotBoundCounts = new Map<string, number>();
   for (const cv of Object.values(canvases)) {
     for (const w of cv.widgets) {
-      const cmdId = w.sliderConfig?.commandId ?? w.buttonConfig?.commandId ?? null;
+      const cmdId =
+        w.sliderConfig?.commandId ??
+        w.buttonConfig?.commandId ??
+        w.cmdTableConfig?.commandId ??
+        null;
       if (cmdId) {
         boundCounts.set(cmdId, (boundCounts.get(cmdId) ?? 0) + 1);
       }
+      if (w.sliderConfig?.commandId) {
+        const slot = Math.max(0, Math.trunc(w.sliderConfig.commandArgIndex ?? 0));
+        const key = `${w.sliderConfig.commandId}:${slot}`;
+        slotBoundCounts.set(key, (slotBoundCounts.get(key) ?? 0) + 1);
+      }
+      if (w.buttonConfig?.commandId) {
+        const slot = Math.trunc(w.buttonConfig.commandArgIndex ?? 0);
+        if (slot >= 0) {
+          const key = `${w.buttonConfig.commandId}:${slot}`;
+          slotBoundCounts.set(key, (slotBoundCounts.get(key) ?? 0) + 1);
+        }
+      }
+      if (w.cmdTableConfig?.commandId) {
+        const boundCmd = commands.find((c) => c.id === w.cmdTableConfig?.commandId);
+        if (boundCmd) {
+          const slotCount = countCommandPlaceholders(boundCmd);
+          for (let s = 0; s < slotCount; s += 1) {
+            const key = `${boundCmd.id}:${s}`;
+            slotBoundCounts.set(key, (slotBoundCounts.get(key) ?? 0) + 1);
+          }
+        }
+      }
     }
   }
+
+  const handleArgInputChange = (commandId: string, slotIndex: number, nextVal: number) => {
+    if (!Number.isFinite(nextVal)) return;
+    if (onSetCommandArgValue) {
+      onSetCommandArgValue(commandId, slotIndex, nextVal);
+      return;
+    }
+    setFallbackArgValues((prev) => {
+      const arr = [...(prev[commandId] ?? [])];
+      while (arr.length <= slotIndex) arr.push(0);
+      arr[slotIndex] = nextVal;
+      return { ...prev, [commandId]: arr };
+    });
+  };
 
   const handleAdd = () => {
     const newId = onAddCommand();
@@ -105,22 +150,34 @@ export function CommandPanel({
     }
   };
 
-  const handleDragStart = (ev: DragEvent<HTMLElement>, cmd: CommandDefinition) => {
+  const handleDragStart = (
+    ev: DragEvent<HTMLElement>,
+    cmd: CommandDefinition,
+    argIndex?: number,
+  ) => {
     if (isPointerDragArmed()) {
       ev.preventDefault();
       return;
     }
     ev.dataTransfer.setData(
       "application/x-ddscope-command",
-      JSON.stringify({ commandId: cmd.id }),
+      JSON.stringify(
+        argIndex !== undefined ? { commandId: cmd.id, argIndex } : { commandId: cmd.id },
+      ),
     );
-    ev.dataTransfer.setData("text/plain", `command:${cmd.id}`);
+    ev.dataTransfer.setData(
+      "text/plain",
+      argIndex !== undefined ? `command:${cmd.id}@${argIndex}` : `command:${cmd.id}`,
+    );
     ev.dataTransfer.effectAllowed = "copy";
   };
 
-  const handleTestFire = async (cmd: CommandDefinition, val: number) => {
+  const handleTestFire = async (cmd: CommandDefinition, values?: number[]) => {
     try {
-      const receipt = await onExecuteCommand(cmd.id, { value: val });
+      const receipt = await onExecuteCommand(
+        cmd.id,
+        values && !onSetCommandArgValue ? { values } : undefined,
+      );
       setSendStatus((prev) => ({
         ...prev,
         [cmd.id]: {
@@ -215,9 +272,19 @@ export function CommandPanel({
         ) : (
           commands.map((cmd) => {
             const isEditing = Boolean(editingIds[cmd.id]);
-            const usesValue = commandUsesValue(cmd);
-            const testVal = testValues[cmd.id] ?? 0;
-            const compiled = compileCommandPayload(cmd, testVal);
+            const placeholders = extractCommandPlaceholders(cmd);
+            const rawArgSource = onSetCommandArgValue
+              ? cmd.argValues
+              : (fallbackArgValues[cmd.id] ?? cmd.argValues);
+            const effectiveArgs = buildEffectiveCommandArgs({
+              format: cmd.format,
+              template: cmd.template,
+              argValues: rawArgSource,
+            });
+            const compiled = compileCommandPayload(
+              cmd,
+              placeholders.length > 0 ? effectiveArgs : 0,
+            );
             const boundCount = boundCounts.get(cmd.id) ?? 0;
             const badgeLabel =
               cmd.format === "hex"
@@ -272,6 +339,14 @@ export function CommandPanel({
                   <span className="command-card-name" title={cmd.name}>
                     {cmd.name}
                   </span>
+                  {placeholders.length > 1 && (
+                    <span
+                      className="command-args-badge"
+                      data-testid={`cmd-args-badge-${cmd.id}`}
+                    >
+                      {t("cmd.placeholderBadge", { count: placeholders.length })}
+                    </span>
+                  )}
                   {boundCount > 0 && (
                     <span className="command-bound-badge">
                       {t("cmd.boundCount", { count: boundCount })}
@@ -286,7 +361,10 @@ export function CommandPanel({
                       disabled={!compiled.ok}
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        void handleTestFire(cmd, testVal);
+                        void handleTestFire(
+                          cmd,
+                          placeholders.length > 0 ? effectiveArgs : undefined,
+                        );
                       }}
                     >
                       ⚡
@@ -338,7 +416,7 @@ export function CommandPanel({
                     <span className="command-meta-label">{t("cmd.templateShort")}:</span>
                     <code>{cmd.template || "—"}</code>
                   </div>
-                  {usesValue && (
+                  {placeholders.length === 1 && (
                     <label
                       className="command-test-val-wrap"
                       onPointerDown={(ev) => ev.stopPropagation()}
@@ -349,15 +427,88 @@ export function CommandPanel({
                         step="any"
                         className="widget-num-input"
                         data-testid={`test-val-cmd-${cmd.id}`}
-                        value={testVal}
+                        value={effectiveArgs[0] ?? 0}
                         onChange={(ev) => {
                           const v = Number.parseFloat(ev.target.value);
                           if (Number.isFinite(v)) {
-                            setTestValues((prev) => ({ ...prev, [cmd.id]: v }));
+                            handleArgInputChange(cmd.id, 0, v);
                           }
                         }}
                       />
                     </label>
+                  )}
+                  {placeholders.length > 1 && (
+                    <div
+                      className="command-slots-list"
+                      data-testid={`cmd-slots-list-${cmd.id}`}
+                    >
+                      {placeholders.map((ph) => {
+                        const slotBound =
+                          (slotBoundCounts.get(`${cmd.id}:${ph.index}`) ?? 0) > 0;
+                        const argVal = effectiveArgs[ph.index] ?? 0;
+                        return (
+                          <div
+                            key={ph.index}
+                            className="command-slot-row"
+                            draggable
+                            data-testid={`cmd-slot-row-${cmd.id}-${ph.index}`}
+                            onPointerDown={(ev) => {
+                              ev.stopPropagation();
+                              startPointerDrag(ev, {
+                                kind: "command",
+                                commandId: cmd.id,
+                                argIndex: ph.index,
+                                badge: `${cmd.format === "hex" ? "HEX" : "STR"} ${ph.label}`,
+                                label: `${cmd.name} ${ph.label}`,
+                              });
+                            }}
+                            onDragStart={(ev) => {
+                              ev.stopPropagation();
+                              handleDragStart(ev, cmd, ph.index);
+                            }}
+                          >
+                            <span
+                              className={`command-slot-chip ${slotBound ? "is-bound" : ""}`}
+                              title={t("cmd.dragHint")}
+                            >
+                              {ph.label} · {ph.token}
+                            </span>
+                            <input
+                              type="number"
+                              step="any"
+                              className="widget-num-input"
+                              data-testid={
+                                ph.index === 0
+                                  ? `test-val-cmd-${cmd.id}`
+                                  : `test-val-cmd-${cmd.id}-${ph.index}`
+                              }
+                              value={argVal}
+                              onPointerDown={(ev) => ev.stopPropagation()}
+                              onClick={(ev) => ev.stopPropagation()}
+                              onChange={(ev) => {
+                                const v = Number.parseFloat(ev.target.value);
+                                if (Number.isFinite(v)) {
+                                  handleArgInputChange(cmd.id, ph.index, v);
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="toolbox-add-btn"
+                              title={t("cmd.placeSlotTitle", { num: ph.index + 1 })}
+                              data-testid={`place-cmd-slot-${cmd.id}-${ph.index}`}
+                              onPointerDown={(ev) => ev.stopPropagation()}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                onPlaceCommandOnCanvas(cmd.id, ph.index);
+                              }}
+                            >
+                              +
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                   <div
                     className={`command-preview-output ${compiled.ok ? "" : "is-error"}`}

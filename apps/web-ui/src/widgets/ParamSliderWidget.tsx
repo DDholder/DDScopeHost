@@ -6,7 +6,9 @@ import type {
 import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
 import {
+  buildEffectiveCommandArgs,
   compileCommandPayload,
+  extractCommandPlaceholders,
   type CommandDefinition,
 } from "../workspace/command-system.ts";
 import type { DashboardWidgetItem, WidgetSliderConfig } from "./types.ts";
@@ -17,6 +19,13 @@ export interface ParamSliderWidgetProps {
   commands: CommandDefinition[];
   locale: UiLocale;
   onUpdateWidget: (updater: (prev: DashboardWidgetItem) => DashboardWidgetItem) => void;
+  onBindCommand?: (commandId: string | null, argIndex?: number) => void;
+  onSetCommandArgValue?: (
+    commandId: string,
+    argIndex: number,
+    value: number,
+    sourceWidgetId?: string,
+  ) => void;
   onSendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
     labelSummary?: string,
@@ -44,6 +53,8 @@ export function ParamSliderWidget({
   commands,
   locale,
   onUpdateWidget,
+  onBindCommand,
+  onSetCommandArgValue,
   onSendDownlink,
 }: ParamSliderWidgetProps) {
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
@@ -55,10 +66,23 @@ export function ParamSliderWidget({
   const boundCommand = cfg.commandId
     ? commands.find((c) => c.id === cfg.commandId) ?? null
     : null;
+  const placeholders = boundCommand ? extractCommandPlaceholders(boundCommand) : [];
+  const effectiveSlot =
+    placeholders.length > 0
+      ? Math.min(Math.max(0, Math.trunc(cfg.commandArgIndex ?? 0)), placeholders.length - 1)
+      : 0;
   const effectiveTarget =
     boundCommand?.targetSourceId.trim() || cfg.sourceId || sourceIds[0] || "sim0";
   const compiledPreview = boundCommand
-    ? compileCommandPayload(boundCommand, cfg.value)
+    ? compileCommandPayload(
+        boundCommand,
+        placeholders.length > 0
+          ? buildEffectiveCommandArgs(boundCommand, {
+              slotIndex: effectiveSlot,
+              value: cfg.value,
+            })
+          : 0,
+      )
     : null;
 
   const updateCfg = (patch: Partial<WidgetSliderConfig>) => {
@@ -71,25 +95,49 @@ export function ParamSliderWidget({
     }));
   };
 
-  const commitValue = (nextVal: number) => {
+  const handleSlotChange = (nextSlot: number) => {
+    if (!boundCommand || !Number.isFinite(nextSlot)) return;
+    if (onBindCommand) {
+      onBindCommand(boundCommand.id, nextSlot);
+    } else {
+      updateCfg({ commandArgIndex: nextSlot });
+      onSetCommandArgValue?.(boundCommand.id, nextSlot, cfg.value, widget.id);
+    }
+  };
+
+  const commitValue = (nextVal: number, forceSend = false) => {
     if (!Number.isFinite(nextVal)) return;
     const clamped = Math.max(cfg.min, Math.min(cfg.max, nextVal));
     updateCfg({ value: clamped });
 
     if (boundCommand) {
-      const compiled = compileCommandPayload(boundCommand, clamped);
+      if (placeholders.length > 0) {
+        onSetCommandArgValue?.(boundCommand.id, effectiveSlot, clamped, widget.id);
+      }
+      const compiled = compileCommandPayload(
+        boundCommand,
+        placeholders.length > 0
+          ? buildEffectiveCommandArgs(boundCommand, {
+              slotIndex: effectiveSlot,
+              value: clamped,
+            })
+          : 0,
+      );
       if (!compiled.ok) {
         setCmdError(compiled.error);
         return;
       }
       setCmdError(null);
+      if (cfg.autoSend === false && !forceSend) {
+        return;
+      }
       void onSendDownlink(
         {
           source_id: effectiveTarget,
           priority: boundCommand.priority,
           coalesce_key:
             boundCommand.priority === "normal"
-              ? `${effectiveTarget}:cmd:${boundCommand.id}:${widget.id}`
+              ? `${effectiveTarget}:cmd:${boundCommand.id}`
               : null,
           payload: compiled.payload,
         },
@@ -127,13 +175,28 @@ export function ParamSliderWidget({
             {cfg.sourceId}:{cfg.key}
           </span>
         )}
+        {boundCommand && placeholders.length > 1 && (
+          <select
+            className="widget-slot-select"
+            data-testid={`widget-slot-select-${widget.id}`}
+            title={t("widget.cmdPlaceholderLabel")}
+            value={String(effectiveSlot)}
+            onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
+          >
+            {placeholders.map((ph) => (
+              <option key={ph.index} value={String(ph.index)}>
+                {ph.label}
+              </option>
+            ))}
+          </select>
+        )}
         <span className="widget-slider-val">{cfg.value.toFixed(decimals)}</span>
         {boundCommand && (
           <button
             type="button"
             className="scope-btn-xs scope-btn-accent"
             title={t("widget.btn.send")}
-            onClick={() => commitValue(cfg.value)}
+            onClick={() => commitValue(cfg.value, true)}
           >
             ⚡
           </button>
@@ -190,8 +253,12 @@ export function ParamSliderWidget({
               value={cfg.commandId ?? ""}
               onChange={(ev) => {
                 const nextId = ev.target.value || null;
-                const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
                 setCmdError(null);
+                if (onBindCommand) {
+                  onBindCommand(nextId);
+                  return;
+                }
+                const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
                 onUpdateWidget((prev) => ({
                   ...prev,
                   ...(nextCmd ? { title: nextCmd.name } : {}),
@@ -211,6 +278,35 @@ export function ParamSliderWidget({
               ))}
             </select>
           </label>
+          {boundCommand && placeholders.length > 0 && (
+            <label style={{ gridColumn: "span 2" }}>
+              {t("widget.cmdPlaceholderLabel")}
+              <select
+                data-testid={`slider-arg-select-${widget.id}`}
+                value={String(effectiveSlot)}
+                onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
+              >
+                {placeholders.map((ph) => (
+                  <option key={ph.index} value={String(ph.index)}>
+                    {t("widget.cmdPlaceholderSlot", {
+                      num: ph.index + 1,
+                      token: ph.token,
+                    })}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {boundCommand && (
+            <label style={{ gridColumn: "span 2", flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <input
+                type="checkbox"
+                checked={cfg.autoSend !== false}
+                onChange={(ev) => updateCfg({ autoSend: ev.target.checked })}
+              />
+              <span>{t("widget.slider.autoSend")}</span>
+            </label>
+          )}
           {(!boundCommand || !boundCommand.targetSourceId) && (
             <label>
               {t("widget.slider.source")}

@@ -21,11 +21,14 @@ import {
   type DashboardWidgetItem,
   type WidgetButtonConfig,
   type WidgetChannelBinding,
+  type WidgetCmdTableConfig,
+  type WidgetCmdTableRow,
   type WidgetGaugeConfig,
   type WidgetSliderConfig,
   type WidgetType,
 } from "../widgets/types.ts";
 import {
+  backfillCommandArgValuesFromCanvases,
   normalizeCommandDefinition,
   type CommandDefinition,
 } from "./command-system.ts";
@@ -143,6 +146,7 @@ export interface PortableCanvasWidgetV1 {
   gaugeConfig?: WidgetGaugeConfig;
   sliderConfig?: WidgetSliderConfig;
   buttonConfig?: WidgetButtonConfig;
+  cmdTableConfig?: WidgetCmdTableConfig;
 }
 
 export interface PortableDashboardCanvasV1 {
@@ -557,6 +561,50 @@ function serializePortableScope(
   };
 }
 
+function normalizeCmdTableConfig(raw: unknown): WidgetCmdTableConfig | undefined {
+  if (!isRecord(raw)) return undefined;
+  const sourceId =
+    typeof raw.sourceId === "string" && raw.sourceId.trim().length > 0
+      ? raw.sourceId.trim()
+      : "sim0";
+  const commandId =
+    typeof raw.commandId === "string" && raw.commandId.trim().length > 0
+      ? raw.commandId.trim()
+      : null;
+
+  const usedRowIds = new Set<string>();
+  const rows: WidgetCmdTableRow[] = [];
+  if (Array.isArray(raw.rows)) {
+    for (let i = 0; i < raw.rows.length; i += 1) {
+      const rRaw = raw.rows[i];
+      if (!isRecord(rRaw)) continue;
+      let id =
+        typeof rRaw.id === "string" && rRaw.id.trim().length > 0
+          ? rRaw.id.trim()
+          : `r_${i + 1}`;
+      if (usedRowIds.has(id)) {
+        let seq = rows.length + 1;
+        while (usedRowIds.has(`r_${seq}`)) seq += 1;
+        id = `r_${seq}`;
+      }
+      usedRowIds.add(id);
+      const label = typeof rRaw.label === "string" ? rRaw.label : "";
+      const values = Array.isArray(rRaw.values)
+        ? rRaw.values.map((v) =>
+            typeof v === "number" && Number.isFinite(v)
+              ? Object.is(v, -0)
+                ? 0
+                : v
+              : 0,
+          )
+        : [];
+      rows.push({ id, label, values });
+    }
+  }
+
+  return { sourceId, commandId, rows };
+}
+
 function serializeWidgetList(
   canvas: DashboardCanvasConfig,
   scopes: Record<number, ScopeUiConfig>,
@@ -586,6 +634,9 @@ function serializeWidgetList(
       ...(w.gaugeConfig ? { gaugeConfig: { ...w.gaugeConfig } } : {}),
       ...(w.sliderConfig ? { sliderConfig: { ...w.sliderConfig } } : {}),
       ...(w.buttonConfig ? { buttonConfig: { ...w.buttonConfig } } : {}),
+      ...(w.cmdTableConfig
+        ? { cmdTableConfig: normalizeCmdTableConfig(w.cmdTableConfig) }
+        : {}),
     };
   });
 }
@@ -631,7 +682,9 @@ function buildBoardConfigSections(input: BoardExportInput): ProjectBoardSections
     dockviewLayout: input.dockviewLayout,
     standaloneScopes,
     canvases,
-    commands: (input.commands ?? []).map((cmd) => ({ ...cmd })),
+    commands: (input.commands ?? []).map((cmd, idx) =>
+      normalizeCommandDefinition(cmd, idx + 1),
+    ),
   };
 }
 
@@ -717,6 +770,12 @@ function parsePortableWidgets(
         : {}),
       ...(isRecord(wRaw.buttonConfig)
         ? { buttonConfig: wRaw.buttonConfig as unknown as WidgetButtonConfig }
+        : {}),
+      ...(wRaw.cmdTableConfig !== undefined
+        ? (() => {
+            const normalized = normalizeCmdTableConfig(wRaw.cmdTableConfig);
+            return normalized ? { cmdTableConfig: normalized } : {};
+          })()
         : {}),
     };
   });
@@ -1431,6 +1490,12 @@ export function rehydrateBoardFromConfig(args: {
         ...(rawWidget.gaugeConfig ? { gaugeConfig: { ...rawWidget.gaugeConfig } } : {}),
         ...(rawWidget.sliderConfig ? { sliderConfig: { ...rawWidget.sliderConfig } } : {}),
         ...(rawWidget.buttonConfig ? { buttonConfig: { ...rawWidget.buttonConfig } } : {}),
+        ...(rawWidget.cmdTableConfig
+          ? (() => {
+              const normalized = normalizeCmdTableConfig(rawWidget.cmdTableConfig);
+              return normalized ? { cmdTableConfig: normalized } : {};
+            })()
+          : {}),
       });
     }
 
@@ -1518,6 +1583,11 @@ export function rehydrateBoardFromConfig(args: {
     kvVal: file.downlink.kvVal,
   };
 
+  const syncedCommands = backfillCommandArgValuesFromCanvases(
+    commands,
+    Object.values(canvases),
+  );
+
   return {
     scopes,
     scopeOrder,
@@ -1529,7 +1599,7 @@ export function rehydrateBoardFromConfig(args: {
     ui,
     downlink,
     dockviewLayout,
-    commands,
+    commands: syncedCommands,
     nextCommandSeq,
     missingChannelPaths: Array.from(missingSet),
   };

@@ -20,6 +20,7 @@ export type PointerDragPayload =
   | {
       kind: "command";
       commandId: string;
+      argIndex?: number;
       badge: string;
       label: string;
     };
@@ -54,6 +55,44 @@ let activeCleanup: (() => void) | null = null;
 
 export function isPointerDragArmed(): boolean {
   return pointerDragArmed;
+}
+
+/**
+ * Extracts a dragged command ID and optional placeholder slot index (`0..N` or `-1`)
+ * from an HTML5 drag event's `DataTransfer`.
+ */
+export function parseCommandDragTransfer(ev: {
+  dataTransfer: DataTransfer;
+}): { commandId: string; argIndex?: number } | null {
+  const rawJson = ev.dataTransfer.getData("application/x-ddscope-command");
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson) as { commandId?: string; argIndex?: number };
+      if (typeof parsed.commandId === "string" && parsed.commandId.trim().length > 0) {
+        return {
+          commandId: parsed.commandId.trim(),
+          ...(typeof parsed.argIndex === "number" && Number.isFinite(parsed.argIndex)
+            ? { argIndex: Math.trunc(parsed.argIndex) }
+            : {}),
+        };
+      }
+    } catch {
+      // Ignore malformed command payload
+    }
+  }
+  const plain = ev.dataTransfer.getData("text/plain").trim();
+  if (plain.startsWith("command:")) {
+    const rest = plain.slice("command:".length).trim();
+    const match = /^(.+?)@(-?\d+)$/.exec(rest);
+    if (match && match[1].trim().length > 0) {
+      return {
+        commandId: match[1].trim(),
+        argIndex: Number.parseInt(match[2], 10),
+      };
+    }
+    return rest.length > 0 ? { commandId: rest } : null;
+  }
+  return null;
 }
 
 function findFirstMatching(stack: Element[], selector: string): HTMLElement | null {

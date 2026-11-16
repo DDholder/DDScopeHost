@@ -62,8 +62,12 @@ import {
   type ProjectConfigFileV1,
 } from "./config-io.ts";
 import {
+  backfillCommandArgValuesFromCanvases,
+  buildEffectiveCommandArgs,
   commandUsesValue,
   compileCommandPayload,
+  countCommandPlaceholders,
+  createCmdTableRow,
   type CommandDefinition,
 } from "./command-system.ts";
 
@@ -222,19 +226,33 @@ export interface WorkspaceStoreState {
   addCommand: (partial?: Partial<Omit<CommandDefinition, "id">>) => string;
   updateCommand: (commandId: string, patch: Partial<Omit<CommandDefinition, "id">>) => void;
   removeCommand: (commandId: string) => void;
-  bindCommandToWidget: (canvasId: number, widgetId: string, commandId: string) => void;
+  setCommandArgValue: (
+    commandId: string,
+    argIndex: number,
+    value: number,
+    sourceWidgetId?: string,
+  ) => void;
+  bindCommandToWidget: (
+    canvasId: number,
+    widgetId: string,
+    commandId: string | null,
+    argIndex?: number,
+  ) => void;
   placeCommandOnCanvas: (
     canvasId: number,
     commandId: string,
-    opts?: { col?: number; row?: number },
+    opts?: { col?: number; row?: number; argIndex?: number },
   ) => string;
   executeCommand: (
     commandId: string,
     opts?: {
       value?: number;
+      values?: ReadonlyArray<number>;
+      argIndex?: number | null;
       fallbackSourceId?: string;
       coalesceKey?: string | null;
       isSliderEvent?: boolean;
+      sourceWidgetId?: string;
     },
   ) => Promise<DownlinkReceiptDto>;
   exportCommandsConfig: () => string;
@@ -1022,6 +1040,16 @@ export function createWorkspaceStore(
               updated = {
                 ...updated,
                 buttonConfig: { ...w.buttonConfig, sourceId: mappedBtnSrc },
+              };
+              canvasChanged = true;
+            }
+          }
+          if (remapSourceId && w.cmdTableConfig) {
+            const mappedTableSrc = remapSourceId(w.cmdTableConfig.sourceId);
+            if (mappedTableSrc !== w.cmdTableConfig.sourceId) {
+              updated = {
+                ...updated,
+                cmdTableConfig: { ...w.cmdTableConfig, sourceId: mappedTableSrc },
               };
               canvasChanged = true;
             }
@@ -1892,7 +1920,11 @@ export function createWorkspaceStore(
           : translate(state.locale, `toolbox.widget.${widgetType}.name` as MessageKey);
 
       const binding =
-        ch && widgetType !== "watch_table" && widgetType !== "param_slider" && widgetType !== "cmd_button"
+        ch &&
+        widgetType !== "watch_table" &&
+        widgetType !== "param_slider" &&
+        widgetType !== "cmd_button" &&
+        widgetType !== "cmd_table"
           ? { channelId: ch.channel_id, scale: 1, offset: 0 }
           : null;
 
@@ -1939,6 +1971,15 @@ export function createWorkspaceStore(
                 kvKey: "kp",
                 kvValue: 1.5,
                 priority: "high",
+              },
+            }
+          : {}),
+        ...(widgetType === "cmd_table"
+          ? {
+              cmdTableConfig: {
+                sourceId: primarySourceId,
+                commandId: null,
+                rows: [],
               },
             }
           : {}),
@@ -2095,6 +2136,20 @@ export function createWorkspaceStore(
             },
           };
         }
+        if (prev.type === "cmd_table") {
+          const prevCfg = prev.cmdTableConfig ?? {
+            sourceId: ch.source_id,
+            commandId: null,
+            rows: [],
+          };
+          return {
+            ...prev,
+            cmdTableConfig: {
+              ...prevCfg,
+              sourceId: ch.source_id,
+            },
+          };
+        }
         return prev;
       });
     },
@@ -2154,6 +2209,15 @@ export function createWorkspaceStore(
         endian: partial?.endian === "big" ? "big" : "little",
         targetSourceId: partial?.targetSourceId?.trim() ?? "",
         priority: partial?.priority === "high" ? "high" : "normal",
+        argValues: Array.isArray(partial?.argValues)
+          ? partial.argValues.map((v) =>
+              typeof v === "number" && Number.isFinite(v)
+                ? Object.is(v, -0)
+                  ? 0
+                  : v
+                : 0,
+            )
+          : [],
       };
       set({
         commands: [...state.commands, item],
@@ -2193,6 +2257,13 @@ export function createWorkspaceStore(
               buttonConfig: { ...w.buttonConfig, commandId: null },
             };
           }
+          if (w.cmdTableConfig?.commandId === commandId) {
+            widgetChanged = true;
+            nextW = {
+              ...nextW,
+              cmdTableConfig: { ...w.cmdTableConfig, commandId: null },
+            };
+          }
           return nextW;
         });
         if (widgetChanged) {
@@ -2209,13 +2280,190 @@ export function createWorkspaceStore(
       });
     },
 
-    bindCommandToWidget: (canvasId, widgetId, commandId) => {
+    setCommandArgValue: (commandId, argIndex, value, sourceWidgetId) => {
+      if (!Number.isFinite(value) || !Number.isFinite(argIndex) || argIndex < 0) {
+        return;
+      }
+      const slot = Math.trunc(argIndex);
+      const cleanVal = Object.is(value, -0) ? 0 : value;
+      const state = get();
+      const targetCmd = state.commands.find((c) => c.id === commandId);
+      if (!targetCmd) return;
+
+      const nextArgs = Array.isArray(targetCmd.argValues)
+        ? [...targetCmd.argValues]
+        : [];
+      while (nextArgs.length <= slot) {
+        nextArgs.push(0);
+      }
+      nextArgs[slot] = cleanVal;
+
+      const nextCommands = state.commands.map((cmd) =>
+        cmd.id === commandId ? { ...cmd, argValues: nextArgs } : cmd,
+      );
+
+      const nextCanvases: Record<number, DashboardCanvasConfig> = {};
+      let canvasChanged = false;
+      for (const [idStr, canvas] of Object.entries(state.canvases)) {
+        const cid = Number(idStr);
+        let widgetChanged = false;
+        const nextWidgets = canvas.widgets.map((w) => {
+          if (
+            w.id !== sourceWidgetId &&
+            w.type === "param_slider" &&
+            w.sliderConfig?.commandId === commandId
+          ) {
+            const wSlot = Math.max(0, Math.trunc(w.sliderConfig.commandArgIndex ?? 0));
+            if (wSlot === slot && w.sliderConfig.value !== cleanVal) {
+              widgetChanged = true;
+              return {
+                ...w,
+                sliderConfig: {
+                  ...w.sliderConfig,
+                  min: Math.min(w.sliderConfig.min, cleanVal),
+                  max: Math.max(w.sliderConfig.max, cleanVal),
+                  value: cleanVal,
+                },
+              };
+            }
+          }
+          return w;
+        });
+        if (widgetChanged) {
+          canvasChanged = true;
+          nextCanvases[cid] = { ...canvas, widgets: nextWidgets };
+        } else {
+          nextCanvases[cid] = canvas;
+        }
+      }
+
+      set({
+        commands: nextCommands,
+        ...(canvasChanged ? { canvases: nextCanvases } : {}),
+      });
+    },
+
+    bindCommandToWidget: (canvasId, widgetId, commandId, argIndex) => {
       const state = get();
       const canvas = state.canvases[canvasId];
-      const cmd = state.commands.find((c) => c.id === commandId);
-      if (!canvas || !cmd) return;
+      const targetWidget = canvas?.widgets.find((w) => w.id === widgetId);
+      if (!canvas || !targetWidget) return;
 
+      if (!commandId) {
+        get().updateCanvasWidget(canvasId, widgetId, (prev) => {
+          if (prev.type === "param_slider" && prev.sliderConfig) {
+            return {
+              ...prev,
+              sliderConfig: { ...prev.sliderConfig, commandId: null },
+            };
+          }
+          if (prev.type === "cmd_button" && prev.buttonConfig) {
+            return {
+              ...prev,
+              buttonConfig: { ...prev.buttonConfig, commandId: null },
+            };
+          }
+          if (prev.type === "cmd_table" && prev.cmdTableConfig) {
+            return {
+              ...prev,
+              cmdTableConfig: { ...prev.cmdTableConfig, commandId: null },
+            };
+          }
+          return prev;
+        });
+        return;
+      }
+
+      const cmd = state.commands.find((c) => c.id === commandId);
+      if (!cmd) return;
+
+      const placeholderCount = countCommandPlaceholders(cmd);
       const fallbackSource = state.channelGroups[0]?.source.source_id ?? "sim0";
+
+      if (targetWidget.type === "cmd_table") {
+        get().updateCanvasWidget(canvasId, widgetId, (prev) => {
+          const prevCfg = prev.cmdTableConfig ?? {
+            sourceId: fallbackSource,
+            commandId: null,
+            rows: [],
+          };
+          const nextRows =
+            prevCfg.rows.length > 0
+              ? prevCfg.rows
+              : [
+                  createCmdTableRow(
+                    [],
+                    placeholderCount,
+                    buildEffectiveCommandArgs(cmd),
+                    state.locale,
+                  ),
+                ];
+          return {
+            ...prev,
+            title: cmd.name || prev.title,
+            cmdTableConfig: {
+              sourceId: cmd.targetSourceId || prevCfg.sourceId || fallbackSource,
+              commandId: cmd.id,
+              rows: nextRows,
+            },
+          };
+        });
+        return;
+      }
+
+      let resolvedArgIndex = 0;
+
+      if (typeof argIndex === "number" && Number.isFinite(argIndex)) {
+        const truncated = Math.trunc(argIndex);
+        if (truncated === -1 && targetWidget.type === "cmd_button") {
+          resolvedArgIndex = -1;
+        } else {
+          resolvedArgIndex = Math.max(
+            0,
+            placeholderCount > 0 ? Math.min(truncated, placeholderCount - 1) : 0,
+          );
+        }
+      } else if (placeholderCount > 0) {
+        const usedSlots = new Set<number>();
+        for (const cv of Object.values(state.canvases)) {
+          for (const w of cv.widgets) {
+            if (w.id === widgetId) continue;
+            if (w.sliderConfig?.commandId === commandId) {
+              const s = Math.trunc(w.sliderConfig.commandArgIndex ?? 0);
+              if (s >= 0 && s < placeholderCount) {
+                usedSlots.add(s);
+              }
+            }
+            if (w.buttonConfig?.commandId === commandId) {
+              const s = Math.trunc(w.buttonConfig.commandArgIndex ?? 0);
+              if (s >= 0 && s < placeholderCount) {
+                usedSlots.add(s);
+              }
+            }
+          }
+        }
+
+        let firstFree: number | null = null;
+        for (let i = 0; i < placeholderCount; i += 1) {
+          if (!usedSlots.has(i)) {
+            firstFree = i;
+            break;
+          }
+        }
+        if (firstFree !== null) {
+          resolvedArgIndex = firstFree;
+        } else {
+          resolvedArgIndex =
+            targetWidget.type === "cmd_button" && placeholderCount > 1 ? -1 : 0;
+        }
+      }
+
+      const nextTitle =
+        placeholderCount > 1 && resolvedArgIndex >= 0
+          ? `${cmd.name} #${resolvedArgIndex + 1}`
+          : cmd.name || targetWidget.title;
+
+      let valueToSeed: { slot: number; value: number } | null = null;
 
       get().updateCanvasWidget(canvasId, widgetId, (prev) => {
         if (prev.type === "param_slider") {
@@ -2227,13 +2475,28 @@ export function createWorkspaceStore(
             step: 0.05,
             value: 1.2,
           };
+          const slot = Math.max(0, resolvedArgIndex);
+          const existing =
+            placeholderCount > 0 &&
+            typeof cmd.argValues?.[slot] === "number" &&
+            Number.isFinite(cmd.argValues[slot])
+              ? cmd.argValues[slot]
+              : undefined;
+          const nextValue = existing !== undefined ? existing : prevCfg.value;
+          if (existing === undefined && placeholderCount > 0) {
+            valueToSeed = { slot, value: prevCfg.value };
+          }
           return {
             ...prev,
-            title: cmd.name || prev.title,
+            title: nextTitle,
             sliderConfig: {
               ...prevCfg,
               sourceId: cmd.targetSourceId || prevCfg.sourceId || fallbackSource,
               commandId: cmd.id,
+              commandArgIndex: slot,
+              min: Math.min(prevCfg.min, nextValue),
+              max: Math.max(prevCfg.max, nextValue),
+              value: nextValue,
             },
           };
         }
@@ -2247,21 +2510,52 @@ export function createWorkspaceStore(
             kvValue: 1.5,
             priority: cmd.priority,
           };
+          if (resolvedArgIndex === -1) {
+            return {
+              ...prev,
+              title: nextTitle,
+              buttonConfig: {
+                ...prevCfg,
+                sourceId: cmd.targetSourceId || prevCfg.sourceId || fallbackSource,
+                priority: cmd.priority,
+                commandId: cmd.id,
+                commandArgIndex: -1,
+                commandValue: prevCfg.commandValue ?? 0,
+              },
+            };
+          }
+          const slot = Math.max(0, resolvedArgIndex);
+          const existing =
+            placeholderCount > 0 &&
+            typeof cmd.argValues?.[slot] === "number" &&
+            Number.isFinite(cmd.argValues[slot])
+              ? cmd.argValues[slot]
+              : undefined;
+          const nextVal = prevCfg.commandValue ?? existing ?? 0;
+          if (existing === undefined && placeholderCount > 0) {
+            valueToSeed = { slot, value: nextVal };
+          }
           return {
             ...prev,
-            title: cmd.name || prev.title,
+            title: nextTitle,
             buttonConfig: {
               ...prevCfg,
               sourceId: cmd.targetSourceId || prevCfg.sourceId || fallbackSource,
               priority: cmd.priority,
               commandId: cmd.id,
-              commandValue: prevCfg.commandValue ?? 0,
+              commandArgIndex: slot,
+              commandValue: nextVal,
             },
           };
         }
 
         return prev;
       });
+
+      if (valueToSeed) {
+        const seed = valueToSeed as { slot: number; value: number };
+        get().setCommandArgValue(commandId, seed.slot, seed.value, widgetId);
+      }
     },
 
     placeCommandOnCanvas: (canvasId, commandId, opts) => {
@@ -2269,26 +2563,77 @@ export function createWorkspaceStore(
       const cmd = state.commands.find((c) => c.id === commandId);
       if (!cmd) return "";
 
-      const widgetType: WidgetType = commandUsesValue(cmd)
-        ? "param_slider"
-        : "cmd_button";
-      const widgetId = get().addWidgetToCanvas(canvasId, widgetType, opts);
+      const widgetType: WidgetType =
+        opts?.argIndex === -1
+          ? "cmd_button"
+          : commandUsesValue(cmd)
+            ? "param_slider"
+            : "cmd_button";
+      const widgetId = get().addWidgetToCanvas(canvasId, widgetType, {
+        col: opts?.col,
+        row: opts?.row,
+      });
       if (widgetId) {
-        get().bindCommandToWidget(canvasId, widgetId, commandId);
+        get().bindCommandToWidget(canvasId, widgetId, commandId, opts?.argIndex);
       }
       return widgetId;
     },
 
     executeCommand: async (commandId, opts) => {
-      const state = get();
-      const cmd = state.commands.find((c) => c.id === commandId);
+      let cmd = get().commands.find((c) => c.id === commandId);
       if (!cmd) {
         throw new Error(`Command '${commandId}' not found.`);
       }
-      const compiled = compileCommandPayload(cmd, opts?.value ?? 0);
+
+      const count = countCommandPlaceholders(cmd);
+      let effectiveValues: number[] = [];
+
+      if (opts?.values !== undefined) {
+        for (let i = 0; i < opts.values.length; i += 1) {
+          const v = opts.values[i];
+          if (typeof v === "number" && Number.isFinite(v)) {
+            get().setCommandArgValue(commandId, i, v, opts.sourceWidgetId);
+          }
+        }
+        cmd = get().commands.find((c) => c.id === commandId) ?? cmd;
+        effectiveValues = buildEffectiveCommandArgs(cmd, { values: opts.values });
+      } else if (
+        typeof opts?.argIndex === "number" &&
+        opts.argIndex >= 0 &&
+        typeof opts.value === "number" &&
+        Number.isFinite(opts.value)
+      ) {
+        get().setCommandArgValue(
+          commandId,
+          opts.argIndex,
+          opts.value,
+          opts.sourceWidgetId,
+        );
+        cmd = get().commands.find((c) => c.id === commandId) ?? cmd;
+        effectiveValues = buildEffectiveCommandArgs(cmd, {
+          slotIndex: opts.argIndex,
+          value: opts.value,
+        });
+      } else if (opts?.argIndex === -1) {
+        effectiveValues = buildEffectiveCommandArgs(cmd);
+      } else if (typeof opts?.value === "number" && Number.isFinite(opts.value)) {
+        if (count > 0) {
+          get().setCommandArgValue(commandId, 0, opts.value, opts.sourceWidgetId);
+          cmd = get().commands.find((c) => c.id === commandId) ?? cmd;
+          effectiveValues = buildEffectiveCommandArgs(cmd, {
+            slotIndex: 0,
+            value: opts.value,
+          });
+        }
+      } else {
+        effectiveValues = buildEffectiveCommandArgs(cmd);
+      }
+
+      const compiled = compileCommandPayload(cmd, count > 0 ? effectiveValues : 0);
       if (!compiled.ok) {
         throw new Error(compiled.error);
       }
+      const state = get();
       const targetSource =
         cmd.targetSourceId.trim() ||
         opts?.fallbackSourceId?.trim() ||
@@ -2331,6 +2676,13 @@ export function createWorkspaceStore(
               widgetChanged = true;
               nextW = { ...nextW, buttonConfig: { ...w.buttonConfig, commandId: null } };
             }
+            if (w.cmdTableConfig?.commandId && !nextIds.has(w.cmdTableConfig.commandId)) {
+              widgetChanged = true;
+              nextW = {
+                ...nextW,
+                cmdTableConfig: { ...w.cmdTableConfig, commandId: null },
+              };
+            }
             return nextW;
           });
           if (widgetChanged) {
@@ -2347,12 +2699,20 @@ export function createWorkspaceStore(
           if (m) maxSeq = Math.max(maxSeq, Number(m[1]));
         }
 
+        const effectiveCanvases = Object.values(
+          canvasChanged ? nextCanvases : state.canvases,
+        );
+        const synced = backfillCommandArgValuesFromCanvases(
+          file.commands,
+          effectiveCanvases,
+        );
+
         set({
-          commands: file.commands,
+          commands: synced,
           nextCommandSeq: Math.max(maxSeq + 1, file.commands.length + 1),
           ...(canvasChanged ? { canvases: nextCanvases } : {}),
         });
-        return { importedCount: file.commands.length };
+        return { importedCount: synced.length };
       }
 
       const usedIds = new Set(state.commands.map((c) => c.id));
@@ -2377,11 +2737,16 @@ export function createWorkspaceStore(
         appended.push({ ...rawCmd, id: finalId });
       }
 
+      const syncedAppended = backfillCommandArgValuesFromCanvases(
+        appended,
+        Object.values(state.canvases),
+      );
+
       set({
-        commands: [...state.commands, ...appended],
+        commands: [...state.commands, ...syncedAppended],
         nextCommandSeq: nextSeq,
       });
-      return { importedCount: appended.length };
+      return { importedCount: syncedAppended.length };
     },
 
     sendDownlink: async (req, labelSummary, isSliderEvent = false) => {

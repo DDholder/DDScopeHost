@@ -8,6 +8,7 @@ export const WIDGET_TYPES = [
   "watch_table",
   "param_slider",
   "cmd_button",
+  "cmd_table",
 ] as const;
 
 export type WidgetType = (typeof WIDGET_TYPES)[number];
@@ -32,6 +33,10 @@ export interface WidgetSliderConfig {
   step: number;
   value: number;
   commandId?: string | null;
+  /** 0-based placeholder slot index (`0` -> `#1`, `1` -> `#2`, ...). */
+  commandArgIndex?: number;
+  /** Whether moving the slider automatically transmits the compiled command. */
+  autoSend?: boolean;
 }
 
 export interface WidgetButtonConfig {
@@ -43,6 +48,20 @@ export interface WidgetButtonConfig {
   priority: "normal" | "high";
   commandId?: string | null;
   commandValue?: number;
+  /** 0-based placeholder slot index, or `-1` to trigger-send all current placeholder values. */
+  commandArgIndex?: number;
+}
+
+export interface WidgetCmdTableRow {
+  id: string;
+  label: string;
+  values: number[];
+}
+
+export interface WidgetCmdTableConfig {
+  sourceId: string;
+  commandId: string | null;
+  rows: WidgetCmdTableRow[];
 }
 
 export interface DashboardWidgetItem {
@@ -59,6 +78,7 @@ export interface DashboardWidgetItem {
   gaugeConfig?: WidgetGaugeConfig;
   sliderConfig?: WidgetSliderConfig;
   buttonConfig?: WidgetButtonConfig;
+  cmdTableConfig?: WidgetCmdTableConfig;
 }
 
 export interface DashboardCanvasConfig {
@@ -83,6 +103,7 @@ export const WIDGET_CATALOG: ReadonlyArray<WidgetCatalogEntry> = [
   { type: "watch_table", badge: "TBL", defaultColSpan: 16, defaultRowSpan: 5 },
   { type: "param_slider", badge: "SLD", defaultColSpan: 12, defaultRowSpan: 3 },
   { type: "cmd_button", badge: "CMD", defaultColSpan: 8, defaultRowSpan: 3 },
+  { type: "cmd_table", badge: "CTB", defaultColSpan: 16, defaultRowSpan: 6 },
 ];
 
 export const DASHBOARD_GRID_ROW_HEIGHT_PX = 42;

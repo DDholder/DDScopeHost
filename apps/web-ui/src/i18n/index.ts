@@ -132,6 +132,8 @@ export const EN_MESSAGES = {
   "toolbox.widget.param_slider.desc": "Coalesced TX slider control",
   "toolbox.widget.cmd_button.name": "Command Button",
   "toolbox.widget.cmd_button.desc": "ASCII / HEX / KV TX trigger",
+  "toolbox.widget.cmd_table.name": "Command Table",
+  "toolbox.widget.cmd_table.desc": "Multi-row preset table per placeholder",
 
   "canvas.designMode": "✎ Edit Layout",
   "canvas.lockedMode": "🔒 Locked",
@@ -162,6 +164,7 @@ export const EN_MESSAGES = {
   "widget.slider.source": "Source",
   "widget.slider.key": "Key",
   "widget.slider.step": "Step",
+  "widget.slider.autoSend": "Send on change",
   "widget.btn.send": "Send",
   "widget.btn.sent": "Sent",
   "widget.btn.mode": "Mode",
@@ -169,6 +172,19 @@ export const EN_MESSAGES = {
   "widget.cmdBindLabel": "Bound Command",
   "widget.cmdBindNoneKv": "Unbound (Key = Value)",
   "widget.cmdBindNoneCustom": "Unbound (Custom Payload)",
+  "widget.cmdPlaceholderLabel": "Bound Placeholder",
+  "widget.cmdPlaceholderSlot": "#{num} ({token})",
+  "widget.cmdPlaceholderTriggerAll": "Trigger All (Send Current Args)",
+  "widget.cmdTable.unbound":
+    "Drag a command here or select one below to generate columns per placeholder",
+  "widget.cmdTable.selectCmd": "Select a command to bind...",
+  "widget.cmdTable.addRow": "+ Row",
+  "widget.cmdTable.colLabel": "Label",
+  "widget.cmdTable.colAction": "Action",
+  "widget.cmdTable.rowPlaceholder": "Preset {num}",
+  "widget.cmdTable.emptyRows": "No rows yet. Click '+ Row' to add a preset.",
+  "widget.cmdTable.deleteRow": "Remove row",
+  "widget.cmdTable.sendRow": "Send",
 
   // Command System & Command Panel
   "cmd.newCommand": "+ New Command",
@@ -178,11 +194,13 @@ export const EN_MESSAGES = {
   "cmd.importedNotice": "Loaded {count} command(s).",
   "cmd.importErrorNotice": "Failed to load commands: {error}",
   "cmd.dragHint":
-    "Drag command onto any Slider / Button to bind, or onto Canvas (or +) to create bound widget",
+    "Drag a command (or specific #N slot chip) onto Sliders / Buttons to bind, or onto Canvas / + to create widgets",
   "cmd.emptyTitle": "No Commands Defined",
   "cmd.emptyDesc":
-    "Create reusable String or Hex commands (e.g. 'set_num %f', '00 01 02', '123') and bind them to widgets.",
+    "Create reusable String or Hex commands (e.g. 'set_pid %.2f %.2f', '00 01 02', '123') and bind each placeholder to a widget.",
   "cmd.boundCount": "Bound ×{count}",
+  "cmd.placeholderBadge": "{count} args",
+  "cmd.placeSlotTitle": "Add widget bound to placeholder #{num}",
   "cmd.testSendTitle": "Test Send Now",
   "cmd.placeBtnTitle": "Add bound widget to active canvas",
   "cmd.editBtnTitle": "Edit Command",
@@ -204,7 +222,7 @@ export const EN_MESSAGES = {
   "cmd.prioNormal": "Normal",
   "cmd.prioHigh": "High",
   "cmd.formatHelp":
-    "String: %f, %.2f, %d, %u, %02X, \\n, %% | Hex: 00 01 02, %f (4B float), %d (4B int), %hu (2B uint), %02X (1B)",
+    "Multiple placeholders supported (e.g. 'set %.2f %d' or 'AA %f %02X'; %1$f/%2$d for positional reuse). Widgets bind to #1, #2... in order.",
 
   // Scope Viewport Widget & HUD
   "scope.sweepModeAria": "Sweep Mode",
@@ -473,6 +491,8 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "toolbox.widget.param_slider.desc": "VOFA+ 风格并发平滑下行滑块",
   "toolbox.widget.cmd_button.name": "指令触发按钮",
   "toolbox.widget.cmd_button.desc": "一键发送 ASCII / HEX / KV",
+  "toolbox.widget.cmd_table.name": "命令参数表",
+  "toolbox.widget.cmd_table.desc": "多行预设表 · 按列对应占位符单行触发",
 
   "canvas.designMode": "✎ 编辑布局",
   "canvas.lockedMode": "🔒 已锁定",
@@ -501,6 +521,7 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "widget.slider.source": "数据源",
   "widget.slider.key": "参数名",
   "widget.slider.step": "步长",
+  "widget.slider.autoSend": "调节时自动发送",
   "widget.btn.send": "发送指令",
   "widget.btn.sent": "已发送",
   "widget.btn.mode": "格式",
@@ -508,6 +529,19 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "widget.cmdBindLabel": "绑定命令",
   "widget.cmdBindNoneKv": "未绑定 (默认 Key=Value)",
   "widget.cmdBindNoneCustom": "未绑定 (自定义指令)",
+  "widget.cmdPlaceholderLabel": "绑定占位符",
+  "widget.cmdPlaceholderSlot": "#{num} ({token})",
+  "widget.cmdPlaceholderTriggerAll": "全局触发发送 (汇总全部占位)",
+  "widget.cmdTable.unbound":
+    "将命令拖入此处，或在下方选择绑定命令以按占位符生成列",
+  "widget.cmdTable.selectCmd": "选择要绑定的命令...",
+  "widget.cmdTable.addRow": "+ 添加行",
+  "widget.cmdTable.colLabel": "标签",
+  "widget.cmdTable.colAction": "发送",
+  "widget.cmdTable.rowPlaceholder": "预设 {num}",
+  "widget.cmdTable.emptyRows": "暂无参数行，点击上方「+ 添加行」创建预设",
+  "widget.cmdTable.deleteRow": "删除该行",
+  "widget.cmdTable.sendRow": "发送",
 
   // Command System & Command Panel
   "cmd.newCommand": "+ 新建命令",
@@ -517,11 +551,13 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "cmd.importedNotice": "已加载 {count} 条命令。",
   "cmd.importErrorNotice": "加载命令失败：{error}",
   "cmd.dragHint":
-    "可将命令拖到任意滑块/按钮控件上绑定，或拖入画布 / 点击 + 自动创建已绑定控件",
+    "可将整条命令或具体 #N 占位符拖到任意滑块/按钮上绑定，或拖入画布 / 点击 + 创建控件",
   "cmd.emptyTitle": "暂无自定义命令",
   "cmd.emptyDesc":
-    "点击上方「+ 新建命令」，创建如「设数值 (set_num %f)」、Hex (00 01 02)、String (123) 并绑定到控件。",
+    "点击上方「+ 新建命令」，支持多占位符如「set_pid %.2f %.2f」、Hex (AA %f %02X) 等分别绑定多个控件。",
   "cmd.boundCount": "已绑定 ×{count}",
+  "cmd.placeholderBadge": "{count} 参",
+  "cmd.placeSlotTitle": "添加绑定到占位符 #{num} 的控件",
   "cmd.testSendTitle": "立即试发一次",
   "cmd.placeBtnTitle": "添加对应绑定控件到当前画布",
   "cmd.editBtnTitle": "编辑命令",
@@ -543,7 +579,7 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "cmd.prioNormal": "普通 (可并合)",
   "cmd.prioHigh": "高优先级 (立即发送)",
   "cmd.formatHelp":
-    "String 支持: %f, %.2f, %d, %u, %02X, \\n, %% | Hex 支持: 00 01 02, %f(4B浮点), %d(4B整数), %hu(2B无符号), %02X(1B)",
+    "支持多占位符（如 'set %.2f %d' 或 'AA %f %02X'；可用 %1$f/%2$d 按序号复用），控件按顺序自动绑定 #1、#2…",
 
   // Scope Viewport Widget & HUD
   "scope.sweepModeAria": "扫描触发模式",

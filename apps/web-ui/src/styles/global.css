@@ -1323,6 +1323,7 @@ select {
 .dashboard-grid,
 .widget-card-content,
 .widget-watch-wrap,
+.widget-cmd-table-wrap,
 .modal-panel {
   scrollbar-width: thin;
   scrollbar-color: #475569 #0f172a;
@@ -1334,6 +1335,7 @@ select {
 .dashboard-grid::-webkit-scrollbar,
 .widget-card-content::-webkit-scrollbar,
 .widget-watch-wrap::-webkit-scrollbar,
+.widget-cmd-table-wrap::-webkit-scrollbar,
 .modal-panel::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -1345,6 +1347,7 @@ select {
 .dashboard-grid::-webkit-scrollbar-track,
 .widget-card-content::-webkit-scrollbar-track,
 .widget-watch-wrap::-webkit-scrollbar-track,
+.widget-cmd-table-wrap::-webkit-scrollbar-track,
 .modal-panel::-webkit-scrollbar-track {
   background: #0f172a;
   border-radius: 4px;
@@ -1356,6 +1359,7 @@ select {
 .dashboard-grid::-webkit-scrollbar-thumb,
 .widget-card-content::-webkit-scrollbar-thumb,
 .widget-watch-wrap::-webkit-scrollbar-thumb,
+.widget-cmd-table-wrap::-webkit-scrollbar-thumb,
 .modal-panel::-webkit-scrollbar-thumb {
   background: #475569;
   border-radius: 4px;
@@ -1368,6 +1372,7 @@ select {
 .dashboard-grid::-webkit-scrollbar-thumb:hover,
 .widget-card-content::-webkit-scrollbar-thumb:hover,
 .widget-watch-wrap::-webkit-scrollbar-thumb:hover,
+.widget-cmd-table-wrap::-webkit-scrollbar-thumb:hover,
 .modal-panel::-webkit-scrollbar-thumb:hover {
   background: #64748b;
 }
@@ -2292,4 +2297,166 @@ select {
 .widget-cmd-val-input {
   width: 72px;
   flex-shrink: 0;
+}
+
+.command-args-badge {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(168, 85, 247, 0.14);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  color: #c4b5fd;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  flex-shrink: 0;
+}
+
+.command-slots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.command-slot-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px dashed rgba(148, 163, 184, 0.25);
+  cursor: grab;
+  user-select: none;
+}
+
+.command-slot-row:hover {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.command-slot-row:active {
+  cursor: grabbing;
+}
+
+.command-slot-chip {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-slot-chip.is-bound {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+
+.command-slot-row input.widget-num-input {
+  width: 68px;
+  flex-shrink: 0;
+}
+
+.widget-slot-select {
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid rgba(168, 85, 247, 0.45);
+  background: rgba(15, 23, 42, 0.85);
+  color: #d8b4fe;
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.widget-cmd-table-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+  min-height: 0;
+}
+
+.widget-cmd-table-status {
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.widget-cmd-table-status.ok {
+  color: var(--ok);
+}
+
+.widget-cmd-table-status.err {
+  color: #fda4af;
+}
+
+.widget-cmd-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.widget-cmd-table th {
+  white-space: nowrap;
+}
+
+.cmd-table-th-token {
+  margin-left: 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.cmd-table-th-action {
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+}
+
+.cmd-table-label-input {
+  width: 100%;
+  min-width: 72px;
+  height: 21px;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.cmd-table-val-input {
+  width: 68px;
+}
+
+.cmd-table-action-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.cmd-table-static-cell {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #7dd3fc;
+}
+
+.cmd-table-empty-cell {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 10px 6px;
 }

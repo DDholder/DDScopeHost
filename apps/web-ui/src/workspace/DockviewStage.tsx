@@ -21,6 +21,7 @@ import { DashboardCanvas, WIDGET_TYPES, type WidgetType } from "../widgets/index
 import { useWorkspaceStore } from "./store.ts";
 import {
   DDSCOPE_POINTER_DROP_EVENT,
+  parseCommandDragTransfer,
   type PointerDropEventDetail,
 } from "./pointer-dnd.ts";
 import { readJsonFileFromInput, saveJsonFile } from "./file-dialog.ts";
@@ -109,6 +110,7 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
   const removeCanvasWidget = useWorkspaceStore((s) => s.removeCanvasWidget);
   const bindChannelToWidget = useWorkspaceStore((s) => s.bindChannelToWidget);
   const bindCommandToWidget = useWorkspaceStore((s) => s.bindCommandToWidget);
+  const setCommandArgValue = useWorkspaceStore((s) => s.setCommandArgValue);
   const placeCommandOnCanvas = useWorkspaceStore((s) => s.placeCommandOnCanvas);
   const sendDownlink = useWorkspaceStore((s) => s.sendDownlink);
 
@@ -161,6 +163,7 @@ function DashboardCanvasPanel(props: IDockviewPanelProps<CanvasPanelParams>) {
       onRemoveWidget={removeCanvasWidget}
       onBindChannelToWidget={bindChannelToWidget}
       onBindCommandToWidget={bindCommandToWidget}
+      onSetCommandArgValue={setCommandArgValue}
       onPlaceCommandOnCanvas={placeCommandOnCanvas}
       onSendDownlink={sendDownlink}
     />
@@ -185,26 +188,6 @@ function parseWatermarkWidgetType(ev: DragEvent): WidgetType | null {
     if ((WIDGET_TYPES as readonly string[]).includes(candidate)) {
       return candidate as WidgetType;
     }
-  }
-  return null;
-}
-
-function parseWatermarkCommandId(ev: DragEvent): string | null {
-  const raw = ev.dataTransfer.getData("application/x-ddscope-command");
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw) as { commandId?: string };
-      if (typeof parsed.commandId === "string" && parsed.commandId.trim().length > 0) {
-        return parsed.commandId.trim();
-      }
-    } catch {
-      // Ignore malformed payload
-    }
-  }
-  const plain = ev.dataTransfer.getData("text/plain").trim();
-  if (plain.startsWith("command:")) {
-    const id = plain.slice("command:".length).trim();
-    return id.length > 0 ? id : null;
   }
   return null;
 }
@@ -235,7 +218,13 @@ function WorkspaceWatermark(_props: IWatermarkPanelProps) {
       if (detail.payload.kind === "command") {
         ev.stopPropagation();
         const cid = addCanvas();
-        placeCommandOnCanvas(cid, detail.payload.commandId);
+        placeCommandOnCanvas(
+          cid,
+          detail.payload.commandId,
+          detail.payload.argIndex !== undefined
+            ? { argIndex: detail.payload.argIndex }
+            : undefined,
+        );
       }
     };
     el.addEventListener(DDSCOPE_POINTER_DROP_EVENT, onPointerDrop);
@@ -273,11 +262,15 @@ function WorkspaceWatermark(_props: IWatermarkPanelProps) {
           addWidgetToCanvas(cid, wType);
           return;
         }
-        const cmdId = parseWatermarkCommandId(ev);
-        if (cmdId) {
+        const cmdDrop = parseCommandDragTransfer(ev);
+        if (cmdDrop) {
           ev.preventDefault();
           const cid = addCanvas();
-          placeCommandOnCanvas(cid, cmdId);
+          placeCommandOnCanvas(
+            cid,
+            cmdDrop.commandId,
+            cmdDrop.argIndex !== undefined ? { argIndex: cmdDrop.argIndex } : undefined,
+          );
         }
       }}
     >

@@ -1,7 +1,19 @@
 import type { DownlinkPayloadDto } from "../bridge/bindings.ts";
+import type { DashboardCanvasConfig, WidgetCmdTableRow } from "../widgets/types.ts";
 
 export type CommandFormat = "string" | "hex";
 export type ByteEndian = "little" | "big";
+
+export interface CommandPlaceholderInfo {
+  /** 0-based placeholder slot index (`0` -> `#1`, `1` -> `#2`, ...). */
+  index: number;
+  /** Human-readable slot badge (`#1`, `#2`, ...). */
+  label: string;
+  /** Matched format token (e.g. `%f`, `%.2f`, `%hu`, `%2$d`). */
+  token: string;
+}
+
+export type CommandValueInput = number | ReadonlyArray<number>;
 
 export interface CommandDefinition {
   id: string;
@@ -12,20 +24,37 @@ export interface CommandDefinition {
   endian: ByteEndian;
   targetSourceId: string;
   priority: "normal" | "high";
+  /** Live numeric values for each placeholder slot `[arg0, arg1, ...]`. */
+  argValues?: number[];
 }
 
 export type CompiledCommandResult =
   | { ok: true; payload: DownlinkPayloadDto; preview: string; usesValue: boolean }
   | { ok: false; error: string; usesValue: boolean };
 
-const STRING_SPECIFIER_RE = /^%([+\-0 ]*)(\d+)?(?:\.(\d+))?(lf|f|e|E|g|d|i|u|x|X)/;
-const STRING_ANY_SPECIFIER_SEARCH_RE = /%([+\-0 ]*)(\d+)?(?:\.(\d+))?(lf|f|e|E|g|d|i|u|x|X)/;
-const HEX_PLACEHOLDER_RE = /^%(lf|hd|hu|hhd|hhu|0?[248]?[xX]|[fdiub])$/;
-const HEX_SEGMENT_TOKEN_RE = /%(?:lf|hd|hu|hhd|hhu|0?[248]?[xX]|[fdiub])|(?:0[xX])?[0-9a-fA-F]+/g;
-const HEX_PLACEHOLDER_SEARCH_RE = /%(?:lf|hd|hu|hhd|hhu|0?[248]?[xX]|[fdiub])/;
+const STRING_SPECIFIER_RE =
+  /^%(?:([1-9]\d*)\$)?([+\-0 ]*)(\d+)?(?:\.(\d+))?(lf|f|e|E|g|d|i|u|x|X)/;
+const HEX_PLACEHOLDER_RE =
+  /^%(?:([1-9]\d*)\$)?(lf|hd|hu|hhd|hhu|0?[248]?[xX]|[fdiub])$/;
+const HEX_SEGMENT_TOKEN_RE =
+  /%(?:[1-9]\d*\$)?(?:lf|hd|hu|hhd|hhu|0?[248]?[xX]|[fdiub])|(?:0[xX])?[0-9a-fA-F]+/g;
 
 function clampInt(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.trunc(val)));
+}
+
+function sanitizeFiniteNumber(val: unknown): number {
+  if (typeof val !== "number" || !Number.isFinite(val)) {
+    return 0;
+  }
+  return Object.is(val, -0) ? 0 : val;
+}
+
+function resolveSlotValue(values: CommandValueInput, slotIndex: number): number {
+  if (typeof values === "number") {
+    return sanitizeFiniteNumber(values);
+  }
+  return sanitizeFiniteNumber(values[slotIndex]);
 }
 
 function unescapeStringTemplate(raw: string): string {
@@ -92,25 +121,160 @@ function formatFloatClean(val: number): string {
   return String(Number(abs.toPrecision(7)));
 }
 
+export function extractCommandPlaceholders(
+  cmd: Pick<CommandDefinition, "format" | "template">,
+): CommandPlaceholderInfo[] {
+  const slots = new Map<number, string>();
+  let nextSeq = 0;
+
+  if (cmd.format === "hex") {
+    const trimmed = cmd.template.trim();
+    if (trimmed) {
+      const segments = trimmed.split(/[\s,]+/).filter(Boolean);
+      for (const segment of segments) {
+        HEX_SEGMENT_TOKEN_RE.lastIndex = 0;
+        let cursor = 0;
+        while (cursor < segment.length) {
+          const match = HEX_SEGMENT_TOKEN_RE.exec(segment);
+          if (!match) {
+            break;
+          }
+          if (match.index !== cursor) {
+            cursor = match.index;
+            HEX_SEGMENT_TOKEN_RE.lastIndex = cursor;
+            continue;
+          }
+          const token = match[0];
+          cursor += token.length;
+          if (token.startsWith("%")) {
+            const phMatch = HEX_PLACEHOLDER_RE.exec(token);
+            if (phMatch) {
+              const posStr = phMatch[1];
+              const slotIndex = posStr
+                ? clampInt(Number.parseInt(posStr, 10) - 1, 0, 63)
+                : nextSeq++;
+              if (!slots.has(slotIndex)) {
+                slots.set(slotIndex, token);
+              }
+            }
+          }
+        }
+      }
+    }
+  } else {
+    const unescaped = unescapeStringTemplate(cmd.template);
+    let idx = 0;
+    while (idx < unescaped.length) {
+      if (unescaped[idx] !== "%") {
+        idx += 1;
+        continue;
+      }
+      if (idx + 1 < unescaped.length && unescaped[idx + 1] === "%") {
+        idx += 2;
+        continue;
+      }
+      const slice = unescaped.slice(idx);
+      const match = STRING_SPECIFIER_RE.exec(slice);
+      if (!match) {
+        idx += 1;
+        continue;
+      }
+      const posStr = match[1];
+      const slotIndex = posStr
+        ? clampInt(Number.parseInt(posStr, 10) - 1, 0, 63)
+        : nextSeq++;
+      if (!slots.has(slotIndex)) {
+        slots.set(slotIndex, match[0]);
+      }
+      idx += match[0].length;
+    }
+  }
+
+  if (slots.size === 0) {
+    return [];
+  }
+
+  let maxSlotIndex = 0;
+  for (const slotIdx of slots.keys()) {
+    if (slotIdx > maxSlotIndex) {
+      maxSlotIndex = slotIdx;
+    }
+  }
+
+  const ordered: CommandPlaceholderInfo[] = [];
+  for (let i = 0; i <= maxSlotIndex; i += 1) {
+    ordered.push({
+      index: i,
+      label: `#${i + 1}`,
+      token: slots.get(i) ?? "%f",
+    });
+  }
+  return ordered;
+}
+
+export function countCommandPlaceholders(
+  cmd: Pick<CommandDefinition, "format" | "template">,
+): number {
+  return extractCommandPlaceholders(cmd).length;
+}
+
 export function commandUsesValue(
   cmd: Pick<CommandDefinition, "format" | "template">,
 ): boolean {
-  const stripped = cmd.template.replace(/%%/g, "");
-  if (cmd.format === "hex") {
-    return HEX_PLACEHOLDER_SEARCH_RE.test(stripped);
+  return countCommandPlaceholders(cmd) > 0;
+}
+
+export function buildEffectiveCommandArgs(
+  cmd: Pick<CommandDefinition, "format" | "template" | "argValues">,
+  override?: { slotIndex?: number | null; value?: number; values?: ReadonlyArray<number> },
+): number[] {
+  const count = countCommandPlaceholders(cmd);
+  const targetLen =
+    override?.values !== undefined
+      ? Math.max(count, override.values.length)
+      : typeof override?.slotIndex === "number" && override.slotIndex >= 0
+        ? Math.max(count, override.slotIndex + 1)
+        : count;
+
+  const args: number[] = Array.from({ length: targetLen }, (_, i) =>
+    sanitizeFiniteNumber(cmd.argValues?.[i]),
+  );
+
+  if (override?.values !== undefined) {
+    for (let i = 0; i < override.values.length; i += 1) {
+      const v = override.values[i];
+      if (typeof v === "number" && Number.isFinite(v)) {
+        args[i] = Object.is(v, -0) ? 0 : v;
+      }
+    }
+  } else if (
+    typeof override?.slotIndex === "number" &&
+    override.slotIndex >= 0 &&
+    typeof override.value === "number" &&
+    Number.isFinite(override.value)
+  ) {
+    args[override.slotIndex] = Object.is(override.value, -0) ? 0 : override.value;
+  } else if (
+    override?.slotIndex === undefined &&
+    typeof override?.value === "number" &&
+    Number.isFinite(override.value) &&
+    args.length > 0
+  ) {
+    args[0] = Object.is(override.value, -0) ? 0 : override.value;
   }
-  return STRING_ANY_SPECIFIER_SEARCH_RE.test(stripped);
+
+  return args;
 }
 
 export function formatStringCommand(
   template: string,
-  value: number,
+  values: CommandValueInput = 0,
 ): { ok: true; text: string; usesValue: boolean } | { ok: false; error: string; usesValue: boolean } {
   const unescaped = unescapeStringTemplate(template);
-  const safeVal = Number.isFinite(value) ? (Object.is(value, -0) ? 0 : value) : 0;
   let usesValue = false;
   let out = "";
   let idx = 0;
+  let nextSeq = 0;
 
   while (idx < unescaped.length) {
     const ch = unescaped[idx];
@@ -138,7 +302,9 @@ export function formatStringCommand(
     }
 
     usesValue = true;
-    const [fullMatch, flags = "", widthStr, precStr, spec] = match;
+    const [fullMatch, posStr, flags = "", widthStr, precStr, spec] = match;
+    const slotIndex = posStr ? clampInt(Number.parseInt(posStr, 10) - 1, 0, 63) : nextSeq++;
+    const safeVal = resolveSlotValue(values, slotIndex);
     const leftAlign = flags.includes("-");
     const zeroPad = flags.includes("0") && !leftAlign;
     const alwaysSign = flags.includes("+");
@@ -192,11 +358,12 @@ function encodeHexPlaceholderBytes(
   value: number,
   endian: ByteEndian,
 ): number[] | null {
-  if (!HEX_PLACEHOLDER_RE.test(token)) {
+  const phMatch = HEX_PLACEHOLDER_RE.exec(token);
+  if (!phMatch) {
     return null;
   }
-  const spec = token.slice(1);
-  const safeVal = Number.isFinite(value) ? (Object.is(value, -0) ? 0 : value) : 0;
+  const spec = phMatch[2];
+  const safeVal = sanitizeFiniteNumber(value);
   const littleEndian = endian === "little";
   const buf = new ArrayBuffer(8);
   const view = new DataView(buf);
@@ -248,8 +415,8 @@ function encodeHexPlaceholderBytes(
 
 export function formatHexCommand(
   template: string,
-  value: number,
-  endian: ByteEndian,
+  values: CommandValueInput = 0,
+  endian: ByteEndian = "little",
 ): { ok: true; bytes: number[]; hex: string; usesValue: boolean } | { ok: false; error: string; usesValue: boolean } {
   const trimmed = template.trim();
   if (!trimmed) {
@@ -262,6 +429,7 @@ export function formatHexCommand(
 
   const bytes: number[] = [];
   let usesValue = false;
+  let nextSeq = 0;
   const segments = trimmed.split(/[\s,]+/).filter(Boolean);
 
   for (const segment of segments) {
@@ -282,7 +450,15 @@ export function formatHexCommand(
       cursor += token.length;
 
       if (token.startsWith("%")) {
-        const encoded = encodeHexPlaceholderBytes(token, value, endian);
+        const phMatch = HEX_PLACEHOLDER_RE.exec(token);
+        const slotIndex = phMatch?.[1]
+          ? clampInt(Number.parseInt(phMatch[1], 10) - 1, 0, 63)
+          : nextSeq++;
+        const encoded = encodeHexPlaceholderBytes(
+          token,
+          resolveSlotValue(values, slotIndex),
+          endian,
+        );
         if (!encoded) {
           return {
             ok: false,
@@ -331,10 +507,10 @@ export function formatHexCommand(
 
 export function compileCommandPayload(
   cmd: Pick<CommandDefinition, "format" | "template" | "appendNewline" | "endian">,
-  value = 0,
+  values: CommandValueInput = 0,
 ): CompiledCommandResult {
   if (cmd.format === "hex") {
-    const res = formatHexCommand(cmd.template, value, cmd.endian);
+    const res = formatHexCommand(cmd.template, values, cmd.endian);
     if (!res.ok) {
       return res;
     }
@@ -346,7 +522,7 @@ export function compileCommandPayload(
     };
   }
 
-  const res = formatStringCommand(cmd.template, value);
+  const res = formatStringCommand(cmd.template, values);
   if (!res.ok) {
     return res;
   }
@@ -392,6 +568,9 @@ export function normalizeCommandDefinition(
   const targetSourceId =
     typeof rec.targetSourceId === "string" ? rec.targetSourceId.trim() : "";
   const priority = rec.priority === "high" ? "high" : "normal";
+  const argValues = Array.isArray(rec.argValues)
+    ? rec.argValues.slice(0, 64).map((v) => sanitizeFiniteNumber(v))
+    : [];
 
   return {
     id,
@@ -402,5 +581,155 @@ export function normalizeCommandDefinition(
     endian,
     targetSourceId,
     priority,
+    argValues,
+  };
+}
+
+/**
+ * Fills any missing `argValues[slot]` entries on normalized commands from bound
+ * dashboard widgets (`param_slider` first, then `cmd_button` slots >= 0).
+ */
+export function backfillCommandArgValuesFromCanvases(
+  commands: ReadonlyArray<CommandDefinition>,
+  canvases: ReadonlyArray<Pick<DashboardCanvasConfig, "widgets">>,
+): CommandDefinition[] {
+  return commands.map((cmd) => {
+    const count = countCommandPlaceholders(cmd);
+    if (count === 0) {
+      return cmd;
+    }
+
+    const baseArgs: Array<number | undefined> = Array.from(
+      { length: count },
+      (_, i) => {
+        const v = cmd.argValues?.[i];
+        return typeof v === "number" && Number.isFinite(v) ? (Object.is(v, -0) ? 0 : v) : undefined;
+      },
+    );
+
+    if (baseArgs.every((v) => v !== undefined)) {
+      return cmd;
+    }
+
+    for (const cv of canvases) {
+      for (const w of cv.widgets) {
+        if (w.sliderConfig?.commandId !== cmd.id) continue;
+        const slot = clampInt(w.sliderConfig.commandArgIndex ?? 0, 0, count - 1);
+        if (baseArgs[slot] === undefined && Number.isFinite(w.sliderConfig.value)) {
+          baseArgs[slot] = Object.is(w.sliderConfig.value, -0) ? 0 : w.sliderConfig.value;
+        }
+      }
+    }
+
+    for (const cv of canvases) {
+      for (const w of cv.widgets) {
+        if (w.buttonConfig?.commandId !== cmd.id) continue;
+        const rawSlot = w.buttonConfig.commandArgIndex ?? 0;
+        if (rawSlot < 0) continue;
+        const slot = clampInt(rawSlot, 0, count - 1);
+        if (
+          baseArgs[slot] === undefined &&
+          typeof w.buttonConfig.commandValue === "number" &&
+          Number.isFinite(w.buttonConfig.commandValue)
+        ) {
+          baseArgs[slot] = Object.is(w.buttonConfig.commandValue, -0)
+            ? 0
+            : w.buttonConfig.commandValue;
+        }
+      }
+    }
+
+    for (const cv of canvases) {
+      for (const w of cv.widgets) {
+        if (
+          w.cmdTableConfig?.commandId !== cmd.id ||
+          w.cmdTableConfig.rows.length === 0
+        ) {
+          continue;
+        }
+        const firstRow = w.cmdTableConfig.rows[0];
+        for (let slot = 0; slot < count; slot += 1) {
+          const val = firstRow.values[slot];
+          if (baseArgs[slot] === undefined && typeof val === "number" && Number.isFinite(val)) {
+            baseArgs[slot] = Object.is(val, -0) ? 0 : val;
+          }
+        }
+      }
+    }
+
+    return {
+      ...cmd,
+      argValues: baseArgs.map((v) => v ?? 0),
+    };
+  });
+}
+
+/**
+ * Allocates a new Command Table row, copying values from the last existing row
+ * or falling back to `seedValues`.
+ */
+export function createCmdTableRow(
+  existingRows: ReadonlyArray<WidgetCmdTableRow>,
+  placeholderCount: number,
+  seedValues?: ReadonlyArray<number>,
+  locale: "zh-CN" | "en" = "zh-CN",
+): WidgetCmdTableRow {
+  const used = new Set(existingRows.map((r) => r.id));
+  let seq = existingRows.length + 1;
+  while (used.has(`r_${seq}`)) {
+    seq += 1;
+  }
+
+  const templateVals =
+    existingRows.length > 0
+      ? existingRows[existingRows.length - 1].values
+      : seedValues;
+  const safeCount = Math.max(0, Math.trunc(placeholderCount));
+  const values = Array.from({ length: safeCount }, (_, i) =>
+    sanitizeFiniteNumber(templateVals?.[i]),
+  );
+
+  return {
+    id: `r_${seq}`,
+    label:
+      locale === "zh-CN"
+        ? `预设 ${existingRows.length + 1}`
+        : `Preset ${existingRows.length + 1}`,
+    values,
+  };
+}
+
+/**
+ * Returns a new row values array with `values[slotIndex]` updated, preserving
+ * any extra columns beyond `slotIndex`.
+ */
+export function updateCmdTableRowValue(
+  values: ReadonlyArray<number>,
+  slotIndex: number,
+  nextValue: number,
+): number[] {
+  const safeSlot = Math.max(0, Math.trunc(slotIndex));
+  const next = values.map((v) => sanitizeFiniteNumber(v));
+  while (next.length <= safeSlot) {
+    next.push(0);
+  }
+  next[safeSlot] = sanitizeFiniteNumber(nextValue);
+  return next;
+}
+
+/**
+ * Compiles a single Command Table row against its bound `CommandDefinition`.
+ */
+export function compileCmdTableRow(
+  cmd: Pick<CommandDefinition, "format" | "template" | "appendNewline" | "endian">,
+  row: Pick<WidgetCmdTableRow, "values">,
+): { args: number[]; compiled: CompiledCommandResult } {
+  const count = countCommandPlaceholders(cmd);
+  const args = Array.from({ length: count }, (_, i) =>
+    sanitizeFiniteNumber(row.values[i]),
+  );
+  return {
+    args,
+    compiled: compileCommandPayload(cmd, count > 0 ? args : 0),
   };
 }
