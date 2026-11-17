@@ -14,6 +14,9 @@ import {
   type SerialPortInfoDto_Serialize,
   type SourceSummaryDto_Serialize,
   type SyncGroupUpdateDto_Deserialize,
+  type VirtualNodeConfigDto_Deserialize,
+  type VirtualNodeConfigDto_Serialize,
+  type VirtualNodeSummaryDto_Serialize,
   type WorkspaceTelemetryEvent,
 } from "./bindings.ts";
 import { DDSF_VERSION_V1 } from "./ddsf-spec.ts";
@@ -60,6 +63,12 @@ export interface ControlPlaneCommands {
   loadDefaultProjectConfig?(): Promise<string | null>;
   saveDefaultProjectConfig?(configJson: string): Promise<string>;
   clearDefaultProjectConfig?(): Promise<boolean>;
+  listVirtualChannels?(): Promise<VirtualNodeConfigDto_Serialize[]>;
+  upsertVirtualChannel?(
+    config: VirtualNodeConfigDto_Deserialize,
+  ): Promise<VirtualNodeSummaryDto_Serialize>;
+  removeVirtualChannel?(nodeId: string): Promise<boolean>;
+  clearVirtualChannels?(): Promise<number>;
 }
 
 export interface ControlPlaneHostAdapter {
@@ -726,6 +735,50 @@ export class BridgeClient {
       }
     }
     return false;
+  }
+
+  listVirtualChannels(): Promise<VirtualNodeConfigDto_Serialize[]> {
+    return this.withTauriOrMock(
+      () =>
+        this.host.commands.listVirtualChannels
+          ? this.host.commands.listVirtualChannels()
+          : Promise.resolve([]),
+      () => this.mock.listVirtualChannels(),
+    );
+  }
+
+  upsertVirtualChannel(
+    config: VirtualNodeConfigDto_Deserialize,
+  ): Promise<VirtualNodeSummaryDto_Serialize> {
+    return this.withTauriOrMock(
+      () => {
+        if (!this.host.commands.upsertVirtualChannel) {
+          throw new Error("upsertVirtualChannel is not implemented on this host adapter");
+        }
+        return this.host.commands.upsertVirtualChannel(config);
+      },
+      () => this.mock.upsertVirtualChannel(config),
+    );
+  }
+
+  removeVirtualChannel(nodeId: string): Promise<boolean> {
+    return this.withTauriOrMock(
+      () =>
+        this.host.commands.removeVirtualChannel
+          ? this.host.commands.removeVirtualChannel(nodeId)
+          : Promise.resolve(false),
+      () => this.mock.removeVirtualChannel(nodeId),
+    );
+  }
+
+  clearVirtualChannels(): Promise<number> {
+    return this.withTauriOrMock(
+      () =>
+        this.host.commands.clearVirtualChannels
+          ? this.host.commands.clearVirtualChannels()
+          : Promise.resolve(0),
+      () => this.mock.clearVirtualChannels(),
+    );
   }
 }
 

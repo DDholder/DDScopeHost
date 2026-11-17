@@ -325,3 +325,41 @@ pub fn clear_default_project_config(
 ) -> Result<bool, ApiErrorDto> {
     state.clear_default_project_config()
 }
+
+/// Lists all configured virtual channel DAG nodes.
+#[tauri::command]
+#[specta::specta]
+pub fn list_virtual_channels(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<Vec<VirtualNodeConfigDto>, ApiErrorDto> {
+    state.list_virtual_channels()
+}
+
+/// Creates or updates a virtual channel DAG node and triggers retroactive backfill.
+#[tauri::command]
+#[specta::specta]
+pub fn upsert_virtual_channel(
+    state: tauri::State<'_, DesktopBridgeState>,
+    config: VirtualNodeConfigDto,
+) -> Result<VirtualNodeSummaryDto, ApiErrorDto> {
+    state.upsert_virtual_channel(config)
+}
+
+/// Removes a virtual channel DAG node and its derived channels.
+#[tauri::command]
+#[specta::specta]
+pub fn remove_virtual_channel(
+    state: tauri::State<'_, DesktopBridgeState>,
+    node_id: String,
+) -> Result<bool, ApiErrorDto> {
+    state.remove_virtual_channel(node_id)
+}
+
+/// Removes all virtual channel DAG nodes from the workspace.
+#[tauri::command]
+#[specta::specta]
+pub fn clear_virtual_channels(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<u32, ApiErrorDto> {
+    state.clear_virtual_channels()
+}

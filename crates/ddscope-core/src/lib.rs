@@ -12,6 +12,12 @@ pub mod transport;
 pub mod types;
 pub mod workspace;
 
+pub use dag::{
+    AnalogToDigitalMode, CalculusMode, CompiledFormula, PowerOutputFlags, SinglePhasePowerParams,
+    SinglePhasePowerSample, SinglePhasePowerState, StateLabelSpec, StateRangeRule, StateValueEntry,
+    SwagWindowTracker, ToAnalogMode, ToStateMachineMode, VirtualDagEngine, VirtualNodeConfig,
+    VirtualNodeSummary, VirtualOperatorConfig, WindowMetricKind, VIRTUAL_SOURCE_ID,
+};
 pub use scope::ddsf;
 pub use workspace::{
     ChannelTreeSnapshot, CoreWorkspace, RegisteredChannelInfo, ScopeConfig, ScopeLaneKind,

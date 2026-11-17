@@ -448,3 +448,202 @@ pub struct WorkspaceTelemetryEvent {
     pub quota_limit_bytes: f64,
     pub pinned_bytes: f64,
 }
+
+/// Threshold/window modes for Analog -> Digital conversion (`Bool` output).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AnalogToDigitalModeDto {
+    Schmitt {
+        threshold: f64,
+        hysteresis: f64,
+        invert: bool,
+    },
+    Window {
+        low: f64,
+        high: f64,
+        invert: bool,
+    },
+}
+
+/// Display metadata entry for a discrete state code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct StateLabelSpecDto {
+    pub code: i32,
+    pub name: String,
+    pub color_rgba: Option<u32>,
+}
+
+/// Numeric interval-to-state mapping rule.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct StateRangeRuleDto {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub code: i32,
+    pub name: String,
+    pub color_rgba: Option<u32>,
+}
+
+/// Conversion modes for Analog / Digital -> State Machine (`state_machine`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ToStateMachineModeDto {
+    RangeMap {
+        input_channel: String,
+        hysteresis: f64,
+        rules: Vec<StateRangeRuleDto>,
+        default_state: StateLabelSpecDto,
+    },
+    BitCombine {
+        bit_channels: Vec<String>,
+        threshold: f64,
+        labels: Vec<StateLabelSpecDto>,
+    },
+}
+
+/// Numeric value assignment for a discrete state code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct StateValueEntryDto {
+    pub code: i32,
+    pub value: f64,
+}
+
+/// Conversion modes for Digital / State -> Analog (`scalar`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ToAnalogModeDto {
+    LevelMap {
+        input_channel: String,
+        low_value: f64,
+        high_value: f64,
+        threshold: f64,
+        smoothing_tau_ms: f64,
+    },
+    BitWeightedDac {
+        bit_channels: Vec<String>,
+        scale: f64,
+        offset: f64,
+        threshold: f64,
+    },
+    StateValueMap {
+        input_channel: String,
+        entries: Vec<StateValueEntryDto>,
+        default_value: f64,
+    },
+}
+
+/// Supported sliding time-window metrics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowMetricKindDto {
+    Rms,
+    Mean,
+    PeakToPeak,
+    Min,
+    Max,
+    StdDev,
+}
+
+/// Calculus operator variants (`d/dt` and trapezoidal integral).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum CalculusModeDto {
+    Derivative {
+        scale: f64,
+        filter_tau_ms: f64,
+    },
+    Integral {
+        scale: f64,
+        dc_offset: f64,
+        initial_value: f64,
+        clamp_min: Option<f64>,
+        clamp_max: Option<f64>,
+    },
+}
+
+/// Output channel selection flags for `SinglePhasePower`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PowerOutputFlagsDto {
+    pub freq: bool,
+    pub u_rms: bool,
+    pub i_rms: bool,
+    pub p: bool,
+    pub q1: bool,
+    pub q_tot: bool,
+    pub s: bool,
+    pub pf: bool,
+    pub phi_deg: bool,
+    pub u_pk: bool,
+    pub i_pk: bool,
+    pub energy_wh: bool,
+}
+
+/// Virtual operator definition exposed across the control plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VirtualOperatorDto {
+    AnalogToDigital {
+        input_channel: String,
+        output_path: String,
+        mode: AnalogToDigitalModeDto,
+    },
+    ToStateMachine {
+        output_path: String,
+        mode: ToStateMachineModeDto,
+    },
+    ToAnalog {
+        output_path: String,
+        unit: Option<String>,
+        mode: ToAnalogModeDto,
+    },
+    Formula {
+        expression: String,
+        output_path: String,
+        unit: Option<String>,
+        output_digital: bool,
+    },
+    WindowStats {
+        input_channel: String,
+        output_path: String,
+        unit: Option<String>,
+        metric: WindowMetricKindDto,
+        window_ms: f64,
+    },
+    Calculus {
+        input_channel: String,
+        output_path: String,
+        unit: Option<String>,
+        mode: CalculusModeDto,
+    },
+    SinglePhasePower {
+        voltage_channel: String,
+        current_channel: String,
+        output_prefix: String,
+        voltage_scale: f64,
+        voltage_offset: f64,
+        current_scale: f64,
+        current_offset: f64,
+        nominal_freq_hz: f64,
+        zero_cross_hysteresis_v: f64,
+        min_freq_hz: f64,
+        fallback_window_ms: f64,
+        outputs: PowerOutputFlagsDto,
+    },
+}
+
+/// Virtual channel node configuration DTO.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct VirtualNodeConfigDto {
+    pub node_id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub operator: VirtualOperatorDto,
+}
+
+/// Virtual channel node registration summary DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct VirtualNodeSummaryDto {
+    pub node_id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub output_channels: Vec<ChannelNodeDto>,
+}

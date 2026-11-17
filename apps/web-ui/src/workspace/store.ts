@@ -11,6 +11,9 @@ import type {
   SendDownlinkRequestDto_Deserialize,
   SourceChannelGroupDto_Serialize,
   SourceTelemetryDto,
+  VirtualNodeConfigDto_Deserialize,
+  VirtualNodeConfigDto_Serialize,
+  VirtualNodeSummaryDto_Serialize,
 } from "../bridge/bindings.ts";
 import {
   BridgeClient,
@@ -20,6 +23,11 @@ import {
   type MockDownlinkStats,
   type RuntimeStatus,
 } from "../bridge/index.ts";
+import {
+  VIRTUAL_SOURCE_ID,
+  expandVirtualOutputSpecs,
+  sortVirtualNodesTopologically,
+} from "../bridge/virtual-eval.ts";
 import {
   detectInitialLocale,
   getDefaultCanvasTitle,
@@ -50,12 +58,14 @@ import {
   parseCommandsConfigJson,
   parseProjectConfigJson,
   parseSourcesConfigJson,
+  parseVirtualChannelsConfigJson,
   projectToBoardFile,
   rehydrateBoardFromConfig,
   serializeBoardConfig,
   serializeCommandsConfig,
   serializeProjectConfig,
   serializeSourcesConfig,
+  serializeVirtualChannelsConfig,
   synthesizeFallbackSourceConfig,
   type BoardConfigFileV1,
   type DownlinkUiConfig,
@@ -70,6 +80,29 @@ import {
   createCmdTableRow,
   type CommandDefinition,
 } from "./command-system.ts";
+
+function isVirtualSourceGroup(sourceId: string, transportKind?: string): boolean {
+  return sourceId === VIRTUAL_SOURCE_ID || transportKind === "virtual";
+}
+
+function firstNonVirtualSourceId(
+  groups: ReadonlyArray<SourceChannelGroupDto_Serialize>,
+  fallback = "sim0",
+): string {
+  return (
+    groups.find((g) => !isVirtualSourceGroup(g.source.source_id, g.source.transport_kind))?.source
+      .source_id ?? fallback
+  );
+}
+
+function computeNextVirtualSeq(nodes: ReadonlyArray<{ node_id: string }>): number {
+  let maxSeq = 0;
+  for (const n of nodes) {
+    const m = /^v_(\d+)$/.exec(n.node_id);
+    if (m) maxSeq = Math.max(maxSeq, Number(m[1]));
+  }
+  return Math.max(maxSeq + 1, nodes.length + 1);
+}
 
 const TRACE_COLORS = [
   0x38bdf8ff, // sky
@@ -124,10 +157,13 @@ export interface WorkspaceStoreState {
   commands: CommandDefinition[];
   nextCommandSeq: number;
 
+  virtualChannels: VirtualNodeConfigDto_Serialize[];
+  nextVirtualSeq: number;
+
   locale: UiLocale;
   mockRateHz: 60 | 120;
   sidebarCollapsed: boolean;
-  sidebarTab: "sources" | "toolbox" | "commands";
+  sidebarTab: "sources" | "virtual" | "toolbox" | "commands";
   downlinkBarCollapsed: boolean;
   sourceWizardOpen: boolean;
   editingSourceId: string | null;
@@ -141,7 +177,7 @@ export interface WorkspaceStoreState {
   refreshChannelTree: () => Promise<void>;
   setMockRateHz: (rate: 60 | 120) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
-  setSidebarTab: (tab: "sources" | "toolbox" | "commands") => void;
+  setSidebarTab: (tab: "sources" | "virtual" | "toolbox" | "commands") => void;
   setDownlinkBarCollapsed: (collapsed: boolean) => void;
   setSourceWizardOpen: (open: boolean) => void;
   openCreateSourceWizard: () => void;
@@ -260,6 +296,18 @@ export interface WorkspaceStoreState {
     jsonText: string,
     options?: { replaceExisting?: boolean },
   ) => { importedCount: number };
+
+  upsertVirtualChannel: (
+    cfg: VirtualNodeConfigDto_Deserialize,
+  ) => Promise<VirtualNodeSummaryDto_Serialize>;
+  removeVirtualChannel: (nodeId: string) => Promise<void>;
+  clearVirtualChannels: () => Promise<void>;
+  exportVirtualChannelsConfig: () => string;
+  importVirtualChannelsConfig: (
+    jsonText: string,
+    options?: { replaceExisting?: boolean },
+  ) => Promise<{ importedCount: number }>;
+  placeVirtualOutputsWatchTable: (nodeId: string, canvasId?: number) => string;
 
   sendDownlink: (
     req: SendDownlinkRequestDto_Deserialize,
@@ -756,6 +804,9 @@ export function createWorkspaceStore(
       const prevConfigs = get().sourceConfigsById;
       const merged: Record<string, CreateSourceRequestDto_Serialize> = {};
       for (const grp of groups) {
+        if (isVirtualSourceGroup(grp.source.source_id, grp.source.transport_kind)) {
+          continue;
+        }
         const id = grp.source.source_id;
         merged[id] =
           byIdFromBridge[id] ??
@@ -770,11 +821,14 @@ export function createWorkspaceStore(
       state: WorkspaceStoreState,
       sourceIds?: ReadonlyArray<string>,
     ): CreateSourceRequestDto_Serialize[] => {
+      const physicalGroups = state.channelGroups.filter(
+        (g) => !isVirtualSourceGroup(g.source.source_id, g.source.transport_kind),
+      );
       const targetIds = sourceIds
         ? new Set(sourceIds)
-        : new Set(state.channelGroups.map((g) => g.source.source_id));
+        : new Set(physicalGroups.map((g) => g.source.source_id));
       const list: CreateSourceRequestDto_Serialize[] = [];
-      for (const grp of state.channelGroups) {
+      for (const grp of physicalGroups) {
         if (!targetIds.has(grp.source.source_id)) continue;
         list.push(
           state.sourceConfigsById[grp.source.source_id] ??
@@ -788,12 +842,15 @@ export function createWorkspaceStore(
       const liveLayout = dockviewLayoutAccessor
         ? dockviewLayoutAccessor()
         : state.pendingDockviewLayout;
+      const physicalGroups = state.channelGroups.filter(
+        (g) => !isVirtualSourceGroup(g.source.source_id, g.source.transport_kind),
+      );
       const effectiveTargetSource =
-        state.channelGroups.length === 0
+        physicalGroups.length === 0
           ? state.downlinkConfig.targetSource
-          : state.channelGroups.some((g) => g.source.source_id === state.downlinkConfig.targetSource)
+          : physicalGroups.some((g) => g.source.source_id === state.downlinkConfig.targetSource)
             ? state.downlinkConfig.targetSource
-            : state.channelGroups[0].source.source_id;
+            : physicalGroups[0].source.source_id;
 
       return {
         scopes: state.scopes,
@@ -823,7 +880,9 @@ export function createWorkspaceStore(
       const rehydrated = rehydrateBoardFromConfig({
         file,
         channelsById: stateBefore.channelsById,
-        availableSourceIds: stateBefore.channelGroups.map((g) => g.source.source_id),
+        availableSourceIds: stateBefore.channelGroups
+          .filter((g) => !isVirtualSourceGroup(g.source.source_id, g.source.transport_kind))
+          .map((g) => g.source.source_id),
       });
 
       const oldScopeIds = Object.keys(stateBefore.scopes).map((k) => Number(k));
@@ -886,6 +945,7 @@ export function createWorkspaceStore(
       channelsBefore: Record<number, ChannelNodeDto_Serialize>;
       tree: ChannelTreeSnapshotDto_Serialize;
       overrides?: Record<string, CreateSourceRequestDto_Serialize>;
+      virtualChannels?: VirtualNodeConfigDto_Serialize[];
       rebindChannelId: (
         oldChannelId: number,
         chMap: Record<number, ChannelNodeDto_Serialize>,
@@ -1086,6 +1146,12 @@ export function createWorkspaceStore(
         scopes: nextScopes,
         canvases: nextCanvases,
         commands: nextCommands,
+        ...(params.virtualChannels !== undefined
+          ? {
+              virtualChannels: params.virtualChannels,
+              nextVirtualSeq: computeNextVirtualSeq(params.virtualChannels),
+            }
+          : {}),
         ...(nextDownlinkTarget !== latest.downlinkConfig.targetSource
           ? {
               downlinkConfig: {
@@ -1112,15 +1178,25 @@ export function createWorkspaceStore(
     };
 
     const applyProjectFile = async (projectFile: ProjectConfigFileV1) => {
+      await client.clearVirtualChannels();
       const existingTree = await client.getChannelTree();
       for (const grp of existingTree.sources) {
+        if (isVirtualSourceGroup(grp.source.source_id, grp.source.transport_kind)) {
+          continue;
+        }
         await client.removeSource(grp.source.source_id);
       }
       for (const srcCfg of projectFile.sources) {
         await client.createSource(srcCfg as unknown as CreateSourceRequestDto_Deserialize);
       }
 
+      const orderedVirtual = sortVirtualNodesTopologically(projectFile.virtualChannels ?? []);
+      for (const vCfg of orderedVirtual) {
+        await client.upsertVirtualChannel(vCfg);
+      }
+
       const tree = await client.getChannelTree();
+      const virtualList = await client.listVirtualChannels().catch(() => orderedVirtual);
       const chMap: Record<number, ChannelNodeDto_Serialize> = {};
       for (const grp of tree.sources) {
         for (const ch of grp.channels) {
@@ -1133,6 +1209,8 @@ export function createWorkspaceStore(
         channelGroups: tree.sources,
         channelsById: chMap,
         sourceConfigsById: sourceConfigs,
+        virtualChannels: virtualList,
+        nextVirtualSeq: computeNextVirtualSeq(virtualList),
         runBoundariesNs,
         quota: {
           usedBytes: tree.quota_used_bytes ?? 0,
@@ -1146,6 +1224,28 @@ export function createWorkspaceStore(
         sourceCount: projectFile.sources.length,
         ...boardResult,
       };
+    };
+
+    const syncVirtualChannelsMutation = async (
+      channelsBefore: Record<number, ChannelNodeDto_Serialize>,
+      virtualListOverride?: VirtualNodeConfigDto_Serialize[],
+    ) => {
+      const [tree, virtualList] = await Promise.all([
+        client.getChannelTree(),
+        virtualListOverride !== undefined
+          ? Promise.resolve(virtualListOverride)
+          : client.listVirtualChannels().catch(() => get().virtualChannels),
+      ]);
+      await reconcileAndSyncAfterSourceMutation({
+        channelsBefore,
+        tree,
+        virtualChannels: virtualList,
+        rebindChannelId: (oldId, chMap, byFullPath) => {
+          if (chMap[oldId]) return oldId;
+          const oldCh = channelsBefore[oldId];
+          return oldCh ? (byFullPath.get(oldCh.full_path)?.channel_id ?? null) : null;
+        },
+      });
     };
 
     return {
@@ -1195,6 +1295,9 @@ export function createWorkspaceStore(
 
     commands: [],
     nextCommandSeq: 1,
+
+    virtualChannels: [],
+    nextVirtualSeq: 1,
 
     locale: detectInitialLocale(),
     mockRateHz: 120,
@@ -1328,6 +1431,7 @@ export function createWorkspaceStore(
           );
 
           const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+          const virtualChannels = await client.listVirtualChannels().catch(() => []);
           const runBoundariesNs = await client.getRunBoundaries().catch(() => []);
           const defaultCanvas = buildDefaultDashboardCanvas(chMap, get().locale);
 
@@ -1338,6 +1442,8 @@ export function createWorkspaceStore(
             channelGroups: tree.sources,
             channelsById: chMap,
             sourceConfigsById: sourceConfigs,
+            virtualChannels,
+            nextVirtualSeq: computeNextVirtualSeq(virtualChannels),
             runBoundariesNs,
             quota: {
               usedBytes: tree.quota_used_bytes ?? 0,
@@ -1371,6 +1477,7 @@ export function createWorkspaceStore(
         }
       }
       const sourceConfigs = await fetchSourceConfigMap(tree.sources);
+      const virtualChannels = await client.listVirtualChannels().catch(() => get().virtualChannels);
       const runBoundariesNs = await client
         .getRunBoundaries()
         .catch(() => get().runBoundariesNs);
@@ -1378,6 +1485,8 @@ export function createWorkspaceStore(
         channelGroups: tree.sources,
         channelsById: chMap,
         sourceConfigsById: sourceConfigs,
+        virtualChannels,
+        nextVirtualSeq: computeNextVirtualSeq(virtualChannels),
         runBoundariesNs,
         quota: {
           usedBytes: tree.quota_used_bytes ?? 0,
@@ -1468,7 +1577,7 @@ export function createWorkspaceStore(
       const channelsBefore = get().channelsById;
       await client.removeSource(sourceId);
       const tree = await client.getChannelTree();
-      const fallbackSourceId = tree.sources[0]?.source.source_id ?? "";
+      const fallbackSourceId = firstNonVirtualSourceId(tree.sources, "");
       await reconcileAndSyncAfterSourceMutation({
         channelsBefore,
         tree,
@@ -1907,7 +2016,8 @@ export function createWorkspaceStore(
 
       const ch = opts?.channelId !== undefined ? state.channelsById[opts.channelId] : undefined;
       const primarySourceId =
-        ch?.source_id ?? state.channelGroups[0]?.source.source_id ?? "sim0";
+        (ch && !isVirtualSourceGroup(ch.source_id) ? ch.source_id : undefined) ??
+        firstNonVirtualSourceId(state.channelGroups);
 
       let scopeId: number | null = null;
       if (widgetType === "mso_scope") {
@@ -2100,53 +2210,68 @@ export function createWorkspaceStore(
         }
         if (prev.type === "param_slider") {
           const prevCfg = prev.sliderConfig ?? {
-            sourceId: ch.source_id,
+            sourceId: isVirtualSourceGroup(ch.source_id)
+              ? firstNonVirtualSourceId(state.channelGroups)
+              : ch.source_id,
             key: ch.local_path || "kp",
             min: 0.2,
             max: 6.0,
             step: 0.05,
             value: 1.2,
           };
+          const downlinkSourceId = isVirtualSourceGroup(ch.source_id)
+            ? prevCfg.sourceId || firstNonVirtualSourceId(state.channelGroups)
+            : ch.source_id;
           return {
             ...prev,
             primaryBinding: { channelId, scale: 1, offset: 0 },
             sliderConfig: {
               ...prevCfg,
-              sourceId: ch.source_id,
+              sourceId: downlinkSourceId,
               key: ch.local_path || prevCfg.key,
             },
           };
         }
         if (prev.type === "cmd_button") {
           const prevCfg = prev.buttonConfig ?? {
-            sourceId: ch.source_id,
+            sourceId: isVirtualSourceGroup(ch.source_id)
+              ? firstNonVirtualSourceId(state.channelGroups)
+              : ch.source_id,
             mode: "ascii" as const,
             command: "SET_MODE=FOC_RUN",
             kvKey: ch.local_path || "kp",
             kvValue: 1.5,
             priority: "high" as const,
           };
+          const downlinkSourceId = isVirtualSourceGroup(ch.source_id)
+            ? prevCfg.sourceId || firstNonVirtualSourceId(state.channelGroups)
+            : ch.source_id;
           return {
             ...prev,
             primaryBinding: { channelId, scale: 1, offset: 0 },
             buttonConfig: {
               ...prevCfg,
-              sourceId: ch.source_id,
+              sourceId: downlinkSourceId,
               kvKey: ch.local_path || prevCfg.kvKey,
             },
           };
         }
         if (prev.type === "cmd_table") {
           const prevCfg = prev.cmdTableConfig ?? {
-            sourceId: ch.source_id,
+            sourceId: isVirtualSourceGroup(ch.source_id)
+              ? firstNonVirtualSourceId(state.channelGroups)
+              : ch.source_id,
             commandId: null,
             rows: [],
           };
+          const downlinkSourceId = isVirtualSourceGroup(ch.source_id)
+            ? prevCfg.sourceId || firstNonVirtualSourceId(state.channelGroups)
+            : ch.source_id;
           return {
             ...prev,
             cmdTableConfig: {
               ...prevCfg,
-              sourceId: ch.source_id,
+              sourceId: downlinkSourceId,
             },
           };
         }
@@ -2168,6 +2293,7 @@ export function createWorkspaceStore(
       return serializeProjectConfig({
         ...collectBoardExportInput(state),
         sources: collectExportableSources(state),
+        virtualChannels: state.virtualChannels,
       });
     },
 
@@ -2181,6 +2307,7 @@ export function createWorkspaceStore(
       const jsonText = serializeProjectConfig({
         ...collectBoardExportInput(state),
         sources: collectExportableSources(state),
+        virtualChannels: state.virtualChannels,
       });
       return client.saveDefaultProjectConfig(jsonText);
     },
@@ -2637,8 +2764,7 @@ export function createWorkspaceStore(
       const targetSource =
         cmd.targetSourceId.trim() ||
         opts?.fallbackSourceId?.trim() ||
-        state.channelGroups[0]?.source.source_id ||
-        "sim0";
+        firstNonVirtualSourceId(state.channelGroups);
       return get().sendDownlink(
         {
           source_id: targetSource,
@@ -2747,6 +2873,73 @@ export function createWorkspaceStore(
         nextCommandSeq: nextSeq,
       });
       return { importedCount: syncedAppended.length };
+    },
+
+    upsertVirtualChannel: async (cfg) => {
+      const channelsBefore = get().channelsById;
+      const summary = await client.upsertVirtualChannel(cfg);
+      await syncVirtualChannelsMutation(channelsBefore);
+      return summary;
+    },
+
+    removeVirtualChannel: async (nodeId) => {
+      const channelsBefore = get().channelsById;
+      await client.removeVirtualChannel(nodeId);
+      await syncVirtualChannelsMutation(channelsBefore);
+    },
+
+    clearVirtualChannels: async () => {
+      const channelsBefore = get().channelsById;
+      await client.clearVirtualChannels();
+      await syncVirtualChannelsMutation(channelsBefore, []);
+    },
+
+    exportVirtualChannelsConfig: () => {
+      return serializeVirtualChannelsConfig(get().virtualChannels);
+    },
+
+    importVirtualChannelsConfig: async (jsonText, options) => {
+      const file = parseVirtualChannelsConfigJson(jsonText);
+      const channelsBefore = get().channelsById;
+      if (options?.replaceExisting) {
+        await client.clearVirtualChannels();
+      }
+      const ordered = sortVirtualNodesTopologically(file.virtualChannels);
+      for (const cfg of ordered) {
+        await client.upsertVirtualChannel(cfg);
+      }
+      await syncVirtualChannelsMutation(channelsBefore);
+      return { importedCount: ordered.length };
+    },
+
+    placeVirtualOutputsWatchTable: (nodeId, canvasId) => {
+      const state = get();
+      const cfg = state.virtualChannels.find((n) => n.node_id === nodeId);
+      if (!cfg) return "";
+
+      const channelByFullPath = new Map<string, ChannelNodeDto_Serialize>();
+      for (const ch of Object.values(state.channelsById)) {
+        channelByFullPath.set(ch.full_path, ch);
+      }
+      const outputChannelIds = expandVirtualOutputSpecs(cfg)
+        .map((spec) => channelByFullPath.get(spec.fullPath)?.channel_id)
+        .filter((id): id is number => typeof id === "number");
+
+      const targetCanvasId =
+        canvasId ?? state.activeCanvasId ?? state.canvasOrder[0] ?? get().addCanvas();
+      const widgetId = get().addWidgetToCanvas(targetCanvasId, "watch_table");
+      if (!widgetId) return "";
+
+      get().updateCanvasWidget(targetCanvasId, widgetId, (prev) => ({
+        ...prev,
+        title: cfg.name.trim() || cfg.node_id,
+        bindings: outputChannelIds.map((channelId) => ({
+          channelId,
+          scale: 1,
+          offset: 0,
+        })),
+      }));
+      return widgetId;
     },
 
     sendDownlink: async (req, labelSummary, isSliderEvent = false) => {

@@ -19,6 +19,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{ClockMode, ClockSyncConfig, ClockSyncDiagnostics, StreamClockSynchronizer};
+use crate::dag::{VirtualDagEngine, VirtualNodeConfig, VirtualNodeSummary, VIRTUAL_SOURCE_ID};
 use crate::protocol::{
     encode_hex_string, DownlinkPayload, FireWaterConfig, FireWaterCsvCodec, FixedSchemaBinaryCodec,
     FixedSchemaBinaryConfig, JustFloatCodec, JustFloatConfig, ProtocolCodec, ProtocolRegistry,
@@ -700,6 +701,7 @@ pub struct SourceSession {
     active_recorder: Option<(PathBuf, Arc<RawByteRecorder>)>,
     source_config: Option<SourceConfig>,
     timeline: Arc<ArcSwapOption<WorkspaceTimeline>>,
+    dag: Arc<ArcSwapOption<VirtualDagEngine>>,
 }
 
 impl std::fmt::Debug for SourceSession {
@@ -782,6 +784,7 @@ impl SourceSession {
             active_recorder: None,
             source_config: None,
             timeline: Arc::new(ArcSwapOption::empty()),
+            dag: Arc::new(ArcSwapOption::empty()),
         })
     }
 
@@ -981,6 +984,7 @@ impl SourceSession {
             raw_tap: Arc::clone(self.scheduler.raw_tap()),
             sched_metrics: Arc::clone(self.scheduler.metrics()),
             timeline: Arc::clone(&self.timeline),
+            dag: Arc::clone(&self.dag),
         };
 
         std::thread::Builder::new()
@@ -1578,6 +1582,7 @@ pub struct CoreWorkspace {
     scopes: Mutex<BTreeMap<ScopeId, ManagedScope>>,
     sync_groups: SyncGroupCoordinator,
     timeline: Arc<WorkspaceTimeline>,
+    dag: Arc<VirtualDagEngine>,
     frame_seq: AtomicU64,
     last_frame_pack_ns: AtomicU64,
     packer: Mutex<DdsfFramePacker>,
@@ -1604,6 +1609,8 @@ impl CoreWorkspace {
     pub fn with_quota_bytes(tokio_handle: tokio::runtime::Handle, quota_bytes: usize) -> Self {
         let quota_manager = Arc::new(MemoryQuotaManager::new(quota_bytes));
         let hub = Arc::new(ChannelHub::with_quota_manager(Arc::clone(&quota_manager)));
+        let dag = Arc::new(VirtualDagEngine::new());
+        hub.register_watermark_listener(dag.watermark_listener());
         Self {
             hub,
             quota_manager,
@@ -1614,6 +1621,7 @@ impl CoreWorkspace {
             scopes: Mutex::new(BTreeMap::new()),
             sync_groups: SyncGroupCoordinator::new(),
             timeline: Arc::new(WorkspaceTimeline::new()),
+            dag,
             frame_seq: AtomicU64::new(0),
             last_frame_pack_ns: AtomicU64::new(0),
             packer: Mutex::new(DdsfFramePacker::new(DEFAULT_DDSF_PACKER_CAPACITY)),
@@ -1690,6 +1698,11 @@ impl CoreWorkspace {
     /// Registers a new [`SourceSession`] from `config`, optionally auto-starting it.
     pub fn create_source(&self, config: SourceConfig) -> CoreResult<SourceSummary> {
         let source_id = config.source_id.clone();
+        if source_id.as_str().eq_ignore_ascii_case(VIRTUAL_SOURCE_ID) {
+            return Err(CoreError::InvalidConfig(format!(
+                "source_id `{VIRTUAL_SOURCE_ID}` is reserved for virtual channels"
+            )));
+        }
         if self.sources.read().contains_key(&source_id) {
             return Err(CoreError::SourceAlreadyExists(source_id));
         }
@@ -1702,6 +1715,7 @@ impl CoreWorkspace {
             &self.protocol_registry,
         )?;
         session.timeline.store(Some(Arc::clone(&self.timeline)));
+        session.dag.store(Some(Arc::clone(&self.dag)));
         if auto_start {
             session.start_on(&self.tokio_handle)?;
         }
@@ -1731,12 +1745,22 @@ impl CoreWorkspace {
     /// Intended for custom/virtual transport bindings or deterministic host tests wiring
     /// [`SourceSession::from_components`] directly onto [`Self::hub`].
     pub fn register_source_session(&self, session: SourceSession) -> CoreResult<SourceSummary> {
+        if session
+            .source_id()
+            .as_str()
+            .eq_ignore_ascii_case(VIRTUAL_SOURCE_ID)
+        {
+            return Err(CoreError::InvalidConfig(format!(
+                "source_id `{VIRTUAL_SOURCE_ID}` is reserved for virtual channels"
+            )));
+        }
         if !Arc::ptr_eq(session.hub(), &self.hub) {
             return Err(CoreError::InvalidConfig(
                 "SourceSession must share CoreWorkspace::hub()".into(),
             ));
         }
         session.timeline.store(Some(Arc::clone(&self.timeline)));
+        session.dag.store(Some(Arc::clone(&self.dag)));
         let source_id = session.source_id().clone();
         let summary = session.summary();
         let entry = Arc::new(Mutex::new(session));
@@ -1772,6 +1796,15 @@ impl CoreWorkspace {
         source_id: &SourceId,
         config: SourceConfig,
     ) -> CoreResult<SourceSummary> {
+        if config
+            .source_id
+            .as_str()
+            .eq_ignore_ascii_case(VIRTUAL_SOURCE_ID)
+        {
+            return Err(CoreError::InvalidConfig(format!(
+                "source_id `{VIRTUAL_SOURCE_ID}` is reserved for virtual channels"
+            )));
+        }
         {
             let sources = self.sources.read();
             if !sources.contains_key(source_id) {
@@ -1839,6 +1872,7 @@ impl CoreWorkspace {
         let mut new_sess = SourceSession::from_components(components, Arc::clone(&self.hub))?;
         new_sess.source_config = Some(stored_config);
         new_sess.timeline.store(Some(Arc::clone(&self.timeline)));
+        new_sess.dag.store(Some(Arc::clone(&self.dag)));
         if auto_start {
             new_sess.start_on(&self.tokio_handle)?;
         }
@@ -2102,8 +2136,40 @@ impl CoreWorkspace {
         })
     }
 
+    /// Lists all registered virtual channel DAG nodes sorted by `node_id`.
+    pub fn list_virtual_nodes(&self) -> Vec<VirtualNodeConfig> {
+        self.dag.list_nodes()
+    }
+
+    /// Creates or replaces a virtual channel DAG node and immediately performs retroactive backfill.
+    pub fn upsert_virtual_node(&self, config: VirtualNodeConfig) -> CoreResult<VirtualNodeSummary> {
+        let (summary, reset_channel_ids) = self.dag.upsert_node(&self.hub, config)?;
+        if !reset_channel_ids.is_empty() {
+            let mut scopes = self.scopes.lock();
+            for scope in scopes.values_mut() {
+                if let Some(trig_ch) = trigger_channel_id(&scope.controller) {
+                    if reset_channel_ids.contains(&trig_ch) {
+                        scope.last_scan_abs_sample = None;
+                    }
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Removes a virtual channel DAG node and its derived channels from `ChannelHub`.
+    pub fn remove_virtual_node(&self, node_id: &str) -> CoreResult<bool> {
+        self.dag.remove_node(&self.hub, node_id)
+    }
+
+    /// Removes all virtual channel DAG nodes and derived channels from `ChannelHub`.
+    pub fn clear_virtual_nodes(&self) -> usize {
+        self.dag.clear_nodes(&self.hub)
+    }
+
     /// Returns a hierarchical snapshot of all sources and registered channels in `ChannelHub`.
     pub fn channel_tree(&self) -> ChannelTreeSnapshot {
+        self.dag.flush_if_dirty(&self.hub);
         let mut by_source: BTreeMap<String, Vec<RegisteredChannelInfo>> = BTreeMap::new();
         for entry in self.hub.all_channels() {
             let desc = entry.descriptor();
@@ -2396,6 +2462,7 @@ impl CoreWorkspace {
     ///
     /// Also enforces global chunk memory quota so unpinned roll-over never stalls.
     pub fn tick_scopes(&self, now_ns: TimestampNs) -> Vec<ScopeSummary> {
+        self.dag.flush_if_dirty(&self.hub);
         let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
         let direct_sources = self.direct_channel_clock_sources();
         let mut scopes = self.scopes.lock();
@@ -2422,6 +2489,7 @@ impl CoreWorkspace {
         now_ns: TimestampNs,
         f: impl FnOnce(&[u8]) -> R,
     ) -> CoreResult<R> {
+        self.dag.flush_if_dirty(&self.hub);
         let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
         let direct_sources = self.direct_channel_clock_sources();
         let payloads = {
@@ -2455,6 +2523,7 @@ impl CoreWorkspace {
         now_ns: TimestampNs,
         f: impl FnOnce(&[u8]) -> R,
     ) -> CoreResult<R> {
+        self.dag.flush_if_dirty(&self.hub);
         let (effective_now_ns, _) = self.resolve_workspace_now_ns(now_ns);
         let payloads = {
             let scopes = self.scopes.lock();
@@ -3123,6 +3192,7 @@ struct WorkerPipelineCtx {
     raw_tap: SharedRawTap,
     sched_metrics: Arc<TransportMetrics>,
     timeline: Arc<ArcSwapOption<WorkspaceTimeline>>,
+    dag: Arc<ArcSwapOption<VirtualDagEngine>>,
 }
 
 #[derive(Default)]
@@ -3308,6 +3378,9 @@ fn process_single_packet(
                 ctx.telemetry
                     .last_sample_ts_ns
                     .store(last_ts, Ordering::Relaxed);
+            }
+            if let Some(dag) = ctx.dag.load_full() {
+                dag.step_if_active(&ctx.hub);
             }
         }
         Err(err) => {

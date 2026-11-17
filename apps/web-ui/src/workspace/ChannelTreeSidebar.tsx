@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent 
 import type { ChannelModalityDto, ChannelNodeDto_Serialize } from "../bridge/bindings.ts";
 import { bridgeClient } from "../bridge/control-client.ts";
 import { DdsfSnapshotKind } from "../bridge/ddsf-spec.ts";
+import { VIRTUAL_SOURCE_ID } from "../bridge/virtual-eval.ts";
 import {
   translate,
   type MessageKey,
@@ -13,6 +14,7 @@ import {
 } from "../scope-engine/time-format.ts";
 import {
   CommandPanel,
+  VirtualChannelPanel,
   WIDGET_CATALOG,
   WidgetToolbox,
   type WidgetType,
@@ -87,12 +89,31 @@ export function ChannelTreeSidebar() {
   const executeCommand = useWorkspaceStore((s) => s.executeCommand);
   const exportCommandsConfig = useWorkspaceStore((s) => s.exportCommandsConfig);
   const importCommandsConfig = useWorkspaceStore((s) => s.importCommandsConfig);
+  const virtualChannels = useWorkspaceStore((s) => s.virtualChannels);
+  const nextVirtualSeq = useWorkspaceStore((s) => s.nextVirtualSeq);
+  const upsertVirtualChannel = useWorkspaceStore((s) => s.upsertVirtualChannel);
+  const removeVirtualChannel = useWorkspaceStore((s) => s.removeVirtualChannel);
+  const clearVirtualChannels = useWorkspaceStore((s) => s.clearVirtualChannels);
+  const exportVirtualChannelsConfig = useWorkspaceStore((s) => s.exportVirtualChannelsConfig);
+  const importVirtualChannelsConfig = useWorkspaceStore((s) => s.importVirtualChannelsConfig);
+  const placeVirtualOutputsWatchTable = useWorkspaceStore(
+    (s) => s.placeVirtualOutputsWatchTable,
+  );
+  const addScope = useWorkspaceStore((s) => s.addScope);
 
   const sourcesImportRef = useRef<HTMLInputElement | null>(null);
   const [sourceIoNotice, setSourceIoNotice] = useState<{
     kind: "ok" | "err";
     text: string;
   } | null>(null);
+
+  const physicalSourceCount = useMemo(
+    () =>
+      channelGroups.filter(
+        (g) => g.source.source_id !== VIRTUAL_SOURCE_ID && g.source.transport_kind !== "virtual",
+      ).length,
+    [channelGroups],
+  );
 
   const exportSourcesAndNotify = async (sourceIds: string[] | undefined, filename: string, count: number) => {
     try {
@@ -115,7 +136,7 @@ export function ChannelTreeSidebar() {
   };
 
   const handleExportAllSources = () =>
-    exportSourcesAndNotify(undefined, "ddscope-sources.json", channelGroups.length);
+    exportSourcesAndNotify(undefined, "ddscope-sources.json", physicalSourceCount);
 
   const handleExportSingleSource = (sourceId: string) =>
     exportSourcesAndNotify([sourceId], `ddscope-source-${sourceId}.json`, 1);
@@ -233,7 +254,12 @@ export function ChannelTreeSidebar() {
   };
 
   const sourceIds = useMemo(
-    () => channelGroups.map((g) => g.source.source_id),
+    () =>
+      channelGroups
+        .filter(
+          (g) => g.source.source_id !== VIRTUAL_SOURCE_ID && g.source.transport_kind !== "virtual",
+        )
+        .map((g) => g.source.source_id),
     [channelGroups],
   );
 
@@ -328,6 +354,17 @@ export function ChannelTreeSidebar() {
         >
           <span>{t("sidebar.tab.sources")}</span>
           <span className="sidebar-tab-badge">{Object.keys(channelsById).length}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={sidebarTab === "virtual"}
+          className={`sidebar-tab-btn ${sidebarTab === "virtual" ? "active" : ""}`}
+          data-testid="sidebar-tab-virtual"
+          onClick={() => setSidebarTab("virtual")}
+        >
+          <span>{t("sidebar.tab.virtual")}</span>
+          <span className="sidebar-tab-badge">{virtualChannels.length}</span>
         </button>
         <button
           type="button"
@@ -430,6 +467,8 @@ export function ChannelTreeSidebar() {
             ) : (
               filteredGroups.map((grp) => {
                 const src = grp.source;
+                const isVirtualGroup =
+                  src.source_id === VIRTUAL_SOURCE_ID || src.transport_kind === "virtual";
                 const tel = telemetryBySource[src.source_id];
                 const isRunning =
                   src.state === "running" ||
@@ -446,78 +485,105 @@ export function ChannelTreeSidebar() {
                     <div className="source-header">
                       <div className="source-title-row">
                         <span className={`source-dot state-${src.state}`} />
-                        <strong className="source-id">{src.source_id}</strong>
-                        <span className="source-kind">{src.transport_kind}</span>
+                        <strong className="source-id">
+                          {isVirtualGroup ? t("sidebar.virtualSourceTitle") : src.source_id}
+                        </strong>
+                        <span className="source-kind">
+                          {isVirtualGroup ? t("sidebar.virtualDagBadge") : src.transport_kind}
+                        </span>
                         <span className="source-state">{t(sourceStateKey(src.state))}</span>
                       </div>
-                      <div className="source-meta-row">
-                        <span>
-                          {tel?.samples_per_sec != null
-                            ? formatSampleRate(tel.samples_per_sec)
-                            : "--"}
-                        </span>
-                        <span>
-                          {tel?.bytes_per_sec != null
-                            ? `${formatBytesCompact(tel.bytes_per_sec)}/s`
-                            : "--"}
-                        </span>
-                      </div>
-                      <div className="source-actions-row">
-                        {isRunning ? (
-                          <button
-                            type="button"
-                            className="scope-btn-xs"
-                            onClick={() => stopSource(src.source_id)}
-                          >
-                            {t("sidebar.stop")}
-                          </button>
-                        ) : (
+                      {!isVirtualGroup && (
+                        <div className="source-meta-row">
+                          <span>
+                            {tel?.samples_per_sec != null
+                              ? formatSampleRate(tel.samples_per_sec)
+                              : "--"}
+                          </span>
+                          <span>
+                            {tel?.bytes_per_sec != null
+                              ? `${formatBytesCompact(tel.bytes_per_sec)}/s`
+                              : "--"}
+                          </span>
+                        </div>
+                      )}
+                      {isVirtualGroup ? (
+                        <div className="source-actions-row">
                           <button
                             type="button"
                             className="scope-btn-xs scope-btn-accent"
-                            onClick={() => startSource(src.source_id)}
+                            data-testid="virtual-group-manage-btn"
+                            onClick={() => setSidebarTab("virtual")}
                           >
-                            {t("sidebar.start")}
+                            {t("sidebar.virtualManage")}
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          className={`scope-btn-xs ${isRecording ? "rec-active" : ""}`}
-                          title={t("sidebar.recTitle")}
-                          onClick={() => toggleRawRecorder(src.source_id, !isRecording)}
-                        >
-                          {isRecording ? t("sidebar.recActive") : t("sidebar.recIdle")}
-                        </button>
-                        <button
-                          type="button"
-                          className="scope-btn-xs"
-                          title={t("sidebar.editTitle")}
-                          data-testid={`edit-source-${src.source_id}`}
-                          onClick={() => openEditSourceWizard(src.source_id)}
-                        >
-                          {t("sidebar.edit")}
-                        </button>
-                        <button
-                          type="button"
-                          className="scope-btn-xs"
-                          title={t("sidebar.exportOneSourceTitle")}
-                          data-testid={`export-source-${src.source_id}`}
-                          onClick={() => {
-                            void handleExportSingleSource(src.source_id);
-                          }}
-                        >
-                          {t("sidebar.exportOneSource")}
-                        </button>
-                        <button
-                          type="button"
-                          className="scope-btn-xs"
-                          title={t("sidebar.delTitle")}
-                          data-testid={`delete-source-${src.source_id}`}
-                          onClick={() => removeSource(src.source_id)}
-                        >
-                          {t("sidebar.del")}
-                        </button>
-                      </div>
+                          <button
+                            type="button"
+                            className="scope-btn-xs"
+                            data-testid="virtual-group-clear-btn"
+                            onClick={() => void clearVirtualChannels()}
+                          >
+                            {t("sidebar.virtualClear")}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="source-actions-row">
+                          {isRunning ? (
+                            <button
+                              type="button"
+                              className="scope-btn-xs"
+                              onClick={() => stopSource(src.source_id)}
+                            >
+                              {t("sidebar.stop")}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="scope-btn-xs scope-btn-accent"
+                              onClick={() => startSource(src.source_id)}
+                            >
+                              {t("sidebar.start")}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className={`scope-btn-xs ${isRecording ? "rec-active" : ""}`}
+                            title={t("sidebar.recTitle")}
+                            onClick={() => toggleRawRecorder(src.source_id, !isRecording)}
+                          >
+                            {isRecording ? t("sidebar.recActive") : t("sidebar.recIdle")}
+                          </button>
+                          <button
+                            type="button"
+                            className="scope-btn-xs"
+                            title={t("sidebar.editTitle")}
+                            data-testid={`edit-source-${src.source_id}`}
+                            onClick={() => openEditSourceWizard(src.source_id)}
+                          >
+                            {t("sidebar.edit")}
+                          </button>
+                          <button
+                            type="button"
+                            className="scope-btn-xs"
+                            title={t("sidebar.exportOneSourceTitle")}
+                            data-testid={`export-source-${src.source_id}`}
+                            onClick={() => {
+                              void handleExportSingleSource(src.source_id);
+                            }}
+                          >
+                            {t("sidebar.exportOneSource")}
+                          </button>
+                          <button
+                            type="button"
+                            className="scope-btn-xs"
+                            title={t("sidebar.delTitle")}
+                            data-testid={`delete-source-${src.source_id}`}
+                            onClick={() => removeSource(src.source_id)}
+                          >
+                            {t("sidebar.del")}
+                          </button>
+                        </div>
+                      )}
 
                       {src.transport_kind === "raw_file_replay" && (
                         <div className="replay-controls">
@@ -609,6 +675,24 @@ export function ChannelTreeSidebar() {
               })
             )}
           </div>
+        </div>
+      ) : sidebarTab === "virtual" ? (
+        <div className="sidebar-tab-panel" data-testid="sidebar-panel-virtual">
+          <VirtualChannelPanel
+            locale={locale}
+            virtualChannels={virtualChannels}
+            nextVirtualSeq={nextVirtualSeq}
+            channelsById={channelsById}
+            targetScopeId={targetScopeId}
+            onUpsertVirtualChannel={upsertVirtualChannel}
+            onRemoveVirtualChannel={removeVirtualChannel}
+            onClearVirtualChannels={clearVirtualChannels}
+            onExportVirtualChannelsConfig={exportVirtualChannelsConfig}
+            onImportVirtualChannelsConfig={importVirtualChannelsConfig}
+            onBindChannelToScope={bindChannelToScope}
+            onPlaceWatchTable={(nodeId) => placeVirtualOutputsWatchTable(nodeId)}
+            onEnsureScope={() => addScope()}
+          />
         </div>
       ) : sidebarTab === "toolbox" ? (
         <div className="sidebar-tab-panel" data-testid="sidebar-panel-toolbox">

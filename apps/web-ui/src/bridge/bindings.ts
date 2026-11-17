@@ -61,6 +61,14 @@ export const commands = {
 	saveDefaultProjectConfig: (configJson: string) => __TAURI_INVOKE<string>("save_default_project_config", { configJson }),
 	/**  Clears the portable default project configuration stored alongside the executable. */
 	clearDefaultProjectConfig: () => __TAURI_INVOKE<boolean>("clear_default_project_config"),
+	/**  Lists all configured virtual channel DAG nodes. */
+	listVirtualChannels: () => __TAURI_INVOKE<VirtualNodeConfigDto_Serialize[]>("list_virtual_channels"),
+	/**  Creates or updates a virtual channel DAG node and triggers retroactive backfill. */
+	upsertVirtualChannel: (config: VirtualNodeConfigDto_Deserialize) => __TAURI_INVOKE<VirtualNodeSummaryDto_Serialize>("upsert_virtual_channel", { config }),
+	/**  Removes a virtual channel DAG node and its derived channels. */
+	removeVirtualChannel: (nodeId: string) => __TAURI_INVOKE<boolean>("remove_virtual_channel", { nodeId }),
+	/**  Removes all virtual channel DAG nodes from the workspace. */
+	clearVirtualChannels: () => __TAURI_INVOKE<number>("clear_virtual_channels"),
 };
 
 /** Events */
@@ -69,11 +77,23 @@ export const events = {
 };
 
 /* Types */
+/**  Threshold/window modes for Analog -> Digital conversion (`Bool` output). */
+export type AnalogToDigitalModeDto = { mode: "schmitt"; threshold: number | null; hysteresis: number | null; invert: boolean } | { mode: "window"; low: number | null; high: number | null; invert: boolean };
+
 /**  Structured command error returned across the Tauri IPC boundary. */
 export type ApiErrorDto = {
 	code: string,
 	message: string,
 };
+
+/**  Calculus operator variants (`d/dt` and trapezoidal integral). */
+export type CalculusModeDto = CalculusModeDto_Serialize | CalculusModeDto_Deserialize;
+
+/**  Calculus operator variants (`d/dt` and trapezoidal integral). */
+export type CalculusModeDto_Deserialize = { mode: "derivative"; scale: number | null; filter_tau_ms: number | null } | { mode: "integral"; scale: number | null; dc_offset: number | null; initial_value: number | null; clamp_min?: number | null; clamp_max?: number | null };
+
+/**  Calculus operator variants (`d/dt` and trapezoidal integral). */
+export type CalculusModeDto_Serialize = { mode: "derivative"; scale: number | null; filter_tau_ms: number | null } | { mode: "integral"; scale: number | null; dc_offset: number | null; initial_value: number | null; clamp_min: number | null; clamp_max: number | null };
 
 /**  Channel modality classification exposed to the frontend channel tree. */
 export type ChannelModalityDto = "scalar" | "digital_bool" | "frame" | "state_machine" | "event_log";
@@ -246,6 +266,22 @@ export type FixedFieldSpecDto_Serialize = {
 	offset: number | null,
 	unit: string | null,
 	is_state_enum: boolean,
+};
+
+/**  Output channel selection flags for `SinglePhasePower`. */
+export type PowerOutputFlagsDto = {
+	freq: boolean,
+	u_rms: boolean,
+	i_rms: boolean,
+	p: boolean,
+	q1: boolean,
+	q_tot: boolean,
+	s: boolean,
+	pf: boolean,
+	phi_deg: boolean,
+	u_pk: boolean,
+	i_pk: boolean,
+	energy_wh: boolean,
 };
 
 /**  Protocol codec configuration attached to a data source. */
@@ -483,6 +519,50 @@ export type StateLabelEntryDto_Serialize = {
 	color_rgba: number | null,
 };
 
+/**  Display metadata entry for a discrete state code. */
+export type StateLabelSpecDto = StateLabelSpecDto_Serialize | StateLabelSpecDto_Deserialize;
+
+/**  Display metadata entry for a discrete state code. */
+export type StateLabelSpecDto_Deserialize = {
+	code: number,
+	name: string,
+	color_rgba?: number | null,
+};
+
+/**  Display metadata entry for a discrete state code. */
+export type StateLabelSpecDto_Serialize = {
+	code: number,
+	name: string,
+	color_rgba: number | null,
+};
+
+/**  Numeric interval-to-state mapping rule. */
+export type StateRangeRuleDto = StateRangeRuleDto_Serialize | StateRangeRuleDto_Deserialize;
+
+/**  Numeric interval-to-state mapping rule. */
+export type StateRangeRuleDto_Deserialize = {
+	min?: number | null,
+	max?: number | null,
+	code: number,
+	name: string,
+	color_rgba?: number | null,
+};
+
+/**  Numeric interval-to-state mapping rule. */
+export type StateRangeRuleDto_Serialize = {
+	min: number | null,
+	max: number | null,
+	code: number,
+	name: string,
+	color_rgba: number | null,
+};
+
+/**  Numeric value assignment for a discrete state code. */
+export type StateValueEntryDto = {
+	code: number,
+	value: number | null,
+};
+
 /**  Synchronization update propagated across all scopes in a `SyncGroup`. */
 export type SyncGroupUpdateDto = SyncGroupUpdateDto_Serialize | SyncGroupUpdateDto_Deserialize;
 
@@ -506,6 +586,18 @@ export type SyncGroupUpdateDto_Serialize = {
 	cursor_b_ratio: number | null,
 };
 
+/**  Conversion modes for Digital / State -> Analog (`scalar`). */
+export type ToAnalogModeDto = { mode: "level_map"; input_channel: string; low_value: number | null; high_value: number | null; threshold: number | null; smoothing_tau_ms: number | null } | { mode: "bit_weighted_dac"; bit_channels: string[]; scale: number | null; offset: number | null; threshold: number | null } | { mode: "state_value_map"; input_channel: string; entries: StateValueEntryDto[]; default_value: number | null };
+
+/**  Conversion modes for Analog / Digital -> State Machine (`state_machine`). */
+export type ToStateMachineModeDto = ToStateMachineModeDto_Serialize | ToStateMachineModeDto_Deserialize;
+
+/**  Conversion modes for Analog / Digital -> State Machine (`state_machine`). */
+export type ToStateMachineModeDto_Deserialize = { mode: "range_map"; input_channel: string; hysteresis: number | null; rules: StateRangeRuleDto_Deserialize[]; default_state: StateLabelSpecDto_Deserialize } | { mode: "bit_combine"; bit_channels: string[]; threshold: number | null; labels: StateLabelSpecDto_Deserialize[] };
+
+/**  Conversion modes for Analog / Digital -> State Machine (`state_machine`). */
+export type ToStateMachineModeDto_Serialize = { mode: "range_map"; input_channel: string; hysteresis: number | null; rules: StateRangeRuleDto_Serialize[]; default_state: StateLabelSpecDto_Serialize } | { mode: "bit_combine"; bit_channels: string[]; threshold: number | null; labels: StateLabelSpecDto_Serialize[] };
+
 /**  Transport endpoint configuration for creating a data source. */
 export type TransportConfigDto = TransportConfigDto_Serialize | TransportConfigDto_Deserialize;
 
@@ -523,6 +615,56 @@ export type TriggerSweepModeDto = "roll" | "auto" | "normal" | "single";
 
 /**  Outbound transmission priority lane. */
 export type TxPriorityDto = "high" | "normal";
+
+/**  Virtual channel node configuration DTO. */
+export type VirtualNodeConfigDto = VirtualNodeConfigDto_Serialize | VirtualNodeConfigDto_Deserialize;
+
+/**  Virtual channel node configuration DTO. */
+export type VirtualNodeConfigDto_Deserialize = {
+	node_id: string,
+	name: string,
+	enabled: boolean,
+	operator: VirtualOperatorDto_Deserialize,
+};
+
+/**  Virtual channel node configuration DTO. */
+export type VirtualNodeConfigDto_Serialize = {
+	node_id: string,
+	name: string,
+	enabled: boolean,
+	operator: VirtualOperatorDto_Serialize,
+};
+
+/**  Virtual channel node registration summary DTO. */
+export type VirtualNodeSummaryDto = VirtualNodeSummaryDto_Serialize | VirtualNodeSummaryDto_Deserialize;
+
+/**  Virtual channel node registration summary DTO. */
+export type VirtualNodeSummaryDto_Deserialize = {
+	node_id: string,
+	name: string,
+	enabled: boolean,
+	output_channels: ChannelNodeDto_Deserialize[],
+};
+
+/**  Virtual channel node registration summary DTO. */
+export type VirtualNodeSummaryDto_Serialize = {
+	node_id: string,
+	name: string,
+	enabled: boolean,
+	output_channels: ChannelNodeDto_Serialize[],
+};
+
+/**  Virtual operator definition exposed across the control plane. */
+export type VirtualOperatorDto = VirtualOperatorDto_Serialize | VirtualOperatorDto_Deserialize;
+
+/**  Virtual operator definition exposed across the control plane. */
+export type VirtualOperatorDto_Deserialize = { kind: "analog_to_digital"; input_channel: string; output_path: string; mode: AnalogToDigitalModeDto } | { kind: "to_state_machine"; output_path: string; mode: ToStateMachineModeDto_Deserialize } | { kind: "to_analog"; output_path: string; unit?: string | null; mode: ToAnalogModeDto } | { kind: "formula"; expression: string; output_path: string; unit?: string | null; output_digital: boolean } | { kind: "window_stats"; input_channel: string; output_path: string; unit?: string | null; metric: WindowMetricKindDto; window_ms: number | null } | { kind: "calculus"; input_channel: string; output_path: string; unit?: string | null; mode: CalculusModeDto_Deserialize } | { kind: "single_phase_power"; voltage_channel: string; current_channel: string; output_prefix: string; voltage_scale: number | null; voltage_offset: number | null; current_scale: number | null; current_offset: number | null; nominal_freq_hz: number | null; zero_cross_hysteresis_v: number | null; min_freq_hz: number | null; fallback_window_ms: number | null; outputs: PowerOutputFlagsDto };
+
+/**  Virtual operator definition exposed across the control plane. */
+export type VirtualOperatorDto_Serialize = { kind: "analog_to_digital"; input_channel: string; output_path: string; mode: AnalogToDigitalModeDto } | { kind: "to_state_machine"; output_path: string; mode: ToStateMachineModeDto_Serialize } | { kind: "to_analog"; output_path: string; unit: string | null; mode: ToAnalogModeDto } | { kind: "formula"; expression: string; output_path: string; unit: string | null; output_digital: boolean } | { kind: "window_stats"; input_channel: string; output_path: string; unit: string | null; metric: WindowMetricKindDto; window_ms: number | null } | { kind: "calculus"; input_channel: string; output_path: string; unit: string | null; mode: CalculusModeDto_Serialize } | { kind: "single_phase_power"; voltage_channel: string; current_channel: string; output_prefix: string; voltage_scale: number | null; voltage_offset: number | null; current_scale: number | null; current_offset: number | null; nominal_freq_hz: number | null; zero_cross_hysteresis_v: number | null; min_freq_hz: number | null; fallback_window_ms: number | null; outputs: PowerOutputFlagsDto };
+
+/**  Supported sliding time-window metrics. */
+export type WindowMetricKindDto = "rms" | "mean" | "peak_to_peak" | "min" | "max" | "std_dev";
 
 /**  Low-frequency (5-10Hz) workspace telemetry event pushed to the frontend control store. */
 export type WorkspaceTelemetryEvent = {

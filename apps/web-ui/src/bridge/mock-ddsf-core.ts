@@ -20,6 +20,9 @@ import type {
   SyncGroupUpdateDto_Deserialize,
   TriggerConditionDto,
   TriggerSweepModeDto,
+  VirtualNodeConfigDto_Deserialize,
+  VirtualNodeConfigDto_Serialize,
+  VirtualNodeSummaryDto_Serialize,
   WorkspaceTelemetryEvent,
 } from "./bindings.ts";
 import {
@@ -42,6 +45,17 @@ import {
   isValidUdpSocketAddr,
   normalizeSourceConfigToSerialize,
 } from "./source-config-normalize.ts";
+import {
+  compileVirtualFormula,
+  expandVirtualOutputSpecs,
+  matchRangeRuleCode,
+  MockSinglePhasePowerTracker,
+  normalizeVirtualNodeConfig,
+  sortVirtualNodesTopologically,
+  VIRTUAL_SOURCE_ID,
+  type CompiledTsFormula,
+  type VirtualOutputSpec,
+} from "./virtual-eval.ts";
 
 interface InternalChannelDef {
   channelId: number;
@@ -65,8 +79,13 @@ interface InternalChannelDef {
     | "aux_sine"
     | "aux_cos"
     | "aux_bool"
-    | "aux_state";
+    | "aux_state"
+    | "virtual";
   channelIndex: number;
+  virtualMeta?: {
+    nodeId: string;
+    spec: VirtualOutputSpec;
+  };
 }
 
 interface InternalSourceState {
@@ -166,6 +185,13 @@ export class MockSimulationCore {
   private readonly coalescedQueue = new Map<string, CoalescedEntry>();
   private readonly manualGlitchesNs: number[] = [];
   private readonly runBoundariesNs: number[] = [];
+
+  private readonly virtualNodes = new Map<string, VirtualNodeConfigDto_Serialize>();
+  private virtualOrder: VirtualNodeConfigDto_Serialize[] = [];
+  private readonly virtualChannelsByNode = new Map<string, InternalChannelDef[]>();
+  private readonly virtualChannelsByFullPath = new Map<string, InternalChannelDef>();
+  private readonly compiledFormulas = new Map<string, CompiledTsFormula>();
+  private readonly powerTrackers = new Map<string, MockSinglePhasePowerTracker>();
 
   private nextChannelId = 101;
   private frameSeq = 0;
@@ -396,6 +422,9 @@ export class MockSimulationCore {
   private validateSourceRequest(req: CreateSourceRequestDto_Deserialize): void {
     if (!req.source_id.trim()) {
       throw new Error("source_id must not be empty");
+    }
+    if (req.source_id.trim().toLowerCase() === VIRTUAL_SOURCE_ID) {
+      throw new Error(`source_id '${VIRTUAL_SOURCE_ID}' is reserved for virtual channels`);
     }
     if (req.transport.kind === "udp") {
       if (!isValidUdpSocketAddr(req.transport.bind_addr)) {
@@ -694,6 +723,11 @@ export class MockSimulationCore {
       this.lastBoundarySimNs = 0;
       this.simTimeNs = 0;
       this.prevSimTimeNs = 0;
+      for (const node of this.virtualOrder) {
+        if (node.operator.kind === "single_phase_power") {
+          this.powerTrackers.set(node.node_id, new MockSinglePhasePowerTracker(node.operator));
+        }
+      }
     }
   }
 
@@ -747,12 +781,188 @@ export class MockSimulationCore {
       });
     }
 
+    if (this.virtualOrder.length > 0) {
+      const vChannels: ChannelNodeDto_Serialize[] = [];
+      for (const node of this.virtualOrder) {
+        const defs = this.virtualChannelsByNode.get(node.node_id) ?? [];
+        for (const c of defs) {
+          vChannels.push({
+            channel_id: c.channelId,
+            source_id: c.sourceId,
+            local_path: c.localPath,
+            full_path: c.fullPath,
+            display_name: c.displayName,
+            unit: c.unit,
+            modality: c.modality,
+            scalar_type: c.scalarType,
+            state_labels: c.stateLabels,
+          });
+        }
+      }
+      vChannels.sort(
+        (a, b) => a.local_path.localeCompare(b.local_path) || a.channel_id - b.channel_id,
+      );
+      if (vChannels.length > 0) {
+        groups.push({
+          source: {
+            source_id: VIRTUAL_SOURCE_ID,
+            display_name: "Virtual Channels",
+            transport_kind: "virtual",
+            state: this.hasRunningSource() ? "running" : "stopped",
+            raw_recording_path: null,
+          },
+          channels: vChannels,
+        });
+      }
+    }
+
     return {
       sources: groups,
       quota_limit_bytes: QUOTA_LIMIT_BYTES,
       quota_used_bytes: this.quotaUsedBytes,
       pinned_bytes: this.totalPinnedBytes(),
     };
+  }
+
+  listVirtualChannels(): VirtualNodeConfigDto_Serialize[] {
+    return Array.from(this.virtualNodes.values())
+      .sort((a, b) => a.node_id.localeCompare(b.node_id))
+      .map((n) => structuredClone(n));
+  }
+
+  upsertVirtualChannel(config: VirtualNodeConfigDto_Deserialize): VirtualNodeSummaryDto_Serialize {
+    const norm = normalizeVirtualNodeConfig(config);
+    const prevNode = this.virtualNodes.get(norm.node_id);
+    const prevDefs = this.virtualChannelsByNode.get(norm.node_id) ?? [];
+
+    const candidateList = Array.from(this.virtualNodes.values()).filter(
+      (n) => n.node_id !== norm.node_id,
+    );
+    candidateList.push(norm);
+    const nextOrder = sortVirtualNodesTopologically(candidateList);
+
+    this.virtualNodes.set(norm.node_id, norm);
+    this.virtualOrder = nextOrder;
+
+    // Preserve numeric ChannelId where localPath + modality match previous node outputs
+    const prevIdByPath = new Map<string, InternalChannelDef>();
+    for (const def of prevDefs) {
+      prevIdByPath.set(def.localPath, def);
+      this.channelsById.delete(def.channelId);
+      this.virtualChannelsByFullPath.delete(def.fullPath);
+    }
+
+    const specs = expandVirtualOutputSpecs(norm);
+    const nextDefs: InternalChannelDef[] = specs.map((spec, idx) => {
+      const old = prevIdByPath.get(spec.localPath);
+      const idOverride =
+        old && old.modality === spec.modality && old.scalarType === spec.scalarType
+          ? old.channelId
+          : undefined;
+      const ch = this.makeChannel(
+        VIRTUAL_SOURCE_ID,
+        spec.localPath,
+        spec.displayName,
+        spec.unit,
+        spec.modality,
+        spec.scalarType,
+        spec.stateLabels,
+        "virtual",
+        idx,
+        idOverride,
+      );
+      ch.virtualMeta = { nodeId: norm.node_id, spec };
+      this.virtualChannelsByFullPath.set(ch.fullPath, ch);
+      return ch;
+    });
+    this.virtualChannelsByNode.set(norm.node_id, nextDefs);
+
+    if (norm.operator.kind === "formula") {
+      this.compiledFormulas.set(norm.node_id, compileVirtualFormula(norm.operator.expression));
+    } else {
+      this.compiledFormulas.delete(norm.node_id);
+    }
+
+    if (norm.operator.kind === "single_phase_power") {
+      const tracker = new MockSinglePhasePowerTracker(norm.operator);
+      if (this.simTimeNs > 0 && norm.enabled) {
+        const uPath = norm.operator.voltage_channel;
+        const iPath = norm.operator.current_channel;
+        const fromNs = Math.max(0, this.simTimeNs - 300_000_000);
+        tracker.stepRange(fromNs, this.simTimeNs, (t) => [
+          this.evaluateChannelPathAt(uPath, t),
+          this.evaluateChannelPathAt(iPath, t),
+        ]);
+      }
+      this.powerTrackers.set(norm.node_id, tracker);
+    } else {
+      this.powerTrackers.delete(norm.node_id);
+    }
+
+    // Backfill downstream power trackers if upstream changed
+    if (prevNode && this.simTimeNs > 0) {
+      for (const node of this.virtualOrder) {
+        if (node.node_id !== norm.node_id && node.operator.kind === "single_phase_power" && node.enabled) {
+          const tracker = new MockSinglePhasePowerTracker(node.operator);
+          const uPath = node.operator.voltage_channel;
+          const iPath = node.operator.current_channel;
+          const fromNs = Math.max(0, this.simTimeNs - 300_000_000);
+          tracker.stepRange(fromNs, this.simTimeNs, (t) => [
+            this.evaluateChannelPathAt(uPath, t),
+            this.evaluateChannelPathAt(iPath, t),
+          ]);
+          this.powerTrackers.set(node.node_id, tracker);
+        }
+      }
+    }
+
+    return {
+      node_id: norm.node_id,
+      name: norm.name,
+      enabled: norm.enabled,
+      output_channels: nextDefs.map((c) => ({
+        channel_id: c.channelId,
+        source_id: c.sourceId,
+        local_path: c.localPath,
+        full_path: c.fullPath,
+        display_name: c.displayName,
+        unit: c.unit,
+        modality: c.modality,
+        scalar_type: c.scalarType,
+        state_labels: c.stateLabels,
+      })),
+    };
+  }
+
+  removeVirtualChannel(nodeId: string): boolean {
+    if (!this.virtualNodes.has(nodeId)) return false;
+    this.virtualNodes.delete(nodeId);
+    const defs = this.virtualChannelsByNode.get(nodeId) ?? [];
+    for (const def of defs) {
+      this.channelsById.delete(def.channelId);
+      this.virtualChannelsByFullPath.delete(def.fullPath);
+    }
+    this.virtualChannelsByNode.delete(nodeId);
+    this.compiledFormulas.delete(nodeId);
+    this.powerTrackers.delete(nodeId);
+    this.virtualOrder = sortVirtualNodesTopologically(Array.from(this.virtualNodes.values()));
+    return true;
+  }
+
+  clearVirtualChannels(): number {
+    const count = this.virtualNodes.size;
+    for (const defs of this.virtualChannelsByNode.values()) {
+      for (const def of defs) {
+        this.channelsById.delete(def.channelId);
+        this.virtualChannelsByFullPath.delete(def.fullPath);
+      }
+    }
+    this.virtualNodes.clear();
+    this.virtualOrder = [];
+    this.virtualChannelsByNode.clear();
+    this.compiledFormulas.clear();
+    this.powerTrackers.clear();
+    return count;
   }
 
   getSourceConfigs(): CreateSourceRequestDto_Serialize[] {
@@ -941,6 +1151,23 @@ export class MockSimulationCore {
     }
     this.frameSeq = (this.frameSeq + 1) >>> 0;
 
+    if (anyRunning && this.virtualOrder.length > 0) {
+      for (const node of this.virtualOrder) {
+        if (!node.enabled || node.operator.kind !== "single_phase_power") continue;
+        const tracker = this.powerTrackers.get(node.node_id);
+        if (!tracker) continue;
+        const uPath = node.operator.voltage_channel;
+        const iPath = node.operator.current_channel;
+        const fromNs = tracker.getLastTsNs() > 0
+          ? tracker.getLastTsNs()
+          : Math.max(0, this.simTimeNs - 200_000_000);
+        tracker.stepRange(fromNs, this.simTimeNs, (t) => [
+          this.evaluateChannelPathAt(uPath, t),
+          this.evaluateChannelPathAt(iPath, t),
+        ]);
+      }
+    }
+
     // Advance replay progress
     for (const src of this.sources.values()) {
       if (src.isReplay && src.summary.state === "running" && !src.replayPaused) {
@@ -980,7 +1207,7 @@ export class MockSimulationCore {
     const snapshots: DdsfSnapshotBuildInput[] = [];
     for (const ch of this.channelsById.values()) {
       const src = this.sources.get(ch.sourceId);
-      if (!src) continue;
+      if (!src && ch.sourceId !== VIRTUAL_SOURCE_ID) continue;
       const val = this.evaluateChannelAt(ch, this.simTimeNs);
       const kind =
         ch.modality === "digital_bool"
@@ -1089,7 +1316,200 @@ export class MockSimulationCore {
     return best;
   }
 
-  private evaluateChannelAt(ch: InternalChannelDef, tNs: number): number {
+  private findChannelByFullPath(fullPath: string): InternalChannelDef | undefined {
+    const virt = this.virtualChannelsByFullPath.get(fullPath);
+    if (virt) return virt;
+    for (const ch of this.channelsById.values()) {
+      if (ch.fullPath === fullPath) return ch;
+    }
+    return undefined;
+  }
+
+  private evaluateChannelPathAt(
+    fullPath: string,
+    tNs: number,
+    visiting?: Set<string>,
+  ): number {
+    const target = this.findChannelByFullPath(fullPath);
+    if (!target) return 0;
+    return this.evaluateChannelAt(target, tNs, visiting);
+  }
+
+  private evaluateVirtualChannelAt(
+    ch: InternalChannelDef,
+    tNs: number,
+    visiting: Set<string>,
+  ): number {
+    const meta = ch.virtualMeta;
+    if (!meta) return 0;
+    const node = this.virtualNodes.get(meta.nodeId);
+    if (!node || !node.enabled) return 0;
+    if (visiting.has(ch.fullPath)) return 0;
+    visiting.add(ch.fullPath);
+
+    try {
+      const op = node.operator;
+      switch (op.kind) {
+        case "analog_to_digital": {
+          const v = this.evaluateChannelPathAt(op.input_channel, tNs, visiting);
+          if (op.mode.mode === "window") {
+            const inside = v >= (op.mode.low ?? 0) && v <= (op.mode.high ?? 0);
+            return (op.mode.invert ? !inside : inside) ? 1 : 0;
+          }
+          const th = op.mode.threshold ?? 0;
+          const h = Math.abs(op.mode.hysteresis ?? 0);
+          let raw = v >= th;
+          if (h > 0 && Math.abs(v - th) < h) {
+            const vPrev = this.evaluateChannelPathAt(op.input_channel, Math.max(0, tNs - 50_000), visiting);
+            raw = vPrev >= th;
+          }
+          return (op.mode.invert ? !raw : raw) ? 1 : 0;
+        }
+        case "to_state_machine": {
+          if (op.mode.mode === "range_map") {
+            const v = this.evaluateChannelPathAt(op.mode.input_channel, tNs, visiting);
+            return matchRangeRuleCode(v, op.mode.rules, op.mode.default_state.code);
+          }
+          const th = op.mode.threshold ?? 0.5;
+          let code = 0;
+          for (let b = 0; b < op.mode.bit_channels.length; b += 1) {
+            if (this.evaluateChannelPathAt(op.mode.bit_channels[b], tNs, visiting) >= th) {
+              code |= 1 << b;
+            }
+          }
+          return code;
+        }
+        case "to_analog": {
+          if (op.mode.mode === "level_map") {
+            const lo = op.mode.low_value ?? 0;
+            const hi = op.mode.high_value ?? 5;
+            const th = op.mode.threshold ?? 0.5;
+            const tauMs = Math.max(0, op.mode.smoothing_tau_ms ?? 0);
+            if (tauMs <= 0) {
+              return this.evaluateChannelPathAt(op.mode.input_channel, tNs, visiting) >= th ? hi : lo;
+            }
+            const tauNs = tauMs * 1_000_000;
+            const taps = 16;
+            const spanNs = Math.min(tNs, Math.round(tauNs * 4));
+            const dtNs = Math.max(1_000, Math.round(spanNs / taps));
+            const dtSec = dtNs * 1e-9;
+            const tauSec = tauMs * 1e-3;
+            const alpha = dtSec / (tauSec + dtSec);
+            let y = this.evaluateChannelPathAt(op.mode.input_channel, Math.max(0, tNs - spanNs), visiting) >= th ? hi : lo;
+            for (let k = 1; k <= taps; k += 1) {
+              const tk = Math.max(0, tNs - spanNs + Math.round((k * spanNs) / taps));
+              const tgt = this.evaluateChannelPathAt(op.mode.input_channel, tk, visiting) >= th ? hi : lo;
+              y += alpha * (tgt - y);
+            }
+            return y;
+          }
+          if (op.mode.mode === "bit_weighted_dac") {
+            const th = op.mode.threshold ?? 0.5;
+            const scale = op.mode.scale ?? 1;
+            const offset = op.mode.offset ?? 0;
+            let code = 0;
+            for (let b = 0; b < op.mode.bit_channels.length; b += 1) {
+              if (this.evaluateChannelPathAt(op.mode.bit_channels[b], tNs, visiting) >= th) {
+                code |= 1 << b;
+              }
+            }
+            return code * scale + offset;
+          }
+          const code = Math.round(
+            this.evaluateChannelPathAt(op.mode.input_channel, tNs, visiting),
+          );
+          const found = op.mode.entries.find((e) => e.code === code);
+          return found ? (found.value ?? 0) : (op.mode.default_value ?? 0);
+        }
+        case "formula": {
+          const compiled = this.compiledFormulas.get(meta.nodeId);
+          if (!compiled) return 0;
+          const vals = compiled.inputChannels.map((p) =>
+            this.evaluateChannelPathAt(p, tNs, visiting),
+          );
+          const res = compiled.evalAt(Math.max(0, tNs) * 1e-9, vals);
+          return op.output_digital ? (res >= 0.5 ? 1 : 0) : res;
+        }
+        case "window_stats": {
+          const winNs = Math.max(1_000, (op.window_ms ?? 20) * 1_000_000);
+          const startNs = Math.max(0, tNs - winNs);
+          const samples = 64;
+          let sum = 0;
+          let sqSum = 0;
+          let min = Infinity;
+          let max = -Infinity;
+          for (let k = 0; k < samples; k += 1) {
+            const tk = startNs + (k / (samples - 1)) * Math.max(0, tNs - startNs);
+            const v = this.evaluateChannelPathAt(op.input_channel, tk, visiting);
+            sum += v;
+            sqSum += v * v;
+            if (v < min) min = v;
+            if (v > max) max = v;
+          }
+          const mean = sum / samples;
+          switch (op.metric) {
+            case "mean":
+              return mean;
+            case "min":
+              return min;
+            case "max":
+              return max;
+            case "peak_to_peak":
+              return Math.max(0, max - min);
+            case "std_dev":
+              return Math.sqrt(Math.max(0, sqSum / samples - mean * mean));
+            case "rms":
+              return Math.sqrt(Math.max(0, sqSum / samples));
+          }
+        }
+        case "calculus": {
+          if (op.mode.mode === "derivative") {
+            const scale = op.mode.scale ?? 1;
+            const tauNs = Math.max(10_000, (op.mode.filter_tau_ms ?? 0) * 1_000_000);
+            const hNs = Math.min(500_000, Math.max(10_000, Math.round(tauNs * 0.25)));
+            const v1 = this.evaluateChannelPathAt(op.input_channel, tNs + hNs, visiting);
+            const v0 = this.evaluateChannelPathAt(op.input_channel, Math.max(0, tNs - hNs), visiting);
+            const dtSec = Math.max(1e-9, (tNs + hNs - Math.max(0, tNs - hNs)) * 1e-9);
+            return ((v1 - v0) / dtSec) * scale;
+          }
+          const scale = op.mode.scale ?? 1;
+          const dc = op.mode.dc_offset ?? 0;
+          let acc = op.mode.initial_value ?? 0;
+          const lookbackNs = Math.min(tNs, 200_000_000);
+          if (lookbackNs > 0) {
+            const steps = 64;
+            const startNs = tNs - lookbackNs;
+            const dtSec = (lookbackNs / steps) * 1e-9;
+            let prev = this.evaluateChannelPathAt(op.input_channel, startNs, visiting) - dc;
+            for (let k = 1; k <= steps; k += 1) {
+              const cur =
+                this.evaluateChannelPathAt(op.input_channel, startNs + (k * lookbackNs) / steps, visiting) - dc;
+              acc += 0.5 * (prev + cur) * dtSec * scale;
+              if (op.mode.clamp_min != null) acc = Math.max(op.mode.clamp_min, acc);
+              if (op.mode.clamp_max != null) acc = Math.min(op.mode.clamp_max, acc);
+              prev = cur;
+            }
+          }
+          if (op.mode.clamp_min != null) acc = Math.max(op.mode.clamp_min, acc);
+          if (op.mode.clamp_max != null) acc = Math.min(op.mode.clamp_max, acc);
+          return acc;
+        }
+        case "single_phase_power": {
+          const tracker = this.powerTrackers.get(meta.nodeId);
+          if (!tracker || !meta.spec.powerMetricKey) return 0;
+          return tracker.sampleAt(tNs, meta.spec.powerMetricKey);
+        }
+      }
+    } finally {
+      visiting.delete(ch.fullPath);
+    }
+  }
+
+  private evaluateChannelAt(
+    ch: InternalChannelDef,
+    tNs: number,
+    visiting: Set<string> = new Set(),
+  ): number {
     const tSec = Math.max(0, tNs) * 1e-9;
     const omega = 2 * Math.PI * this.motorFreqHz;
     const amp = 12.0 * this.motorKp;
@@ -1165,6 +1585,8 @@ export class MockSimulationCore {
         const slice = Math.floor(Math.max(0, tNs) / 400_000_000);
         return slice % 4;
       }
+      case "virtual":
+        return this.evaluateVirtualChannelAt(ch, tNs, visiting);
     }
   }
 
@@ -1486,6 +1908,23 @@ export class MockSimulationCore {
       }
       freqHz = glitches.length > 0 ? 1e9 / PERIODIC_GLITCH_INTERVAL_NS : 0;
       duty = glitches.length > 0 ? Math.min(1, (glitches.length * FAULT_PIN_DURATION_NS) / winSpan) : 0;
+    } else if (ch.signalRole === "virtual") {
+      const steps = 512;
+      let prevLvl: 0 | 1 = initLevel;
+      let highCount = initLevel === 1 ? 1 : 0;
+      let risingCount = 0;
+      for (let i = 1; i <= steps; i += 1) {
+        const t = winTStartNs + (i / steps) * winSpan;
+        const lvl: 0 | 1 = this.evaluateChannelAt(ch, t) > 0.5 ? 1 : 0;
+        if (lvl === 1) highCount += 1;
+        if (lvl !== prevLvl) {
+          edges.push((i - 0.5) / steps);
+          if (lvl === 1) risingCount += 1;
+          prevLvl = lvl;
+        }
+      }
+      duty = highCount / (steps + 1);
+      freqHz = risingCount > 0 ? (risingCount * 1e9) / winSpan : 0;
     } else {
       const periodNs = ch.signalRole === "aux_bool" ? 100_000 : 50_000;
       const firstCycle = Math.floor(winTStartNs / periodNs);
@@ -1579,6 +2018,25 @@ export class MockSimulationCore {
         const stateId = Math.round(this.evaluateChannelAt(ch, mid));
         const x0Norm = clamp((tA - winTStartNs) / winSpan, 0, 1);
         const x1Norm = clamp((tB - winTStartNs) / winSpan, 0, 1);
+        if (segments.length > 0 && segments[segments.length - 1].stateId === stateId) {
+          segments[segments.length - 1].x1Norm = x1Norm;
+        } else {
+          segments.push({
+            x0Norm,
+            x1Norm,
+            stateId,
+            colorIdx: Math.max(0, stateId),
+          });
+        }
+      }
+    } else if (ch.signalRole === "virtual") {
+      const steps = 256;
+      for (let i = 0; i < steps; i += 1) {
+        const tA = winTStartNs + (i / steps) * winSpan;
+        const tB = winTStartNs + ((i + 1) / steps) * winSpan;
+        const stateId = Math.round(this.evaluateChannelAt(ch, (tA + tB) * 0.5));
+        const x0Norm = i / steps;
+        const x1Norm = (i + 1) / steps;
         if (segments.length > 0 && segments[segments.length - 1].stateId === stateId) {
           segments[segments.length - 1].x1Norm = x1Norm;
         } else {

@@ -20,20 +20,25 @@ use ddscope_core::types::{
     ScopeId, SourceId, SyncGroupId,
 };
 use ddscope_core::{
-    CoreWorkspace, RegisteredChannelInfo, ScopeConfig, ScopeLaneKind, ScopeSummary,
-    ScopeTrackBinding, SourceConfig, SourceProtocolConfig, SourceRuntimeState, SourceSummary,
-    SourceTelemetrySnapshot, SourceTransportConfig, SyncGroupUpdate, WorkspaceTelemetrySnapshot,
+    AnalogToDigitalMode, CalculusMode, CoreWorkspace, PowerOutputFlags, RegisteredChannelInfo,
+    ScopeConfig, ScopeLaneKind, ScopeSummary, ScopeTrackBinding, SourceConfig, SourceProtocolConfig,
+    SourceRuntimeState, SourceSummary, SourceTelemetrySnapshot, SourceTransportConfig, StateLabelSpec,
+    StateRangeRule, StateValueEntry, SyncGroupUpdate, ToAnalogMode, ToStateMachineMode,
+    VirtualNodeConfig, VirtualNodeSummary, VirtualOperatorConfig, WindowMetricKind,
+    WorkspaceTelemetrySnapshot,
 };
 
 use super::dto::{
-    ApiErrorDto, ChannelModalityDto, ChannelNodeDto, ChannelTreeSnapshotDto, ClockConfigDto,
-    CreateSourceRequestDto, DownlinkPayloadDto, DownlinkReceiptDto, EdgeSlopeDto,
-    FixedFieldSpecDto, ProtocolConfigDto, ScopeLaneKindDto, ScopeViewportConfigDto,
-    ScopeViewportSummaryDto, SendDownlinkRequestDto, SerialFlowControlDto, SerialParityDto,
-    SerialPortInfoDto, SerialStopBitsDto, SourceChannelGroupDto, SourceRuntimeStateDto,
-    SourceSummaryDto, SourceTelemetryDto, StateLabelEntryDto, SyncGroupUpdateDto,
-    TransportConfigDto, TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto,
-    WorkspaceTelemetryEvent,
+    AnalogToDigitalModeDto, ApiErrorDto, CalculusModeDto, ChannelModalityDto, ChannelNodeDto,
+    ChannelTreeSnapshotDto, ClockConfigDto, CreateSourceRequestDto, DownlinkPayloadDto,
+    DownlinkReceiptDto, EdgeSlopeDto, FixedFieldSpecDto, PowerOutputFlagsDto, ProtocolConfigDto,
+    ScopeLaneKindDto, ScopeViewportConfigDto, ScopeViewportSummaryDto, SendDownlinkRequestDto,
+    SerialFlowControlDto, SerialParityDto, SerialPortInfoDto, SerialStopBitsDto,
+    SourceChannelGroupDto, SourceRuntimeStateDto, SourceSummaryDto, SourceTelemetryDto,
+    StateLabelEntryDto, StateLabelSpecDto, StateRangeRuleDto, StateValueEntryDto,
+    SyncGroupUpdateDto, ToAnalogModeDto, ToStateMachineModeDto, TransportConfigDto,
+    TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto, VirtualNodeConfigDto,
+    VirtualNodeSummaryDto, VirtualOperatorDto, WindowMetricKindDto, WorkspaceTelemetryEvent,
 };
 use ddscope_core::workspace::DownlinkRequest;
 
@@ -564,18 +569,42 @@ pub fn build_channel_tree_dto(ws: &CoreWorkspace) -> ChannelTreeSnapshotDto {
             (dto.source_id.clone(), dto)
         })
         .collect();
+    let any_source_running = source_summaries.values().any(|s| {
+        matches!(
+            s.state,
+            SourceRuntimeStateDto::Running
+                | SourceRuntimeStateDto::Connecting
+                | SourceRuntimeStateDto::Reconnecting
+        )
+    });
 
     let core_tree = ws.channel_tree();
     let mut groups = Vec::with_capacity(core_tree.sources.len().max(source_summaries.len()));
 
     for group in core_tree.sources {
         let src_id_str = group.source_id.as_str().to_owned();
-        let summary = source_summaries.remove(&src_id_str).unwrap_or_else(|| SourceSummaryDto {
-            source_id: src_id_str.clone(),
-            display_name: src_id_str,
-            transport_kind: "unknown".to_string(),
-            state: SourceRuntimeStateDto::Stopped,
-            raw_recording_path: None,
+        let summary = source_summaries.remove(&src_id_str).unwrap_or_else(|| {
+            if src_id_str == ddscope_core::VIRTUAL_SOURCE_ID {
+                SourceSummaryDto {
+                    source_id: src_id_str.clone(),
+                    display_name: "Virtual Channels".to_string(),
+                    transport_kind: "virtual".to_string(),
+                    state: if any_source_running {
+                        SourceRuntimeStateDto::Running
+                    } else {
+                        SourceRuntimeStateDto::Stopped
+                    },
+                    raw_recording_path: None,
+                }
+            } else {
+                SourceSummaryDto {
+                    source_id: src_id_str.clone(),
+                    display_name: src_id_str,
+                    transport_kind: "unknown".to_string(),
+                    state: SourceRuntimeStateDto::Stopped,
+                    raw_recording_path: None,
+                }
+            }
         });
         let channels = group
             .channels
@@ -834,5 +863,496 @@ fn source_telemetry_to_dto(s: &SourceTelemetrySnapshot) -> SourceTelemetryDto {
         samples_per_sec: s.samples_per_sec,
         bytes_per_sec: s.bytes_per_sec,
         dropped_packets: s.dropped_packets.min(u32::MAX as u64) as u32,
+    }
+}
+
+/// Converts a [`VirtualNodeConfigDto`] into a core [`VirtualNodeConfig`].
+pub fn virtual_node_dto_to_core(dto: VirtualNodeConfigDto) -> VirtualNodeConfig {
+    let operator = match dto.operator {
+        VirtualOperatorDto::AnalogToDigital {
+            input_channel,
+            output_path,
+            mode,
+        } => VirtualOperatorConfig::AnalogToDigital {
+            input_channel,
+            output_path,
+            mode: match mode {
+                AnalogToDigitalModeDto::Schmitt {
+                    threshold,
+                    hysteresis,
+                    invert,
+                } => AnalogToDigitalMode::Schmitt {
+                    threshold,
+                    hysteresis,
+                    invert,
+                },
+                AnalogToDigitalModeDto::Window { low, high, invert } => {
+                    AnalogToDigitalMode::Window { low, high, invert }
+                }
+            },
+        },
+        VirtualOperatorDto::ToStateMachine { output_path, mode } => {
+            VirtualOperatorConfig::ToStateMachine {
+                output_path,
+                mode: match mode {
+                    ToStateMachineModeDto::RangeMap {
+                        input_channel,
+                        hysteresis,
+                        rules,
+                        default_state,
+                    } => ToStateMachineMode::RangeMap {
+                        input_channel,
+                        hysteresis,
+                        rules: rules
+                            .into_iter()
+                            .map(|r| StateRangeRule {
+                                min: r.min,
+                                max: r.max,
+                                code: r.code,
+                                name: r.name,
+                                color_rgba: r.color_rgba,
+                            })
+                            .collect(),
+                        default_state: StateLabelSpec {
+                            code: default_state.code,
+                            name: default_state.name,
+                            color_rgba: default_state.color_rgba,
+                        },
+                    },
+                    ToStateMachineModeDto::BitCombine {
+                        bit_channels,
+                        threshold,
+                        labels,
+                    } => ToStateMachineMode::BitCombine {
+                        bit_channels,
+                        threshold,
+                        labels: labels
+                            .into_iter()
+                            .map(|l| StateLabelSpec {
+                                code: l.code,
+                                name: l.name,
+                                color_rgba: l.color_rgba,
+                            })
+                            .collect(),
+                    },
+                },
+            }
+        }
+        VirtualOperatorDto::ToAnalog {
+            output_path,
+            unit,
+            mode,
+        } => VirtualOperatorConfig::ToAnalog {
+            output_path,
+            unit,
+            mode: match mode {
+                ToAnalogModeDto::LevelMap {
+                    input_channel,
+                    low_value,
+                    high_value,
+                    threshold,
+                    smoothing_tau_ms,
+                } => ToAnalogMode::LevelMap {
+                    input_channel,
+                    low_value,
+                    high_value,
+                    threshold,
+                    smoothing_tau_ms,
+                },
+                ToAnalogModeDto::BitWeightedDac {
+                    bit_channels,
+                    scale,
+                    offset,
+                    threshold,
+                } => ToAnalogMode::BitWeightedDac {
+                    bit_channels,
+                    scale,
+                    offset,
+                    threshold,
+                },
+                ToAnalogModeDto::StateValueMap {
+                    input_channel,
+                    entries,
+                    default_value,
+                } => ToAnalogMode::StateValueMap {
+                    input_channel,
+                    entries: entries
+                        .into_iter()
+                        .map(|e| StateValueEntry {
+                            code: e.code,
+                            value: e.value,
+                        })
+                        .collect(),
+                    default_value,
+                },
+            },
+        },
+        VirtualOperatorDto::Formula {
+            expression,
+            output_path,
+            unit,
+            output_digital,
+        } => VirtualOperatorConfig::Formula {
+            expression,
+            output_path,
+            unit,
+            output_digital,
+        },
+        VirtualOperatorDto::WindowStats {
+            input_channel,
+            output_path,
+            unit,
+            metric,
+            window_ms,
+        } => VirtualOperatorConfig::WindowStats {
+            input_channel,
+            output_path,
+            unit,
+            metric: match metric {
+                WindowMetricKindDto::Rms => WindowMetricKind::Rms,
+                WindowMetricKindDto::Mean => WindowMetricKind::Mean,
+                WindowMetricKindDto::PeakToPeak => WindowMetricKind::PeakToPeak,
+                WindowMetricKindDto::Min => WindowMetricKind::Min,
+                WindowMetricKindDto::Max => WindowMetricKind::Max,
+                WindowMetricKindDto::StdDev => WindowMetricKind::StdDev,
+            },
+            window_ms,
+        },
+        VirtualOperatorDto::Calculus {
+            input_channel,
+            output_path,
+            unit,
+            mode,
+        } => VirtualOperatorConfig::Calculus {
+            input_channel,
+            output_path,
+            unit,
+            mode: match mode {
+                CalculusModeDto::Derivative {
+                    scale,
+                    filter_tau_ms,
+                } => CalculusMode::Derivative {
+                    scale,
+                    filter_tau_ms,
+                },
+                CalculusModeDto::Integral {
+                    scale,
+                    dc_offset,
+                    initial_value,
+                    clamp_min,
+                    clamp_max,
+                } => CalculusMode::Integral {
+                    scale,
+                    dc_offset,
+                    initial_value,
+                    clamp_min,
+                    clamp_max,
+                },
+            },
+        },
+        VirtualOperatorDto::SinglePhasePower {
+            voltage_channel,
+            current_channel,
+            output_prefix,
+            voltage_scale,
+            voltage_offset,
+            current_scale,
+            current_offset,
+            nominal_freq_hz,
+            zero_cross_hysteresis_v,
+            min_freq_hz,
+            fallback_window_ms,
+            outputs,
+        } => VirtualOperatorConfig::SinglePhasePower {
+            voltage_channel,
+            current_channel,
+            output_prefix,
+            voltage_scale,
+            voltage_offset,
+            current_scale,
+            current_offset,
+            nominal_freq_hz,
+            zero_cross_hysteresis_v,
+            min_freq_hz,
+            fallback_window_ms,
+            outputs: PowerOutputFlags {
+                freq: outputs.freq,
+                u_rms: outputs.u_rms,
+                i_rms: outputs.i_rms,
+                p: outputs.p,
+                q1: outputs.q1,
+                q_tot: outputs.q_tot,
+                s: outputs.s,
+                pf: outputs.pf,
+                phi_deg: outputs.phi_deg,
+                u_pk: outputs.u_pk,
+                i_pk: outputs.i_pk,
+                energy_wh: outputs.energy_wh,
+            },
+        },
+    };
+
+    VirtualNodeConfig {
+        node_id: dto.node_id,
+        name: dto.name,
+        enabled: dto.enabled,
+        operator,
+    }
+}
+
+/// Converts a core [`VirtualNodeConfig`] into [`VirtualNodeConfigDto`].
+pub fn virtual_node_core_to_dto(cfg: VirtualNodeConfig) -> VirtualNodeConfigDto {
+    let operator = match cfg.operator {
+        VirtualOperatorConfig::AnalogToDigital {
+            input_channel,
+            output_path,
+            mode,
+        } => VirtualOperatorDto::AnalogToDigital {
+            input_channel,
+            output_path,
+            mode: match mode {
+                AnalogToDigitalMode::Schmitt {
+                    threshold,
+                    hysteresis,
+                    invert,
+                } => AnalogToDigitalModeDto::Schmitt {
+                    threshold,
+                    hysteresis,
+                    invert,
+                },
+                AnalogToDigitalMode::Window { low, high, invert } => {
+                    AnalogToDigitalModeDto::Window { low, high, invert }
+                }
+            },
+        },
+        VirtualOperatorConfig::ToStateMachine { output_path, mode } => {
+            VirtualOperatorDto::ToStateMachine {
+                output_path,
+                mode: match mode {
+                    ToStateMachineMode::RangeMap {
+                        input_channel,
+                        hysteresis,
+                        rules,
+                        default_state,
+                    } => ToStateMachineModeDto::RangeMap {
+                        input_channel,
+                        hysteresis,
+                        rules: rules
+                            .into_iter()
+                            .map(|r| StateRangeRuleDto {
+                                min: r.min,
+                                max: r.max,
+                                code: r.code,
+                                name: r.name,
+                                color_rgba: r.color_rgba,
+                            })
+                            .collect(),
+                        default_state: StateLabelSpecDto {
+                            code: default_state.code,
+                            name: default_state.name,
+                            color_rgba: default_state.color_rgba,
+                        },
+                    },
+                    ToStateMachineMode::BitCombine {
+                        bit_channels,
+                        threshold,
+                        labels,
+                    } => ToStateMachineModeDto::BitCombine {
+                        bit_channels,
+                        threshold,
+                        labels: labels
+                            .into_iter()
+                            .map(|l| StateLabelSpecDto {
+                                code: l.code,
+                                name: l.name,
+                                color_rgba: l.color_rgba,
+                            })
+                            .collect(),
+                    },
+                },
+            }
+        }
+        VirtualOperatorConfig::ToAnalog {
+            output_path,
+            unit,
+            mode,
+        } => VirtualOperatorDto::ToAnalog {
+            output_path,
+            unit,
+            mode: match mode {
+                ToAnalogMode::LevelMap {
+                    input_channel,
+                    low_value,
+                    high_value,
+                    threshold,
+                    smoothing_tau_ms,
+                } => ToAnalogModeDto::LevelMap {
+                    input_channel,
+                    low_value,
+                    high_value,
+                    threshold,
+                    smoothing_tau_ms,
+                },
+                ToAnalogMode::BitWeightedDac {
+                    bit_channels,
+                    scale,
+                    offset,
+                    threshold,
+                } => ToAnalogModeDto::BitWeightedDac {
+                    bit_channels,
+                    scale,
+                    offset,
+                    threshold,
+                },
+                ToAnalogMode::StateValueMap {
+                    input_channel,
+                    entries,
+                    default_value,
+                } => ToAnalogModeDto::StateValueMap {
+                    input_channel,
+                    entries: entries
+                        .into_iter()
+                        .map(|e| StateValueEntryDto {
+                            code: e.code,
+                            value: e.value,
+                        })
+                        .collect(),
+                    default_value,
+                },
+            },
+        },
+        VirtualOperatorConfig::Formula {
+            expression,
+            output_path,
+            unit,
+            output_digital,
+        } => VirtualOperatorDto::Formula {
+            expression,
+            output_path,
+            unit,
+            output_digital,
+        },
+        VirtualOperatorConfig::WindowStats {
+            input_channel,
+            output_path,
+            unit,
+            metric,
+            window_ms,
+        } => VirtualOperatorDto::WindowStats {
+            input_channel,
+            output_path,
+            unit,
+            metric: match metric {
+                WindowMetricKind::Rms => WindowMetricKindDto::Rms,
+                WindowMetricKind::Mean => WindowMetricKindDto::Mean,
+                WindowMetricKind::PeakToPeak => WindowMetricKindDto::PeakToPeak,
+                WindowMetricKind::Min => WindowMetricKindDto::Min,
+                WindowMetricKind::Max => WindowMetricKindDto::Max,
+                WindowMetricKind::StdDev => WindowMetricKindDto::StdDev,
+            },
+            window_ms,
+        },
+        VirtualOperatorConfig::Calculus {
+            input_channel,
+            output_path,
+            unit,
+            mode,
+        } => VirtualOperatorDto::Calculus {
+            input_channel,
+            output_path,
+            unit,
+            mode: match mode {
+                CalculusMode::Derivative {
+                    scale,
+                    filter_tau_ms,
+                } => CalculusModeDto::Derivative {
+                    scale,
+                    filter_tau_ms,
+                },
+                CalculusMode::Integral {
+                    scale,
+                    dc_offset,
+                    initial_value,
+                    clamp_min,
+                    clamp_max,
+                } => CalculusModeDto::Integral {
+                    scale,
+                    dc_offset,
+                    initial_value,
+                    clamp_min,
+                    clamp_max,
+                },
+            },
+        },
+        VirtualOperatorConfig::SinglePhasePower {
+            voltage_channel,
+            current_channel,
+            output_prefix,
+            voltage_scale,
+            voltage_offset,
+            current_scale,
+            current_offset,
+            nominal_freq_hz,
+            zero_cross_hysteresis_v,
+            min_freq_hz,
+            fallback_window_ms,
+            outputs,
+        } => VirtualOperatorDto::SinglePhasePower {
+            voltage_channel,
+            current_channel,
+            output_prefix,
+            voltage_scale,
+            voltage_offset,
+            current_scale,
+            current_offset,
+            nominal_freq_hz,
+            zero_cross_hysteresis_v,
+            min_freq_hz,
+            fallback_window_ms,
+            outputs: PowerOutputFlagsDto {
+                freq: outputs.freq,
+                u_rms: outputs.u_rms,
+                i_rms: outputs.i_rms,
+                p: outputs.p,
+                q1: outputs.q1,
+                q_tot: outputs.q_tot,
+                s: outputs.s,
+                pf: outputs.pf,
+                phi_deg: outputs.phi_deg,
+                u_pk: outputs.u_pk,
+                i_pk: outputs.i_pk,
+                energy_wh: outputs.energy_wh,
+            },
+        },
+    };
+
+    VirtualNodeConfigDto {
+        node_id: cfg.node_id,
+        name: cfg.name,
+        enabled: cfg.enabled,
+        operator,
+    }
+}
+
+/// Converts a core [`VirtualNodeSummary`] into [`VirtualNodeSummaryDto`] using `ws` channel metadata.
+pub fn virtual_summary_to_dto(ws: &CoreWorkspace, summary: VirtualNodeSummary) -> VirtualNodeSummaryDto {
+    let mut by_id = std::collections::HashMap::new();
+    for grp in ws.channel_tree().sources {
+        if grp.source_id.as_str() == ddscope_core::VIRTUAL_SOURCE_ID {
+            for ch in grp.channels {
+                by_id.insert(ch.channel_id, registered_channel_to_dto(ch));
+            }
+        }
+    }
+    let output_channels = summary
+        .output_channels
+        .into_iter()
+        .filter_map(|cid| by_id.remove(&cid))
+        .collect();
+    VirtualNodeSummaryDto {
+        node_id: summary.node_id,
+        name: summary.name,
+        enabled: summary.enabled,
+        output_channels,
     }
 }

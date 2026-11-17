@@ -4,10 +4,11 @@ use std::time::Duration;
 use ddscope_core::CoreWorkspace;
 use ddscope_desktop_lib::commands::convert;
 use ddscope_desktop_lib::commands::{
-    ClockConfigDto, CreateSourceRequestDto, DesktopBridgeState, DownlinkPayloadDto, EdgeSlopeDto,
-    ProtocolConfigDto, ScopeLaneKindDto, ScopeTrackBindingDto, ScopeViewportConfigDto,
-    SendDownlinkRequestDto, SyncGroupUpdateDto, TransportConfigDto, TriggerConditionDto,
-    TriggerSweepModeDto, TxPriorityDto,
+    AnalogToDigitalModeDto, ClockConfigDto, CreateSourceRequestDto, DesktopBridgeState,
+    DownlinkPayloadDto, EdgeSlopeDto, PowerOutputFlagsDto, ProtocolConfigDto, ScopeLaneKindDto,
+    ScopeTrackBindingDto, ScopeViewportConfigDto, SendDownlinkRequestDto, SyncGroupUpdateDto,
+    TransportConfigDto, TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto,
+    VirtualNodeConfigDto, VirtualOperatorDto,
 };
 
 fn make_sim_create_request(source_id: &str) -> CreateSourceRequestDto {
@@ -645,6 +646,110 @@ async fn channel_counter_clock_mode_control_plane_roundtrip() {
             drift_compensation: false,
         }
     );
+
+    ws.shutdown().await.expect("shutdown workspace");
+}
+
+#[tokio::test]
+async fn virtual_channels_and_single_phase_power_control_plane_roundtrip() {
+    let ws = Arc::new(CoreWorkspace::new(tokio::runtime::Handle::current()));
+    let state = DesktopBridgeState::with_workspace(Arc::clone(&ws));
+
+    state
+        .create_source(make_sim_create_request("sim0"))
+        .expect("create sim0");
+    state.start_source("sim0".to_string()).expect("start sim0");
+
+    let a2d_summary = state
+        .upsert_virtual_channel(VirtualNodeConfigDto {
+            node_id: "v_cmp".to_string(),
+            name: "Zero Cross".to_string(),
+            enabled: true,
+            operator: VirtualOperatorDto::AnalogToDigital {
+                input_channel: "sim0/ch0".to_string(),
+                output_path: "zc_cmp".to_string(),
+                mode: AnalogToDigitalModeDto::Schmitt {
+                    threshold: 0.0,
+                    hysteresis: 0.2,
+                    invert: false,
+                },
+            },
+        })
+        .expect("upsert a2d virtual channel");
+    assert_eq!(a2d_summary.output_channels.len(), 1);
+
+    let pwr_summary = state
+        .upsert_virtual_channel(VirtualNodeConfigDto {
+            node_id: "v_pwr".to_string(),
+            name: "Single Phase Power".to_string(),
+            enabled: true,
+            operator: VirtualOperatorDto::SinglePhasePower {
+                voltage_channel: "sim0/ch0".to_string(),
+                current_channel: "sim0/ch1".to_string(),
+                output_prefix: "grid".to_string(),
+                voltage_scale: 1.0,
+                voltage_offset: 0.0,
+                current_scale: 1.0,
+                current_offset: 0.0,
+                nominal_freq_hz: 50.0,
+                zero_cross_hysteresis_v: 0.1,
+                min_freq_hz: 5.0,
+                fallback_window_ms: 100.0,
+                outputs: PowerOutputFlagsDto {
+                    freq: true,
+                    u_rms: true,
+                    i_rms: true,
+                    p: true,
+                    q1: true,
+                    q_tot: true,
+                    s: true,
+                    pf: true,
+                    phi_deg: true,
+                    u_pk: true,
+                    i_pk: true,
+                    energy_wh: true,
+                },
+            },
+        })
+        .expect("upsert single_phase_power virtual node");
+    assert_eq!(pwr_summary.output_channels.len(), 12);
+
+    let list = state.list_virtual_channels().expect("list virtual channels");
+    assert_eq!(list.len(), 2);
+
+    // Channel tree exposes the derived "virtual" group, while get_source_configs excludes it.
+    let tree = state.get_channel_tree().expect("get_channel_tree");
+    let virt_grp = tree
+        .sources
+        .iter()
+        .find(|g| g.source.source_id == "virtual")
+        .expect("virtual source group must appear in channel tree");
+    assert_eq!(virt_grp.channels.len(), 13);
+    assert!(virt_grp.channels.iter().any(|c| c.local_path == "grid.u_rms"));
+    assert!(virt_grp.channels.iter().any(|c| c.local_path == "grid.p"));
+
+    let exported_sources = state.get_source_configs().expect("get_source_configs");
+    assert_eq!(exported_sources.len(), 1);
+    assert_eq!(exported_sources[0].source_id, "sim0");
+
+    // Wait briefly for live sim0 acquisition to drive samples into virtual/zc_cmp
+    let virt_id = ddscope_core::types::SourceId::new("virtual");
+    let zc_entry = ws.find_channel(&virt_id, "zc_cmp").expect("zc_cmp entry");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while zc_entry.total_samples() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for live samples on virtual/zc_cmp"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(state
+        .remove_virtual_channel("v_cmp".to_string())
+        .expect("remove v_cmp"));
+    assert_eq!(state.list_virtual_channels().unwrap().len(), 1);
+    assert_eq!(state.clear_virtual_channels().expect("clear remaining"), 1);
+    assert!(state.list_virtual_channels().unwrap().is_empty());
 
     ws.shutdown().await.expect("shutdown workspace");
 }

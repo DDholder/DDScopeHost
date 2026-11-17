@@ -15,7 +15,7 @@ use super::dto::{
     ApiErrorDto, ChannelTreeSnapshotDto, CreateSourceRequestDto, DownlinkReceiptDto,
     EngineStatusDto, RawRecorderRequestDto, ScopeViewportConfigDto, ScopeViewportSummaryDto,
     SeekReplayRequestDto, SendDownlinkRequestDto, SerialPortInfoDto, SourceSummaryDto,
-    SyncGroupUpdateDto,
+    SyncGroupUpdateDto, VirtualNodeConfigDto, VirtualNodeSummaryDto,
 };
 
 const DEFAULT_FALLBACK_QUOTA_BYTES: usize = 2 * 1024 * 1024 * 1024;
@@ -341,6 +341,41 @@ impl DesktopBridgeState {
     pub fn clear_default_project_config(&self) -> Result<bool, ApiErrorDto> {
         let path = portable_default_project_config_path()?;
         clear_default_project_config_at_path(&path)
+    }
+
+    /// Implements `list_virtual_channels`.
+    pub fn list_virtual_channels(&self) -> Result<Vec<VirtualNodeConfigDto>, ApiErrorDto> {
+        let Some(ws) = self.workspace() else {
+            return Ok(Vec::new());
+        };
+        Ok(ws
+            .list_virtual_nodes()
+            .into_iter()
+            .map(convert::virtual_node_core_to_dto)
+            .collect())
+    }
+
+    /// Implements `upsert_virtual_channel`.
+    pub fn upsert_virtual_channel(
+        &self,
+        config: VirtualNodeConfigDto,
+    ) -> Result<VirtualNodeSummaryDto, ApiErrorDto> {
+        let ws = self.require_live_workspace("upsert_virtual_channel")?;
+        let core_cfg = convert::virtual_node_dto_to_core(config);
+        let summary = ws.upsert_virtual_node(core_cfg).map_err(ApiErrorDto::from)?;
+        Ok(convert::virtual_summary_to_dto(&ws, summary))
+    }
+
+    /// Implements `remove_virtual_channel`.
+    pub fn remove_virtual_channel(&self, node_id: String) -> Result<bool, ApiErrorDto> {
+        let ws = self.require_live_workspace("remove_virtual_channel")?;
+        ws.remove_virtual_node(&node_id).map_err(ApiErrorDto::from)
+    }
+
+    /// Implements `clear_virtual_channels`.
+    pub fn clear_virtual_channels(&self) -> Result<u32, ApiErrorDto> {
+        let ws = self.require_live_workspace("clear_virtual_channels")?;
+        Ok(ws.clear_virtual_nodes().min(u32::MAX as usize) as u32)
     }
 }
 

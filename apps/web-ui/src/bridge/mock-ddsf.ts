@@ -11,6 +11,9 @@ import type {
   SerialPortInfoDto_Serialize,
   SourceSummaryDto_Serialize,
   SyncGroupUpdateDto_Deserialize,
+  VirtualNodeConfigDto_Deserialize,
+  VirtualNodeConfigDto_Serialize,
+  VirtualNodeSummaryDto_Serialize,
   WorkspaceTelemetryEvent,
 } from "./bindings.ts";
 import { MockSimulationCore } from "./mock-ddsf-core.ts";
@@ -334,5 +337,23 @@ export class MockDdsfController {
 
   injectGlitch(): Promise<number> {
     return this.callRpc<number>("injectGlitch");
+  }
+
+  listVirtualChannels(): Promise<VirtualNodeConfigDto_Serialize[]> {
+    return this.callRpc<VirtualNodeConfigDto_Serialize[]>("listVirtualChannels");
+  }
+
+  upsertVirtualChannel(
+    config: VirtualNodeConfigDto_Deserialize,
+  ): Promise<VirtualNodeSummaryDto_Serialize> {
+    return this.callRpc<VirtualNodeSummaryDto_Serialize>("upsertVirtualChannel", config);
+  }
+
+  removeVirtualChannel(nodeId: string): Promise<boolean> {
+    return this.callRpc<boolean>("removeVirtualChannel", nodeId);
+  }
+
+  clearVirtualChannels(): Promise<number> {
+    return this.callRpc<number>("clearVirtualChannels");
   }
 }

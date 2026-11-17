@@ -6,8 +6,16 @@ import type {
   SourceChannelGroupDto_Serialize,
   TriggerConditionDto,
   TriggerSweepModeDto,
+  VirtualNodeConfigDto_Deserialize,
+  VirtualNodeConfigDto_Serialize,
 } from "../bridge/bindings.ts";
 import { normalizeSourceConfigToSerialize } from "../bridge/source-config-normalize.ts";
+import {
+  expandVirtualOutputSpecs,
+  normalizeVirtualNodeConfig,
+  sortVirtualNodesTopologically,
+  validateVirtualNodeConfig,
+} from "../bridge/virtual-eval.ts";
 import type { AnalogLayoutMode } from "../scope-engine/layout.ts";
 import type {
   ScopeTrackUiBinding,
@@ -38,6 +46,7 @@ export const CANVAS_CONFIG_SCHEMA_V1 = "ddscope.canvas.v1" as const;
 export const BOARD_CONFIG_SCHEMA_V1 = "ddscope.board.v1" as const;
 export const PROJECT_CONFIG_SCHEMA_V1 = "ddscope.project.v1" as const;
 export const COMMANDS_CONFIG_SCHEMA_V1 = "ddscope.commands.v1" as const;
+export const VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1 = "ddscope.virtual_channels.v1" as const;
 
 export interface DownlinkUiConfig {
   targetSource: string;
@@ -64,7 +73,7 @@ export const DEFAULT_DOWNLINK_UI_CONFIG: DownlinkUiConfig = {
 export interface BoardUiLayoutStateV1 {
   mockRateHz: 60 | 120;
   sidebarCollapsed: boolean;
-  sidebarTab: "sources" | "toolbox" | "commands";
+  sidebarTab: "sources" | "virtual" | "toolbox" | "commands";
   downlinkBarCollapsed: boolean;
   focusedScopeId: number | null;
   activeCanvasId: number | null;
@@ -74,6 +83,12 @@ export interface CommandsConfigFileV1 {
   schema: typeof COMMANDS_CONFIG_SCHEMA_V1;
   exportedAt: string;
   commands: CommandDefinition[];
+}
+
+export interface VirtualChannelsConfigFileV1 {
+  schema: typeof VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1;
+  exportedAt: string;
+  virtualChannels: VirtualNodeConfigDto_Serialize[];
 }
 
 export interface SourcesConfigFileV1 {
@@ -174,6 +189,7 @@ export interface ProjectConfigFileV1 {
   schema: typeof PROJECT_CONFIG_SCHEMA_V1;
   exportedAt: string;
   sources: CreateSourceRequestDto_Serialize[];
+  virtualChannels?: VirtualNodeConfigDto_Serialize[];
   board: ProjectBoardSectionsV1;
 }
 
@@ -487,6 +503,12 @@ export function parseSourcesConfigJson(jsonText: string): SourcesConfigFileV1 {
     );
   }
 
+  if (parsed.schema === VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${SOURCES_CONFIG_SCHEMA_V1}', got virtual channels config ('${parsed.schema}'). Please load it from the Virtual Channels panel.`,
+    );
+  }
+
   if (parsed.schema !== SOURCES_CONFIG_SCHEMA_V1) {
     throw new Error(
       `Unsupported sources config schema '${String(parsed.schema ?? "missing")}'. Expected '${SOURCES_CONFIG_SCHEMA_V1}'.`,
@@ -710,12 +732,14 @@ export function serializeBoardConfig(input: BoardExportInput): string {
 export function serializeProjectConfig(
   input: BoardExportInput & {
     sources: ReadonlyArray<CreateSourceRequestDto_Deserialize>;
+    virtualChannels?: ReadonlyArray<VirtualNodeConfigDto_Deserialize>;
   },
 ): string {
   const payload: ProjectConfigFileV1 = {
     schema: PROJECT_CONFIG_SCHEMA_V1,
     exportedAt: new Date().toISOString(),
     sources: input.sources.map((src) => normalizeSourceConfigForExport(src)),
+    virtualChannels: (input.virtualChannels ?? []).map((n) => normalizeVirtualNodeConfig(n)),
     board: buildBoardConfigSections(input),
   };
 
@@ -792,7 +816,9 @@ function normalizeUiLayoutState(
       ? "toolbox"
       : uiRec.sidebarTab === "commands"
         ? "commands"
-        : "sources";
+        : uiRec.sidebarTab === "virtual"
+          ? "virtual"
+          : "sources";
   return {
     mockRateHz: uiRec.mockRateHz === 60 ? 60 : 120,
     sidebarCollapsed: Boolean(uiRec.sidebarCollapsed),
@@ -961,6 +987,12 @@ export function parseCommandsConfigJson(jsonText: string): CommandsConfigFileV1 
     );
   }
 
+  if (parsed.schema === VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${COMMANDS_CONFIG_SCHEMA_V1}', got virtual channels config ('${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}'). Please load it from the Virtual Channels panel.`,
+    );
+  }
+
   if (parsed.schema !== COMMANDS_CONFIG_SCHEMA_V1) {
     throw new Error(
       `Unsupported commands config schema '${String(parsed.schema ?? "missing")}'. Expected '${COMMANDS_CONFIG_SCHEMA_V1}'.`,
@@ -983,6 +1015,140 @@ export function parseCommandsConfigJson(jsonText: string): CommandsConfigFileV1 
     exportedAt:
       typeof parsed.exportedAt === "string" ? parsed.exportedAt : new Date().toISOString(),
     commands,
+  };
+}
+
+const VALID_VIRTUAL_OPERATOR_KINDS = new Set([
+  "analog_to_digital",
+  "to_state_machine",
+  "to_analog",
+  "formula",
+  "window_stats",
+  "calculus",
+  "single_phase_power",
+]);
+
+function validateAndNormalizeVirtualNodesList(
+  rawList: unknown,
+  fieldLabel: string,
+): VirtualNodeConfigDto_Serialize[] {
+  if (!Array.isArray(rawList)) {
+    throw new Error(`'${fieldLabel}' field must be an array.`);
+  }
+
+  const seenIds = new Set<string>();
+  const seenOutputs = new Set<string>();
+  const normalizedList: VirtualNodeConfigDto_Serialize[] = [];
+
+  for (let idx = 0; idx < rawList.length; idx += 1) {
+    const item = rawList[idx];
+    if (!isRecord(item)) {
+      throw new Error(`${fieldLabel}[${idx}] must be an object.`);
+    }
+    if (typeof item.node_id !== "string" || item.node_id.trim().length === 0) {
+      throw new Error(`${fieldLabel}[${idx}].node_id must be a non-empty string.`);
+    }
+    if (typeof item.name !== "string") {
+      throw new Error(`${fieldLabel}[${idx}].name must be a string.`);
+    }
+    if (!isRecord(item.operator) || typeof item.operator.kind !== "string") {
+      throw new Error(`${fieldLabel}[${idx}].operator.kind must be a string.`);
+    }
+    if (!VALID_VIRTUAL_OPERATOR_KINDS.has(item.operator.kind)) {
+      throw new Error(
+        `${fieldLabel}[${idx}].operator.kind '${item.operator.kind}' is unsupported.`,
+      );
+    }
+
+    const normalized = normalizeVirtualNodeConfig(
+      item as unknown as VirtualNodeConfigDto_Deserialize,
+    );
+    validateVirtualNodeConfig(normalized);
+
+    if (seenIds.has(normalized.node_id)) {
+      throw new Error(`${fieldLabel} contains duplicate node_id '${normalized.node_id}'.`);
+    }
+    seenIds.add(normalized.node_id);
+
+    for (const outSpec of expandVirtualOutputSpecs(normalized)) {
+      if (seenOutputs.has(outSpec.fullPath)) {
+        throw new Error(`${fieldLabel} contains duplicate output channel '${outSpec.fullPath}'.`);
+      }
+      seenOutputs.add(outSpec.fullPath);
+    }
+
+    normalizedList.push(normalized);
+  }
+
+  return sortVirtualNodesTopologically(normalizedList);
+}
+
+export function serializeVirtualChannelsConfig(
+  nodes: ReadonlyArray<VirtualNodeConfigDto_Deserialize>,
+): string {
+  const payload: VirtualChannelsConfigFileV1 = {
+    schema: VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1,
+    exportedAt: new Date().toISOString(),
+    virtualChannels: nodes.map((node) => normalizeVirtualNodeConfig(node)),
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+export function parseVirtualChannelsConfigJson(
+  jsonText: string,
+): VirtualChannelsConfigFileV1 {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid JSON syntax in virtual channels config: ${msg}`);
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error("Virtual channels config root must be a JSON object.");
+  }
+
+  if (parsed.schema === SOURCES_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}', got sources config ('${SOURCES_CONFIG_SCHEMA_V1}'). Please load it from the Sources sidebar.`,
+    );
+  }
+
+  if (parsed.schema === BOARD_CONFIG_SCHEMA_V1 || parsed.schema === CANVAS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}', got board config ('${parsed.schema}'). Please load it from the Stage toolbar.`,
+    );
+  }
+
+  if (parsed.schema === PROJECT_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}', got project config ('${PROJECT_CONFIG_SCHEMA_V1}'). Please load it from the Project toolbar.`,
+    );
+  }
+
+  if (parsed.schema === COMMANDS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}', got commands config ('${COMMANDS_CONFIG_SCHEMA_V1}'). Please load it from the Commands panel.`,
+    );
+  }
+
+  if (parsed.schema !== VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Unsupported virtual channels config schema '${String(parsed.schema ?? "missing")}'. Expected '${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}'.`,
+    );
+  }
+
+  const virtualChannels = validateAndNormalizeVirtualNodesList(
+    parsed.virtualChannels,
+    "virtualChannels",
+  );
+
+  return {
+    schema: VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1,
+    exportedAt:
+      typeof parsed.exportedAt === "string" ? parsed.exportedAt : new Date().toISOString(),
+    virtualChannels,
   };
 }
 
@@ -1020,6 +1186,12 @@ export function parseBoardConfigJson(jsonText: string): BoardConfigFileV1 {
   if (parsed.schema === COMMANDS_CONFIG_SCHEMA_V1) {
     throw new Error(
       `Expected schema '${BOARD_CONFIG_SCHEMA_V1}', got commands config ('${COMMANDS_CONFIG_SCHEMA_V1}'). Please load it from the Commands panel.`,
+    );
+  }
+
+  if (parsed.schema === VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${BOARD_CONFIG_SCHEMA_V1}', got virtual channels config ('${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}'). Please load it from the Virtual Channels panel.`,
     );
   }
 
@@ -1103,6 +1275,12 @@ export function parseProjectConfigJson(jsonText: string): ProjectConfigFileV1 {
     );
   }
 
+  if (parsed.schema === VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1) {
+    throw new Error(
+      `Expected schema '${PROJECT_CONFIG_SCHEMA_V1}', got virtual channels config ('${VIRTUAL_CHANNELS_CONFIG_SCHEMA_V1}'). Please load it from the Virtual Channels panel.`,
+    );
+  }
+
   if (parsed.schema !== PROJECT_CONFIG_SCHEMA_V1) {
     throw new Error(
       `Unsupported project config schema '${String(parsed.schema ?? "missing")}'. Expected '${PROJECT_CONFIG_SCHEMA_V1}'.`,
@@ -1110,6 +1288,10 @@ export function parseProjectConfigJson(jsonText: string): ProjectConfigFileV1 {
   }
 
   const sources = validateAndNormalizeSourcesList(parsed.sources, "sources");
+  const virtualChannels =
+    parsed.virtualChannels !== undefined
+      ? validateAndNormalizeVirtualNodesList(parsed.virtualChannels, "virtualChannels")
+      : [];
   if (!isRecord(parsed.board)) {
     throw new Error("Project config 'board' field must be an object.");
   }
@@ -1119,6 +1301,7 @@ export function parseProjectConfigJson(jsonText: string): ProjectConfigFileV1 {
     exportedAt:
       typeof parsed.exportedAt === "string" ? parsed.exportedAt : new Date().toISOString(),
     sources,
+    virtualChannels,
     board: validateAndNormalizeBoardSections(parsed.board, "board"),
   };
 }
@@ -1536,7 +1719,9 @@ export function rehydrateBoardFromConfig(args: {
         ? "toolbox"
         : file.ui.sidebarTab === "commands"
           ? "commands"
-          : "sources",
+          : file.ui.sidebarTab === "virtual"
+            ? "virtual"
+            : "sources",
     downlinkBarCollapsed: Boolean(file.ui.downlinkBarCollapsed),
     focusedScopeId,
     activeCanvasId,
