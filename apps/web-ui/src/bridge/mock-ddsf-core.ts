@@ -406,6 +406,12 @@ export class MockSimulationCore {
         ? req.protocol.channel_names
         : ["ch0", "ch1", "ch2"];
     }
+    if (req.protocol.codec === "just_typed") {
+      const names = req.protocol.channels
+        .map((c) => c.name.trim())
+        .filter((n) => n.length > 0);
+      return names.length > 0 ? names : ["ch0", "ch1"];
+    }
     if (req.protocol.codec === "fixed_schema_binary") {
       return req.protocol.fields
         .filter((f) => !f.is_state_enum && f.scalar_type !== "bool")
@@ -433,6 +439,30 @@ export class MockSimulationCore {
       if (req.transport.remote_tx_addr && req.transport.remote_tx_addr.trim().length > 0) {
         if (!isValidUdpSocketAddr(req.transport.remote_tx_addr)) {
           throw new Error(`invalid UDP remote_tx_addr '${req.transport.remote_tx_addr}'`);
+        }
+      }
+    }
+    if (req.protocol.codec === "just_typed") {
+      if (!Array.isArray(req.protocol.channels) || req.protocol.channels.length === 0) {
+        throw new Error("just_typed requires at least 1 channel");
+      }
+      const seen = new Set<string>();
+      for (const ch of req.protocol.channels) {
+        const trimmed = ch.name.trim();
+        if (!trimmed) {
+          throw new Error("just_typed channel name must not be empty");
+        }
+        if (seen.has(trimmed)) {
+          throw new Error(`just_typed duplicate channel name '${trimmed}'`);
+        }
+        seen.add(trimmed);
+        if (
+          ch.data_type !== undefined &&
+          ch.data_type !== "float" &&
+          ch.data_type !== "int" &&
+          ch.data_type !== "uint"
+        ) {
+          throw new Error(`just_typed invalid data_type '${String(ch.data_type)}'`);
         }
       }
     }
@@ -509,6 +539,30 @@ export class MockSimulationCore {
             idx % 2 === 0 ? "aux_sine" : "aux_cos",
             idx,
             pickId(name, "scalar", "f32", unit),
+          ),
+        );
+      });
+    } else if (req.protocol.codec === "just_typed") {
+      req.protocol.channels.forEach((chSpec, idx) => {
+        const name = chSpec.name.trim();
+        const scalarType =
+          chSpec.data_type === "int"
+            ? "i32"
+            : chSpec.data_type === "uint"
+              ? "u32"
+              : "f32";
+        channels.push(
+          this.makeChannel(
+            req.source_id,
+            name,
+            name,
+            null,
+            "scalar",
+            scalarType,
+            [],
+            idx % 2 === 0 ? "aux_sine" : "aux_cos",
+            idx,
+            pickId(name, "scalar", scalarType, null),
           ),
         );
       });
@@ -1572,10 +1626,22 @@ export class MockSimulationCore {
         if (mod < 480_000_000) return 1; // ALIGN
         return 2; // CLOSED_LOOP
       }
-      case "aux_sine":
-        return 5.0 * this.motorKp * Math.sin(omega * tSec + ch.channelIndex * 0.6);
-      case "aux_cos":
-        return 5.0 * this.motorKp * Math.cos(omega * tSec + ch.channelIndex * 0.6);
+      case "aux_sine": {
+        const val = 5.0 * this.motorKp * Math.sin(omega * tSec + ch.channelIndex * 0.6);
+        if (ch.scalarType === "i32") return Math.round(val * 100);
+        if (ch.scalarType === "u32") {
+          return Math.max(0, Math.round((val + 5.0 * this.motorKp) * 10));
+        }
+        return val;
+      }
+      case "aux_cos": {
+        const val = 5.0 * this.motorKp * Math.cos(omega * tSec + ch.channelIndex * 0.6);
+        if (ch.scalarType === "i32") return Math.round(val * 100);
+        if (ch.scalarType === "u32") {
+          return Math.max(0, Math.round((val + 5.0 * this.motorKp) * 10));
+        }
+        return val;
+      }
       case "aux_bool": {
         const periodNs = 100_000;
         const phase = (((tNs % periodNs) + periodNs) % periodNs) / periodNs;

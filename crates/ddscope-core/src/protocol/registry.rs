@@ -10,7 +10,7 @@ use crate::protocol::fixed_binary::{
     ChecksumKind, ChecksumScope, FixedFieldSpec, FixedSchemaBinaryCodec, FixedSchemaBinaryConfig,
     SimPresetCodec, SimPresetConfig,
 };
-use crate::protocol::justfloat::{JustFloatCodec, JustFloatConfig};
+use crate::protocol::justfloat::{JustFloatCodec, JustFloatConfig, JustTypedCodec, JustTypedConfig};
 use crate::protocol::ProtocolCodec;
 use crate::types::{CoreError, CoreResult, Endianness, LinearScale, ScalarType, StateEnumMap};
 
@@ -36,12 +36,13 @@ impl ProtocolRegistry {
         Self::default()
     }
 
-    /// Creates a [`ProtocolRegistry`] pre-populated with all Phase 1 built-in codecs:
-    /// `"sim_preset"`, `"just_float"`, `"fixed_schema_binary"`, and `"fire_water"`.
+    /// Creates a [`ProtocolRegistry`] pre-populated with all built-in codecs:
+    /// `"sim_preset"`, `"just_float"`, `"just_typed"`, `"fixed_schema_binary"`, and `"fire_water"`.
     pub fn with_builtin_codecs() -> Self {
         let mut reg = Self::new();
         reg.register("sim_preset", create_sim_preset_codec);
         reg.register("just_float", create_just_float_codec);
+        reg.register("just_typed", create_just_typed_codec);
         reg.register("fixed_schema_binary", create_fixed_schema_binary_codec);
         reg.register("fire_water", create_fire_water_codec);
         reg
@@ -164,6 +165,13 @@ pub fn create_just_float_codec(json_config: &str) -> CoreResult<Box<dyn Protocol
     Ok(Box::new(JustFloatCodec::new(cfg)?))
 }
 
+/// Factory function for `"just_typed"`.
+pub fn create_just_typed_codec(json_config: &str) -> CoreResult<Box<dyn ProtocolCodec>> {
+    let cfg: JustTypedConfig = serde_json::from_str(json_config)
+        .map_err(|e| CoreError::InvalidConfig(format!("invalid JustTyped config: {e}")))?;
+    Ok(Box::new(JustTypedCodec::new(cfg)?))
+}
+
 /// Factory function for `"fixed_schema_binary"` (accepts both [`FixedSchemaBinaryConfig`] and
 /// control-plane `ProtocolConfigDto::FixedSchemaBinary` JSON shapes).
 pub fn create_fixed_schema_binary_codec(
@@ -231,6 +239,7 @@ mod tests {
                 "fire_water",
                 "fixed_schema_binary",
                 "just_float",
+                "just_typed",
                 "sim_preset"
             ]
         );
@@ -242,6 +251,15 @@ mod tests {
             .create("just_float", r#"{"channel_names":["ia","ib"]}"#)
             .unwrap();
         assert_eq!(jf.protocol_name(), "JustFloat");
+
+        let jt = reg
+            .create(
+                "just_typed",
+                r#"{"channels":[{"name":"vbus","data_type":"float"},{"name":"cnt","data_type":"int"},{"name":"flags","data_type":"uint"}]}"#,
+            )
+            .unwrap();
+        assert_eq!(jt.protocol_name(), "JustTyped");
+        assert_eq!(jt.declared_channels().len(), 3);
 
         let fw = reg
             .create("fire_water", r#"{"channel_names":["ch0","ch1"]}"#)

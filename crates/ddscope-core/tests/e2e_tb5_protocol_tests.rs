@@ -455,6 +455,7 @@ fn downlink_encoding_and_protocol_registry_roundtrip() {
             "fire_water",
             "fixed_schema_binary",
             "just_float",
+            "just_typed",
             "sim_preset",
         ]
     );
@@ -463,6 +464,11 @@ fn downlink_encoding_and_protocol_registry_roundtrip() {
         reg.create("sim_preset", "{}").unwrap(),
         reg.create("just_float", r#"{"channel_names":["ch0","ch1"]}"#)
             .unwrap(),
+        reg.create(
+            "just_typed",
+            r#"{"channels":[{"name":"vbus","data_type":"float"},{"name":"cnt","data_type":"int"},{"name":"status","data_type":"uint"}]}"#,
+        )
+        .unwrap(),
         reg.create(
             "fixed_schema_binary",
             r#"{"header_magic":[170,85],"fields":[{"name":"vbus","scalar_type":"f32","scale":1.0,"offset":0.0,"unit":"V","is_state_enum":false}]}"#,

@@ -41,6 +41,8 @@ fn export_specta_bindings() {
         "DdsfSlotReadyDto",
         "DataBridgeAttachDto",
         "DataBridgeStatsDto",
+        "JustTypedKindDto",
+        "JustTypedChannelDto",
     ];
     for sym in expected_symbols {
         assert!(

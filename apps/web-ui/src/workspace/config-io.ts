@@ -2,6 +2,7 @@ import type {
   ChannelNodeDto_Serialize,
   CreateSourceRequestDto_Deserialize,
   CreateSourceRequestDto_Serialize,
+  ProtocolConfigDto_Serialize,
   ScopeLaneKindDto,
   SourceChannelGroupDto_Serialize,
   TriggerConditionDto,
@@ -261,6 +262,7 @@ const VALID_CLOCK_MODES = new Set([
 const VALID_PROTOCOL_CODECS = new Set([
   "sim_preset",
   "just_float",
+  "just_typed",
   "fixed_schema_binary",
   "fire_water",
 ]);
@@ -300,6 +302,29 @@ export function synthesizeFallbackSourceConfig(
     1,
     group.channels.filter((ch) => ch.modality === "scalar").length || safeChannelNames.length,
   );
+  const hasTypedInts = group.channels.some(
+    (ch) => ch.scalar_type === "i32" || ch.scalar_type === "u32",
+  );
+  const hasNonScalar = group.channels.some(
+    (ch) =>
+      ch.modality === "state_machine" ||
+      ch.modality === "digital_bool" ||
+      ch.scalar_type === "bool",
+  );
+  const fallbackProtocol: ProtocolConfigDto_Serialize =
+    group.channels.length > 0 && hasTypedInts && !hasNonScalar
+      ? {
+          codec: "just_typed",
+          channels: group.channels.map((ch, idx) => ({
+            name: (ch.local_path || ch.display_name || `ch${idx}`).trim(),
+            data_type:
+              ch.scalar_type === "i32" ? "int" : ch.scalar_type === "u32" ? "uint" : "float",
+          })),
+        }
+      : {
+          codec: "just_float",
+          channel_names: safeChannelNames,
+        };
 
   switch (group.source.transport_kind) {
     case "serial":
@@ -320,10 +345,7 @@ export function synthesizeFallbackSourceConfig(
           mode: "tier2_software_pll",
           nominal_sample_rate_hz: 100_000,
         },
-        protocol: {
-          codec: "just_float",
-          channel_names: safeChannelNames,
-        },
+        protocol: fallbackProtocol,
         auto_start: autoStart,
       };
     case "udp":
@@ -341,10 +363,7 @@ export function synthesizeFallbackSourceConfig(
           mode: "tier2_software_pll",
           nominal_sample_rate_hz: 100_000,
         },
-        protocol: {
-          codec: "just_float",
-          channel_names: safeChannelNames,
-        },
+        protocol: fallbackProtocol,
         auto_start: autoStart,
       };
     case "tcp_client":
@@ -361,10 +380,7 @@ export function synthesizeFallbackSourceConfig(
           mode: "tier2_software_pll",
           nominal_sample_rate_hz: 100_000,
         },
-        protocol: {
-          codec: "just_float",
-          channel_names: safeChannelNames,
-        },
+        protocol: fallbackProtocol,
         auto_start: autoStart,
       };
     case "tcp_server":
@@ -380,10 +396,7 @@ export function synthesizeFallbackSourceConfig(
           mode: "tier2_software_pll",
           nominal_sample_rate_hz: 100_000,
         },
-        protocol: {
-          codec: "just_float",
-          channel_names: safeChannelNames,
-        },
+        protocol: fallbackProtocol,
         auto_start: autoStart,
       };
     case "raw_file_replay":
@@ -402,10 +415,7 @@ export function synthesizeFallbackSourceConfig(
           mode: "tier2_software_pll",
           nominal_sample_rate_hz: 100_000,
         },
-        protocol: {
-          codec: "just_float",
-          channel_names: safeChannelNames,
-        },
+        protocol: fallbackProtocol,
         auto_start: autoStart,
       };
     case "sim":
@@ -490,6 +500,40 @@ function validateAndNormalizeSourcesList(
           isRecord(item.protocol) ? item.protocol.codec : undefined,
         )}' is invalid.`,
       );
+    }
+    if (item.protocol.codec === "just_typed") {
+      if (!Array.isArray(item.protocol.channels) || item.protocol.channels.length === 0) {
+        throw new Error(`${fieldLabel}[${idx}].protocol.channels must be a non-empty array.`);
+      }
+      const seenNames = new Set<string>();
+      for (let cIdx = 0; cIdx < item.protocol.channels.length; cIdx += 1) {
+        const chRaw = item.protocol.channels[cIdx];
+        if (!isRecord(chRaw)) {
+          throw new Error(`${fieldLabel}[${idx}].protocol.channels[${cIdx}] must be an object.`);
+        }
+        if (typeof chRaw.name !== "string" || chRaw.name.trim().length === 0) {
+          throw new Error(
+            `${fieldLabel}[${idx}].protocol.channels[${cIdx}].name must be a non-empty string.`,
+          );
+        }
+        const trimmedName = chRaw.name.trim();
+        if (seenNames.has(trimmedName)) {
+          throw new Error(
+            `${fieldLabel}[${idx}].protocol.channels contains duplicate name '${trimmedName}'.`,
+          );
+        }
+        seenNames.add(trimmedName);
+        if (
+          chRaw.data_type !== undefined &&
+          chRaw.data_type !== "float" &&
+          chRaw.data_type !== "int" &&
+          chRaw.data_type !== "uint"
+        ) {
+          throw new Error(
+            `${fieldLabel}[${idx}].protocol.channels[${cIdx}].data_type '${String(chRaw.data_type)}' is invalid.`,
+          );
+        }
+      }
     }
     if (typeof item.auto_start !== "boolean") {
       throw new Error(`${fieldLabel}[${idx}].auto_start must be a boolean.`);

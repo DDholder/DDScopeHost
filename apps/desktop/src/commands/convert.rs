@@ -1,11 +1,13 @@
 //! Validated bidirectional conversions between `tauri-specta` DTOs and `ddscope-core` types.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ddscope_core::clock::{ClockMode, ClockSyncConfig};
 use ddscope_core::protocol::{
     ChecksumKind, ChecksumScope, DownlinkPayload, FireWaterConfig, FixedFieldSpec,
-    FixedSchemaBinaryConfig, JustFloatConfig, SimPresetConfig, TransactionResult,
+    FixedSchemaBinaryConfig, JustFloatConfig, JustTypedChannelKind, JustTypedChannelSpec,
+    JustTypedConfig, SimPresetConfig, TransactionResult,
 };
 use ddscope_core::scope::{
     EdgeSlope, ScopeControllerConfig, TriggerCondition, TriggerSweepMode,
@@ -40,6 +42,7 @@ use super::dto::{
     TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto, VirtualNodeConfigDto,
     VirtualNodeSummaryDto, VirtualOperatorDto, WindowMetricKindDto, WorkspaceTelemetryEvent,
 };
+use super::dto::{JustTypedChannelDto, JustTypedKindDto};
 use ddscope_core::workspace::DownlinkRequest;
 
 /// Converts OS serial port metadata into the frontend DTO.
@@ -140,26 +143,35 @@ pub fn create_source_dto_to_core(req: CreateSourceRequestDto) -> Result<SourceCo
 
     let wire_format = match &req.protocol {
         ProtocolConfigDto::SimPreset => SimWireFormat::SimPreset,
-        ProtocolConfigDto::JustFloat { .. } => SimWireFormat::JustFloat,
+        ProtocolConfigDto::JustFloat { .. } | ProtocolConfigDto::JustTyped { .. } => {
+            SimWireFormat::JustFloat
+        }
         ProtocolConfigDto::FireWater { .. } => SimWireFormat::FireWaterCsv,
         ProtocolConfigDto::FixedSchemaBinary { .. } => SimWireFormat::SimPreset,
     };
 
     let sim_analog_channels = match &req.transport {
-        TransportConfigDto::Sim { analog_channels, .. } => *analog_channels,
+        TransportConfigDto::Sim { analog_channels, .. } => match &req.protocol {
+            ProtocolConfigDto::JustTyped { channels }
+                if !channels.is_empty() && channels.len() <= 16 =>
+            {
+                (channels.len() as u8).clamp(1, 16)
+            }
+            _ => *analog_channels,
+        },
         _ => 4,
     };
 
     let transport = match req.transport {
         TransportConfigDto::Sim {
             sample_rate_hz,
-            analog_channels,
+            analog_channels: _,
             enable_glitch,
             glitch_period_samples,
         } => {
             let cfg = SimConfig {
                 sample_rate_hz,
-                analog_channels,
+                analog_channels: sim_analog_channels,
                 enable_glitch,
                 glitch_period_samples,
                 wire_format,
@@ -324,6 +336,35 @@ pub fn create_source_dto_to_core(req: CreateSourceRequestDto) -> Result<SourceCo
         ProtocolConfigDto::JustFloat { channel_names } => {
             SourceProtocolConfig::JustFloat(JustFloatConfig::new(source_id_str, channel_names))
         }
+        ProtocolConfigDto::JustTyped { channels } => {
+            if channels.is_empty() {
+                return Err(ApiErrorDto::invalid_config(
+                    "just_typed requires at least 1 channel",
+                ));
+            }
+            let mut seen = HashSet::with_capacity(channels.len());
+            let mut specs = Vec::with_capacity(channels.len());
+            for ch in channels {
+                let trimmed = ch.name.trim();
+                if trimmed.is_empty() {
+                    return Err(ApiErrorDto::invalid_config(
+                        "just_typed channel name must not be empty",
+                    ));
+                }
+                if !seen.insert(trimmed.to_owned()) {
+                    return Err(ApiErrorDto::invalid_config(format!(
+                        "just_typed duplicate channel name `{trimmed}`"
+                    )));
+                }
+                let kind = match ch.data_type {
+                    JustTypedKindDto::Float => JustTypedChannelKind::Float,
+                    JustTypedKindDto::Int => JustTypedChannelKind::Int,
+                    JustTypedKindDto::Uint => JustTypedChannelKind::Uint,
+                };
+                specs.push(JustTypedChannelSpec::new(trimmed, kind));
+            }
+            SourceProtocolConfig::JustTyped(JustTypedConfig::new(source_id_str, specs))
+        }
         ProtocolConfigDto::FireWater { channel_names } => SourceProtocolConfig::FireWater(
             FireWaterConfig::from_channel_names(source_id_str, channel_names),
         ),
@@ -465,6 +506,20 @@ pub fn source_config_core_to_dto(cfg: &SourceConfig) -> Result<CreateSourceReque
         SourceProtocolConfig::SimPreset(_) => ProtocolConfigDto::SimPreset,
         SourceProtocolConfig::JustFloat(jf) => ProtocolConfigDto::JustFloat {
             channel_names: jf.channel_names.clone(),
+        },
+        SourceProtocolConfig::JustTyped(jt) => ProtocolConfigDto::JustTyped {
+            channels: jt
+                .channels
+                .iter()
+                .map(|c| JustTypedChannelDto {
+                    name: c.name.clone(),
+                    data_type: match c.data_type {
+                        JustTypedChannelKind::Float => JustTypedKindDto::Float,
+                        JustTypedChannelKind::Int => JustTypedKindDto::Int,
+                        JustTypedChannelKind::Uint => JustTypedKindDto::Uint,
+                    },
+                })
+                .collect(),
         },
         SourceProtocolConfig::FireWater(fw) => ProtocolConfigDto::FireWater {
             channel_names: if !fw.channel_names.is_empty() {

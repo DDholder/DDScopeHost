@@ -22,8 +22,8 @@ use crate::clock::{ClockMode, ClockSyncConfig, ClockSyncDiagnostics, StreamClock
 use crate::dag::{VirtualDagEngine, VirtualNodeConfig, VirtualNodeSummary, VIRTUAL_SOURCE_ID};
 use crate::protocol::{
     encode_hex_string, DownlinkPayload, FireWaterConfig, FireWaterCsvCodec, FixedSchemaBinaryCodec,
-    FixedSchemaBinaryConfig, JustFloatCodec, JustFloatConfig, ProtocolCodec, ProtocolRegistry,
-    SimPresetCodec, SimPresetConfig, TransactionResult,
+    FixedSchemaBinaryConfig, JustFloatCodec, JustFloatConfig, JustTypedCodec, JustTypedConfig,
+    ProtocolCodec, ProtocolRegistry, SimPresetCodec, SimPresetConfig, TransactionResult,
 };
 use crate::scope::{
     DdsfFramePacker, EdgeSlope, HysteresisBandState, ScopeController, ScopeControllerConfig,
@@ -86,6 +86,7 @@ impl SourceTransportConfig {
 pub enum SourceProtocolConfig {
     SimPreset(SimPresetConfig),
     JustFloat(JustFloatConfig),
+    JustTyped(JustTypedConfig),
     FixedSchemaBinary(FixedSchemaBinaryConfig),
     FireWater(FireWaterConfig),
     Custom {
@@ -638,6 +639,10 @@ fn build_source_session_components(
         SourceProtocolConfig::JustFloat(mut jf_cfg) => {
             jf_cfg.source_id = config.source_id.as_str().to_owned();
             Box::new(JustFloatCodec::new(jf_cfg)?)
+        }
+        SourceProtocolConfig::JustTyped(mut jt_cfg) => {
+            jt_cfg.source_id = config.source_id.as_str().to_owned();
+            Box::new(JustTypedCodec::new(jt_cfg)?)
         }
         SourceProtocolConfig::FixedSchemaBinary(mut fb_cfg) => {
             fb_cfg.source_id = config.source_id.as_str().to_owned();

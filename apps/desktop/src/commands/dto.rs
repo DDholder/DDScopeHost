@@ -182,6 +182,24 @@ pub struct FixedFieldSpecDto {
     pub is_state_enum: bool,
 }
 
+/// Per-channel 32-bit parse type used by `JustTyped` protocol mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum JustTypedKindDto {
+    #[default]
+    Float,
+    Int,
+    Uint,
+}
+
+/// Channel specification used by `JustTyped` protocol mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct JustTypedChannelDto {
+    pub name: String,
+    #[serde(default)]
+    pub data_type: JustTypedKindDto,
+}
+
 /// Protocol codec configuration attached to a data source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "codec", rename_all = "snake_case")]
@@ -189,6 +207,9 @@ pub enum ProtocolConfigDto {
     SimPreset,
     JustFloat {
         channel_names: Vec<String>,
+    },
+    JustTyped {
+        channels: Vec<JustTypedChannelDto>,
     },
     FixedSchemaBinary {
         header_magic: Vec<u8>,

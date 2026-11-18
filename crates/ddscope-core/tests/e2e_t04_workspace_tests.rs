@@ -16,7 +16,10 @@ use ddscope_core::clock::ClockMode;
 use ddscope_core::ddsf::{
     DdsfBlockKind, DdsfZeroCopyReader, DDSF_FLAG_PINNED_ACTIVE, DDSF_MAGIC, DDSF_VERSION_V1,
 };
-use ddscope_core::protocol::{JustFloatConfig, SimPresetConfig};
+use ddscope_core::protocol::{
+    JustFloatConfig, JustTypedChannelKind, JustTypedChannelSpec, JustTypedConfig, SimPresetConfig,
+    JUSTFLOAT_TAIL_MAGIC,
+};
 use ddscope_core::scope::{
     EdgeSlope, ScopeControllerConfig, TriggerCondition, TriggerRuntimeState, TriggerSweepMode,
 };
@@ -25,7 +28,7 @@ use ddscope_core::transport::{
     host_monotonic_ns, DdrawReader, RawFileReplayConfig, RawTapDirection, SimConfig,
     SimWireFormat, TxPriority, DDRAW_VERSION,
 };
-use ddscope_core::types::{ScalarValue, ScopeId, SourceId, SyncGroupId};
+use ddscope_core::types::{ChannelKind, ScalarType, ScalarValue, ScopeId, SourceId, SyncGroupId};
 use ddscope_core::workspace::{
     CoreWorkspace, DownlinkRequest, ScopeConfig, ScopeTrackBinding, SourceConfig,
     SourceProtocolConfig, SourceRuntimeState, SourceTransportConfig, SyncGroupUpdate,
@@ -845,6 +848,79 @@ async fn t04_zero_copy_ddsf_pack_latency_within_budget() {
         p99_ns,
         budget_ns
     );
+
+    ws.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_just_typed_workspace_ingests_float_int_uint_and_preserves_32bit_snapshots() {
+    let guard = TempFileGuard::new("just_typed_replay", "bin");
+    let mut raw = Vec::new();
+    for _ in 0..16 {
+        raw.extend_from_slice(&12.5_f32.to_le_bytes());
+        raw.extend_from_slice(&(-42_i32).to_le_bytes());
+        raw.extend_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        raw.extend_from_slice(&JUSTFLOAT_TAIL_MAGIC);
+    }
+    std::fs::write(guard.path(), &raw).unwrap();
+
+    let ws = CoreWorkspace::new(Handle::current());
+    let src_id = SourceId::new("jt_src");
+    let replay_cfg = RawFileReplayConfig::offline(guard.path().to_path_buf());
+    let jt_cfg = JustTypedConfig::new(
+        src_id.as_str(),
+        vec![
+            JustTypedChannelSpec::new("vbus", JustTypedChannelKind::Float),
+            JustTypedChannelSpec::new("err_cnt", JustTypedChannelKind::Int),
+            JustTypedChannelSpec::new("status_u32", JustTypedChannelKind::Uint),
+        ],
+    );
+
+    ws.create_source(SourceConfig::new(
+        src_id.clone(),
+        SourceTransportConfig::RawFileReplay(replay_cfg),
+        ClockMode::Tier2SoftwarePll {
+            nominal_sample_rate_hz: Some(10_000.0),
+        },
+        SourceProtocolConfig::JustTyped(jt_cfg),
+    ))
+    .unwrap();
+
+    let ch_vbus = ws.find_channel(&src_id, "vbus").unwrap();
+    let ch_err = ws.find_channel(&src_id, "err_cnt").unwrap();
+    let ch_stat = ws.find_channel(&src_id, "status_u32").unwrap();
+    let extract_scalar = |entry: &ChannelEntry| match &entry.descriptor().kind {
+        ChannelKind::Scalar { scalar_type, .. } => Some(*scalar_type),
+        _ => None,
+    };
+    assert_eq!(extract_scalar(&ch_vbus), Some(ScalarType::F32));
+    assert_eq!(extract_scalar(&ch_err), Some(ScalarType::I32));
+    assert_eq!(extract_scalar(&ch_stat), Some(ScalarType::U32));
+
+    ws.start_source(&src_id).unwrap();
+    wait_until(
+        || {
+            ws.find_channel(&src_id, "status_u32")
+                .is_some_and(|e| e.total_samples() >= 16)
+        },
+        Duration::from_secs(5),
+        "just_typed replay decoded >= 16 samples",
+    )
+    .await;
+
+    let ddsf_bytes = ws.pack_ddsf_frame(host_monotonic_ns()).unwrap();
+    let reader = DdsfZeroCopyReader::new(&ddsf_bytes).unwrap();
+    let snaps = reader.snapshots().unwrap();
+
+    let snap_val = |cid: u32| -> Option<f64> {
+        snaps
+            .iter()
+            .find(|s| s.channel_num_id == cid)
+            .map(|s| s.val_f64)
+    };
+    assert_eq!(snap_val(ch_vbus.id().0), Some(12.5));
+    assert_eq!(snap_val(ch_err.id().0), Some(-42.0));
+    assert_eq!(snap_val(ch_stat.id().0), Some(f64::from(0xDEAD_BEEF_u32)));
 
     ws.shutdown().await.unwrap();
 }

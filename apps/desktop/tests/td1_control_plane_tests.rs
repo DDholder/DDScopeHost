@@ -5,10 +5,10 @@ use ddscope_core::CoreWorkspace;
 use ddscope_desktop_lib::commands::convert;
 use ddscope_desktop_lib::commands::{
     AnalogToDigitalModeDto, ClockConfigDto, CreateSourceRequestDto, DesktopBridgeState,
-    DownlinkPayloadDto, EdgeSlopeDto, PowerOutputFlagsDto, ProtocolConfigDto, ScopeLaneKindDto,
-    ScopeTrackBindingDto, ScopeViewportConfigDto, SendDownlinkRequestDto, SyncGroupUpdateDto,
-    TransportConfigDto, TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto,
-    VirtualNodeConfigDto, VirtualOperatorDto,
+    DownlinkPayloadDto, EdgeSlopeDto, JustTypedChannelDto, JustTypedKindDto, PowerOutputFlagsDto,
+    ProtocolConfigDto, ScopeLaneKindDto, ScopeTrackBindingDto, ScopeViewportConfigDto,
+    SendDownlinkRequestDto, SyncGroupUpdateDto, TransportConfigDto, TriggerConditionDto,
+    TriggerSweepModeDto, TxPriorityDto, VirtualNodeConfigDto, VirtualOperatorDto,
 };
 
 fn make_sim_create_request(source_id: &str) -> CreateSourceRequestDto {
@@ -750,6 +750,85 @@ async fn virtual_channels_and_single_phase_power_control_plane_roundtrip() {
     assert_eq!(state.list_virtual_channels().unwrap().len(), 1);
     assert_eq!(state.clear_virtual_channels().expect("clear remaining"), 1);
     assert!(state.list_virtual_channels().unwrap().is_empty());
+
+    ws.shutdown().await.expect("shutdown workspace");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn just_typed_control_plane_declares_per_channel_types_and_roundtrips_config() {
+    let ws = Arc::new(CoreWorkspace::new(tokio::runtime::Handle::current()));
+    let state = DesktopBridgeState::with_workspace(Arc::clone(&ws));
+
+    let req = CreateSourceRequestDto {
+        source_id: "jt_mcu".to_string(),
+        display_name: Some("MCU JustTyped".to_string()),
+        transport: TransportConfigDto::Udp {
+            bind_addr: "127.0.0.1:0".to_string(),
+            multicast_group: None,
+            recv_buffer_bytes: 1_048_576,
+            remote_tx_addr: None,
+        },
+        clock: ClockConfigDto::Tier2SoftwarePll {
+            nominal_sample_rate_hz: Some(20_000.0),
+        },
+        protocol: ProtocolConfigDto::JustTyped {
+            channels: vec![
+                JustTypedChannelDto {
+                    name: "va".to_string(),
+                    data_type: JustTypedKindDto::Float,
+                },
+                JustTypedChannelDto {
+                    name: "err_i32".to_string(),
+                    data_type: JustTypedKindDto::Int,
+                },
+                JustTypedChannelDto {
+                    name: "flags_u32".to_string(),
+                    data_type: JustTypedKindDto::Uint,
+                },
+            ],
+        },
+        auto_start: false,
+    };
+
+    state.create_source(req.clone()).expect("create just_typed source");
+
+    let tree = state.get_channel_tree().expect("get_channel_tree");
+    let grp = tree
+        .sources
+        .iter()
+        .find(|g| g.source.source_id == "jt_mcu")
+        .expect("jt_mcu source group must exist");
+    assert_eq!(grp.channels.len(), 3);
+    let scalar_of = |name: &str| {
+        grp.channels
+            .iter()
+            .find(|c| c.local_path == name)
+            .and_then(|c| c.scalar_type.as_deref())
+    };
+    assert_eq!(scalar_of("va"), Some("f32"));
+    assert_eq!(scalar_of("err_i32"), Some("i32"));
+    assert_eq!(scalar_of("flags_u32"), Some("u32"));
+
+    let cfgs = state.get_source_configs().expect("get_source_configs");
+    assert_eq!(cfgs.len(), 1);
+    assert_eq!(cfgs[0].protocol, req.protocol);
+
+    // Duplicate/empty channel names must be rejected clearly
+    let mut bad_dup = req.clone();
+    bad_dup.source_id = "jt_dup".to_string();
+    bad_dup.protocol = ProtocolConfigDto::JustTyped {
+        channels: vec![
+            JustTypedChannelDto {
+                name: "dup".to_string(),
+                data_type: JustTypedKindDto::Float,
+            },
+            JustTypedChannelDto {
+                name: "dup".to_string(),
+                data_type: JustTypedKindDto::Int,
+            },
+        ],
+    };
+    assert!(state.create_source(bad_dup).is_err());
 
     ws.shutdown().await.expect("shutdown workspace");
 }

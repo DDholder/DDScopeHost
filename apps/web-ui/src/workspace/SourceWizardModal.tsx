@@ -3,6 +3,7 @@ import type {
   ClockConfigDto_Deserialize,
   CreateSourceRequestDto_Deserialize,
   CreateSourceRequestDto_Serialize,
+  JustTypedKindDto,
   ProtocolConfigDto_Deserialize,
   SerialFlowControlDto,
   SerialParityDto,
@@ -61,8 +62,19 @@ function rolloverModulusToPreset(mod: number | null | undefined): RolloverPreset
 type WizardProtocolCodec =
   | "sim_preset"
   | "just_float"
+  | "just_typed"
   | "fire_water"
   | "fixed_schema_binary";
+
+const DEFAULT_JUST_TYPED_CHANNELS: ReadonlyArray<{
+  name: string;
+  data_type: JustTypedKindDto;
+}> = [
+  { name: "va", data_type: "float" },
+  { name: "vb", data_type: "float" },
+  { name: "iq_cnt", data_type: "int" },
+  { name: "status_word", data_type: "uint" },
+];
 
 export function SourceWizardModal() {
   const { t } = useI18n();
@@ -117,6 +129,9 @@ export function SourceWizardModal() {
   const [customRolloverModulus, setCustomRolloverModulus] = useState(10_000);
   const [syncDriftComp, setSyncDriftComp] = useState(true);
   const [channelNamesText, setChannelNamesText] = useState("va, vb, vc, iq");
+  const [justTypedChannels, setJustTypedChannels] = useState<
+    Array<{ name: string; data_type: JustTypedKindDto }>
+  >(() => DEFAULT_JUST_TYPED_CHANNELS.map((c) => ({ ...c })));
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -225,6 +240,14 @@ export function SourceWizardModal() {
           existingCfg.protocol.codec === "fire_water"
         ) {
           setChannelNamesText(existingCfg.protocol.channel_names.join(", "));
+        } else if (existingCfg.protocol.codec === "just_typed") {
+          const rows = existingCfg.protocol.channels.map((ch) => ({
+            name: ch.name,
+            data_type: ch.data_type,
+          }));
+          setJustTypedChannels(
+            rows.length > 0 ? rows : DEFAULT_JUST_TYPED_CHANNELS.map((c) => ({ ...c })),
+          );
         }
       } else {
         setSourceId(editingSourceId);
@@ -259,6 +282,7 @@ export function SourceWizardModal() {
       setCustomRolloverModulus(10_000);
       setSyncDriftComp(true);
       setChannelNamesText("va, vb, vc, iq");
+      setJustTypedChannels(DEFAULT_JUST_TYPED_CHANNELS.map((c) => ({ ...c })));
     }
 
     bridgeClient
@@ -279,6 +303,12 @@ export function SourceWizardModal() {
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
       return parsed.length > 0 ? parsed : ["ch0", "ch1"];
+    }
+    if (protocolCodec === "just_typed") {
+      const parsed = justTypedChannels
+        .map((c) => c.name.trim())
+        .filter((s) => s.length > 0);
+      return parsed.length > 0 ? parsed : ["ch0"];
     }
     if (protocolCodec === "fixed_schema_binary") {
       const baseProtocol = baseConfigRef.current?.protocol;
@@ -309,6 +339,7 @@ export function SourceWizardModal() {
   }, [
     protocolCodec,
     channelNamesText,
+    justTypedChannels,
     editingSourceId,
     channelGroups,
     simChannels,
@@ -491,6 +522,28 @@ export function SourceWizardModal() {
           channel_names: parsedNames.length > 0 ? parsedNames : ["ch0", "ch1"],
         };
         break;
+      case "just_typed": {
+        const seen = new Set<string>();
+        const channels: Array<{ name: string; data_type: JustTypedKindDto }> = [];
+        for (const ch of justTypedChannels) {
+          const trimmed = ch.name.trim();
+          if (!trimmed) {
+            setErrorMsg(t("wizard.errJustTypedEmptyName"));
+            return;
+          }
+          if (seen.has(trimmed)) {
+            setErrorMsg(t("wizard.errJustTypedDupName", { name: trimmed }));
+            return;
+          }
+          seen.add(trimmed);
+          channels.push({ name: trimmed, data_type: ch.data_type });
+        }
+        protocol = {
+          codec: "just_typed",
+          channels,
+        };
+        break;
+      }
       case "fire_water":
         protocol = {
           codec: "fire_water",
@@ -780,9 +833,11 @@ export function SourceWizardModal() {
               <select
                 value={protocolCodec}
                 onChange={(e) => setProtocolCodec(e.target.value as WizardProtocolCodec)}
+                data-testid="wizard-protocol-codec"
               >
                 <option value="sim_preset">{t("wizard.codec.sim")}</option>
                 <option value="just_float">{t("wizard.codec.justFloat")}</option>
+                <option value="just_typed">{t("wizard.codec.justTyped")}</option>
                 <option value="fire_water">{t("wizard.codec.fireWater")}</option>
                 <option value="fixed_schema_binary">{t("wizard.codec.fixedSchema")}</option>
               </select>
@@ -907,6 +962,75 @@ export function SourceWizardModal() {
                 onChange={(e) => setChannelNamesText(e.target.value)}
               />
             </label>
+          )}
+
+          {protocolCodec === "just_typed" && (
+            <div className="wizard-just-typed-box" data-testid="wizard-just-typed-box">
+              <div className="wizard-just-typed-header">
+                <span>{t("wizard.justTyped.channelsTitle")}</span>
+                <button
+                  type="button"
+                  className="scope-btn"
+                  data-testid="wizard-just-typed-add"
+                  onClick={() =>
+                    setJustTypedChannels((prev) => [
+                      ...prev,
+                      { name: `ch${prev.length}`, data_type: "float" },
+                    ])
+                  }
+                >
+                  {t("wizard.justTyped.addChannel")}
+                </button>
+              </div>
+              <div className="wizard-just-typed-rows">
+                {justTypedChannels.map((ch, idx) => (
+                  <div key={idx} className="wizard-just-typed-row">
+                    <span className="wizard-just-typed-idx">#{idx}</span>
+                    <input
+                      type="text"
+                      value={ch.name}
+                      placeholder={t("wizard.justTyped.namePlaceholder", { index: idx })}
+                      onChange={(ev) => {
+                        const nextName = ev.target.value;
+                        setJustTypedChannels((prev) =>
+                          prev.map((item, itemIdx) =>
+                            itemIdx === idx ? { ...item, name: nextName } : item,
+                          ),
+                        );
+                      }}
+                    />
+                    <select
+                      value={ch.data_type}
+                      onChange={(ev) => {
+                        const nextType = ev.target.value as JustTypedKindDto;
+                        setJustTypedChannels((prev) =>
+                          prev.map((item, itemIdx) =>
+                            itemIdx === idx ? { ...item, data_type: nextType } : item,
+                          ),
+                        );
+                      }}
+                    >
+                      <option value="float">{t("wizard.justTyped.type.float")}</option>
+                      <option value="int">{t("wizard.justTyped.type.int")}</option>
+                      <option value="uint">{t("wizard.justTyped.type.uint")}</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="scope-ch-del"
+                      title={t("wizard.justTyped.removeChannel")}
+                      disabled={justTypedChannels.length <= 1}
+                      onClick={() =>
+                        setJustTypedChannels((prev) =>
+                          prev.length <= 1 ? prev : prev.filter((_, itemIdx) => itemIdx !== idx),
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           <label className="wizard-check">

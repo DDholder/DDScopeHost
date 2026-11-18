@@ -66,6 +66,15 @@ export function normalizeSourceConfigToSerialize(
         channel_names: [...req.protocol.channel_names],
       };
       break;
+    case "just_typed":
+      protocol = {
+        codec: "just_typed",
+        channels: req.protocol.channels.map((ch) => ({
+          name: ch.name.trim(),
+          data_type: ch.data_type === "int" || ch.data_type === "uint" ? ch.data_type : "float",
+        })),
+      };
+      break;
     case "fire_water":
       protocol = {
         codec: "fire_water",

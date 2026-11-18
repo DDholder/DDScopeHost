@@ -268,6 +268,24 @@ export type FixedFieldSpecDto_Serialize = {
 	is_state_enum: boolean,
 };
 
+/**  Channel specification used by `JustTyped` protocol mode. */
+export type JustTypedChannelDto = JustTypedChannelDto_Serialize | JustTypedChannelDto_Deserialize;
+
+/**  Channel specification used by `JustTyped` protocol mode. */
+export type JustTypedChannelDto_Deserialize = {
+	name: string,
+	data_type?: JustTypedKindDto,
+};
+
+/**  Channel specification used by `JustTyped` protocol mode. */
+export type JustTypedChannelDto_Serialize = {
+	name: string,
+	data_type: JustTypedKindDto,
+};
+
+/**  Per-channel 32-bit parse type used by `JustTyped` protocol mode. */
+export type JustTypedKindDto = "float" | "int" | "uint";
+
 /**  Output channel selection flags for `SinglePhasePower`. */
 export type PowerOutputFlagsDto = {
 	freq: boolean,
@@ -288,10 +306,10 @@ export type PowerOutputFlagsDto = {
 export type ProtocolConfigDto = ProtocolConfigDto_Serialize | ProtocolConfigDto_Deserialize;
 
 /**  Protocol codec configuration attached to a data source. */
-export type ProtocolConfigDto_Deserialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Deserialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] };
+export type ProtocolConfigDto_Deserialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "just_typed"; channels: JustTypedChannelDto_Deserialize[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Deserialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] };
 
 /**  Protocol codec configuration attached to a data source. */
-export type ProtocolConfigDto_Serialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Serialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] };
+export type ProtocolConfigDto_Serialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "just_typed"; channels: JustTypedChannelDto_Serialize[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Serialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] };
 
 /**  Request payload for enabling/disabling bypass raw byte recording on a source. */
 export type RawRecorderRequestDto = RawRecorderRequestDto_Serialize | RawRecorderRequestDto_Deserialize;

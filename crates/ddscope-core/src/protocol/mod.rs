@@ -18,11 +18,12 @@ pub use fixed_binary::{
     SIM_PRESET_TAIL,
 };
 pub use justfloat::{
-    JustFloatCodec, JustFloatConfig, JustFloatStats, NonFinitePolicy, JUSTFLOAT_TAIL_MAGIC,
+    JustFloatCodec, JustFloatConfig, JustFloatStats, JustTypedChannelKind, JustTypedChannelSpec,
+    JustTypedCodec, JustTypedConfig, NonFinitePolicy, JUSTFLOAT_TAIL_MAGIC,
 };
 pub use registry::{
     create_fire_water_codec, create_fixed_schema_binary_codec, create_just_float_codec,
-    create_sim_preset_codec, ProtocolRegistry,
+    create_just_typed_codec, create_sim_preset_codec, ProtocolRegistry,
 };
 
 use std::sync::Arc;
