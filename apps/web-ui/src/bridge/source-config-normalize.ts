@@ -94,6 +94,17 @@ export function normalizeSourceConfigToSerialize(
         has_hw_tick_first_col: req.protocol.has_hw_tick_first_col,
       };
       break;
+    case "plugin":
+      protocol = {
+        codec: "plugin",
+        plugin_id: req.protocol.plugin_id.trim(),
+        config_json:
+          typeof req.protocol.config_json === "string" &&
+          req.protocol.config_json.trim().length > 0
+            ? req.protocol.config_json.trim()
+            : "{}",
+      };
+      break;
     default:
       protocol = { codec: "sim_preset" };
       break;

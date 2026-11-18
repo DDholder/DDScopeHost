@@ -3,6 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ddscope_core::plugin::{
+    discover_external_plugins, read_widget_plugin_bundle, resolve_plugin_search_dirs,
+};
 use ddscope_core::transport::list_serial_ports as core_list_serial_ports;
 use ddscope_core::types::{ScopeId, SourceId};
 use ddscope_core::CoreWorkspace;
@@ -13,9 +16,10 @@ use crate::data_bridge::{DataBridgeModeDto, DataBridgeStatsDto, ZeroCopyDataBrid
 use super::convert;
 use super::dto::{
     ApiErrorDto, ChannelTreeSnapshotDto, CreateSourceRequestDto, DownlinkReceiptDto,
-    EngineStatusDto, RawRecorderRequestDto, ScopeViewportConfigDto, ScopeViewportSummaryDto,
-    SeekReplayRequestDto, SendDownlinkRequestDto, SerialPortInfoDto, SourceSummaryDto,
-    SyncGroupUpdateDto, VirtualNodeConfigDto, VirtualNodeSummaryDto,
+    EngineStatusDto, ExternalPluginCatalogDto, RawRecorderRequestDto, ScopeViewportConfigDto,
+    ScopeViewportSummaryDto, SeekReplayRequestDto, SendDownlinkRequestDto, SerialPortInfoDto,
+    SourceSummaryDto, SyncGroupUpdateDto, VirtualNodeConfigDto, VirtualNodeSummaryDto,
+    WidgetPluginBundleDto,
 };
 
 const DEFAULT_FALLBACK_QUOTA_BYTES: usize = 2 * 1024 * 1024 * 1024;
@@ -376,6 +380,40 @@ impl DesktopBridgeState {
     pub fn clear_virtual_channels(&self) -> Result<u32, ApiErrorDto> {
         let ws = self.require_live_workspace("clear_virtual_channels")?;
         Ok(ws.clear_virtual_nodes().min(u32::MAX as usize) as u32)
+    }
+
+    /// Implements `list_external_plugins`.
+    pub fn list_external_plugins(&self) -> Result<ExternalPluginCatalogDto, ApiErrorDto> {
+        let catalog = match self.workspace() {
+            Some(ws) => ws.external_plugin_catalog(),
+            None => discover_external_plugins(&resolve_plugin_search_dirs()),
+        };
+        Ok(convert::external_plugin_catalog_to_dto(catalog))
+    }
+
+    /// Implements `reload_external_plugins`.
+    pub fn reload_external_plugins(&self) -> Result<ExternalPluginCatalogDto, ApiErrorDto> {
+        let catalog = match self.workspace() {
+            Some(ws) => ws.reload_external_plugins(),
+            None => discover_external_plugins(&resolve_plugin_search_dirs()),
+        };
+        Ok(convert::external_plugin_catalog_to_dto(catalog))
+    }
+
+    /// Implements `load_widget_plugin_bundle`.
+    pub fn load_widget_plugin_bundle(
+        &self,
+        plugin_id: String,
+    ) -> Result<WidgetPluginBundleDto, ApiErrorDto> {
+        let bundle = match self.workspace() {
+            Some(ws) => ws.load_widget_plugin_bundle(&plugin_id),
+            None => {
+                let catalog = discover_external_plugins(&resolve_plugin_search_dirs());
+                read_widget_plugin_bundle(&catalog, &plugin_id)
+            }
+        }
+        .map_err(ApiErrorDto::from)?;
+        Ok(convert::loaded_widget_bundle_to_dto(bundle))
     }
 }
 

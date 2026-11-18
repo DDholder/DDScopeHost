@@ -6,6 +6,7 @@ import {
   type CreateSourceRequestDto_Serialize,
   type DownlinkReceiptDto,
   type EngineStatusDto,
+  type ExternalPluginCatalogDto_Serialize,
   type RawRecorderRequestDto_Deserialize,
   type ScopeViewportConfigDto_Deserialize,
   type ScopeViewportSummaryDto_Serialize,
@@ -17,6 +18,7 @@ import {
   type VirtualNodeConfigDto_Deserialize,
   type VirtualNodeConfigDto_Serialize,
   type VirtualNodeSummaryDto_Serialize,
+  type WidgetPluginBundleDto_Serialize,
   type WorkspaceTelemetryEvent,
 } from "./bindings.ts";
 import { DDSF_VERSION_V1 } from "./ddsf-spec.ts";
@@ -30,6 +32,7 @@ import {
   ZeroCopyDataBridgeReceiver,
   type ZeroCopyBridgeHostAdapter,
 } from "./zero-copy-bridge.ts";
+import { getExternalPluginCatalog } from "../widgets/plugin-registry.ts";
 
 export const DEFAULT_PROJECT_STORAGE_KEY = "ddscope.defaultProjectConfig.v1";
 
@@ -69,6 +72,9 @@ export interface ControlPlaneCommands {
   ): Promise<VirtualNodeSummaryDto_Serialize>;
   removeVirtualChannel?(nodeId: string): Promise<boolean>;
   clearVirtualChannels?(): Promise<number>;
+  listExternalPlugins?(): Promise<ExternalPluginCatalogDto_Serialize>;
+  reloadExternalPlugins?(): Promise<ExternalPluginCatalogDto_Serialize>;
+  loadWidgetPluginBundle?(pluginId: string): Promise<WidgetPluginBundleDto_Serialize>;
 }
 
 export interface ControlPlaneHostAdapter {
@@ -779,6 +785,72 @@ export class BridgeClient {
           : Promise.resolve(0),
       () => this.mock.clearVirtualChannels(),
     );
+  }
+
+  async listExternalPlugins(): Promise<ExternalPluginCatalogDto_Serialize> {
+    if (this.host.isTauriHost() && this.host.commands.listExternalPlugins) {
+      try {
+        return await this.host.commands.listExternalPlugins();
+      } catch (err: unknown) {
+        if (!isStubNotImplementedError(err)) {
+          throw err;
+        }
+      }
+    }
+    if (typeof window !== "undefined" && typeof fetch === "function") {
+      try {
+        const res = await fetch("/api/ddscope-plugins/catalog");
+        if (res.ok) {
+          return (await res.json()) as ExternalPluginCatalogDto_Serialize;
+        }
+      } catch {
+        // Ignore dev server fetch errors when running offline/headless tests
+      }
+    }
+    return getExternalPluginCatalog();
+  }
+
+  async reloadExternalPlugins(): Promise<ExternalPluginCatalogDto_Serialize> {
+    if (this.host.isTauriHost() && this.host.commands.reloadExternalPlugins) {
+      try {
+        return await this.host.commands.reloadExternalPlugins();
+      } catch (err: unknown) {
+        if (!isStubNotImplementedError(err)) {
+          throw err;
+        }
+      }
+    }
+    if (typeof window !== "undefined" && typeof fetch === "function") {
+      try {
+        const res = await fetch("/api/ddscope-plugins/reload", { method: "POST" });
+        if (res.ok) {
+          return (await res.json()) as ExternalPluginCatalogDto_Serialize;
+        }
+      } catch {
+        // Ignore dev server fetch errors when running offline/headless tests
+      }
+    }
+    return getExternalPluginCatalog();
+  }
+
+  async loadWidgetPluginBundle(pluginId: string): Promise<WidgetPluginBundleDto_Serialize> {
+    if (this.host.isTauriHost() && this.host.commands.loadWidgetPluginBundle) {
+      try {
+        return await this.host.commands.loadWidgetPluginBundle(pluginId);
+      } catch (err: unknown) {
+        if (!isStubNotImplementedError(err)) {
+          throw err;
+        }
+      }
+    }
+    if (typeof window !== "undefined" && typeof fetch === "function") {
+      const res = await fetch(`/api/ddscope-plugins/widget/${encodeURIComponent(pluginId)}`);
+      if (res.ok) {
+        return (await res.json()) as WidgetPluginBundleDto_Serialize;
+      }
+      throw new Error(`External widget plugin '${pluginId}' bundle returned HTTP ${res.status}`);
+    }
+    throw new Error(`External widget plugin '${pluginId}' loader unavailable in this environment`);
   }
 }
 

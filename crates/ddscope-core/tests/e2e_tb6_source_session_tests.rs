@@ -1065,7 +1065,7 @@ struct DummyCustomCodec {
 }
 
 impl ProtocolCodec for DummyCustomCodec {
-    fn protocol_name(&self) -> &'static str {
+    fn protocol_name(&self) -> &str {
         "MockTb6"
     }
 

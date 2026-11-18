@@ -42,6 +42,10 @@ import {
   type DdsfTrackStatsView,
 } from "./ddsf-parser.ts";
 import {
+  getPluginProtocolInfo,
+  isValidExternalPluginId,
+} from "../widgets/plugin-registry.ts";
+import {
   isValidUdpSocketAddr,
   normalizeSourceConfigToSerialize,
 } from "./source-config-normalize.ts";
@@ -417,6 +421,15 @@ export class MockSimulationCore {
         .filter((f) => !f.is_state_enum && f.scalar_type !== "bool")
         .map((f) => f.name);
     }
+    if (req.protocol.codec === "plugin") {
+      const info = getPluginProtocolInfo(req.protocol.plugin_id);
+      if (info && info.channels_preview.length > 0) {
+        return info.channels_preview
+          .filter((c) => c.scalar_type !== "bool")
+          .map((c) => c.name);
+      }
+      return ["ch0", "ch1"];
+    }
     const analogCount =
       req.transport.kind === "sim" ? clamp(req.transport.analog_channels, 1, 16) : 4;
     if (req.source_id === "sim0" && analogCount === 4) {
@@ -463,6 +476,24 @@ export class MockSimulationCore {
           ch.data_type !== "uint"
         ) {
           throw new Error(`just_typed invalid data_type '${String(ch.data_type)}'`);
+        }
+      }
+    }
+    if (req.protocol.codec === "plugin") {
+      const pid = req.protocol.plugin_id.trim();
+      if (!isValidExternalPluginId(pid)) {
+        throw new Error(`invalid external protocol plugin_id '${req.protocol.plugin_id}'`);
+      }
+      const cfg = req.protocol.config_json.trim();
+      if (cfg.length > 0) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(cfg);
+        } catch {
+          throw new Error(`plugin '${pid}' config_json must be valid JSON`);
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error(`plugin '${pid}' config_json must be a JSON object`);
         }
       }
     }
@@ -594,6 +625,40 @@ export class MockSimulationCore {
             role,
             idx,
             pickId(field.name, modality, field.scalar_type, unit),
+          ),
+        );
+      });
+    } else if (req.protocol.codec === "plugin") {
+      const info = getPluginProtocolInfo(req.protocol.plugin_id);
+      const specs =
+        info && info.channels_preview.length > 0
+          ? info.channels_preview
+          : [
+              { name: "ch0", scalar_type: "f32", unit: null },
+              { name: "ch1", scalar_type: "f32", unit: null },
+            ];
+      specs.forEach((spec, idx) => {
+        const modality: ChannelModalityDto =
+          spec.scalar_type === "bool" ? "digital_bool" : "scalar";
+        const role: InternalChannelDef["signalRole"] =
+          modality === "digital_bool"
+            ? "aux_bool"
+            : idx % 2 === 0
+              ? "aux_sine"
+              : "aux_cos";
+        const unit = spec.unit ?? null;
+        channels.push(
+          this.makeChannel(
+            req.source_id,
+            spec.name,
+            spec.name,
+            unit,
+            modality,
+            spec.scalar_type || "f32",
+            [],
+            role,
+            idx,
+            pickId(spec.name, modality, spec.scalar_type || "f32", unit),
           ),
         );
       });

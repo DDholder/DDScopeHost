@@ -219,6 +219,10 @@ pub enum ProtocolConfigDto {
     FireWater {
         channel_names: Vec<String>,
     },
+    Plugin {
+        plugin_id: String,
+        config_json: String,
+    },
 }
 
 /// Request payload for `create_source`.
@@ -667,4 +671,88 @@ pub struct VirtualNodeSummaryDto {
     pub name: String,
     pub enabled: bool,
     pub output_channels: Vec<ChannelNodeDto>,
+}
+
+/// Option entry inside an external plugin's `select` parameter schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PluginSelectOptionDto {
+    pub value: String,
+    pub label_en: String,
+    pub label_zh: String,
+}
+
+/// Declarative parameter definition exposed by an external protocol/widget `plugin.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct PluginParamSpecDto {
+    pub key: String,
+    pub label_en: String,
+    pub label_zh: String,
+    pub param_type: String,
+    pub default_json: String,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+    pub options: Vec<PluginSelectOptionDto>,
+    pub description_en: Option<String>,
+    pub description_zh: Option<String>,
+}
+
+/// Preview channel hint declared by an external protocol plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PluginChannelPreviewDto {
+    pub name: String,
+    pub scalar_type: String,
+    pub unit: Option<String>,
+}
+
+/// Discovered external protocol (data engine) plugin descriptor DTO.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct ProtocolPluginInfoDto {
+    pub id: String,
+    pub name_en: String,
+    pub name_zh: String,
+    pub description_en: Option<String>,
+    pub description_zh: Option<String>,
+    pub version: String,
+    pub backend_mode: String,
+    pub available: bool,
+    pub error: Option<String>,
+    pub manifest_path: String,
+    pub params: Vec<PluginParamSpecDto>,
+    pub channels_preview: Vec<PluginChannelPreviewDto>,
+}
+
+/// Discovered external dashboard widget plugin descriptor DTO.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct WidgetPluginInfoDto {
+    pub id: String,
+    pub name_en: String,
+    pub name_zh: String,
+    pub description_en: Option<String>,
+    pub description_zh: Option<String>,
+    pub version: String,
+    pub badge: String,
+    pub default_col_span: u32,
+    pub default_row_span: u32,
+    pub binding_mode: String,
+    pub available: bool,
+    pub error: Option<String>,
+    pub manifest_path: String,
+    pub params: Vec<PluginParamSpecDto>,
+}
+
+/// Catalog of all discovered external protocol and widget plugins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct ExternalPluginCatalogDto {
+    pub search_dirs: Vec<String>,
+    pub protocols: Vec<ProtocolPluginInfoDto>,
+    pub widgets: Vec<WidgetPluginInfoDto>,
+}
+
+/// Loaded ESM module and optional CSS bundle for an external widget plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WidgetPluginBundleDto {
+    pub id: String,
+    pub entry_js: String,
+    pub style_css: Option<String>,
 }

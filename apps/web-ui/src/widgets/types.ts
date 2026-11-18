@@ -1,3 +1,9 @@
+import {
+  getPluginWidgetInfo,
+  isPluginWidgetType,
+  type PluginWidgetType,
+} from "./plugin-registry.ts";
+
 export const DASHBOARD_GRID_COLS = 24;
 
 export const WIDGET_TYPES = [
@@ -12,7 +18,15 @@ export const WIDGET_TYPES = [
   "cmd_table",
 ] as const;
 
-export type WidgetType = (typeof WIDGET_TYPES)[number];
+export type BuiltinWidgetType = (typeof WIDGET_TYPES)[number];
+export type WidgetType = BuiltinWidgetType | PluginWidgetType;
+
+export function isValidWidgetType(value: unknown): value is WidgetType {
+  return (
+    typeof value === "string" &&
+    ((WIDGET_TYPES as readonly string[]).includes(value) || isPluginWidgetType(value))
+  );
+}
 
 export interface WidgetChannelBinding {
   channelId: number;
@@ -100,6 +114,7 @@ export interface DashboardWidgetItem {
   buttonConfig?: WidgetButtonConfig;
   cmdTableConfig?: WidgetCmdTableConfig;
   bitParserConfig?: WidgetBitParserConfig;
+  pluginConfig?: Record<string, unknown>;
 }
 
 export interface DashboardCanvasConfig {
@@ -152,9 +167,19 @@ export function defaultSizeForWidgetType(type: WidgetType): {
   rowSpan: number;
 } {
   const found = WIDGET_CATALOG.find((e) => e.type === type);
-  return found
-    ? { colSpan: found.defaultColSpan, rowSpan: found.defaultRowSpan }
-    : { colSpan: 8, rowSpan: 4 };
+  if (found) {
+    return { colSpan: found.defaultColSpan, rowSpan: found.defaultRowSpan };
+  }
+  if (isPluginWidgetType(type)) {
+    const pluginInfo = getPluginWidgetInfo(type);
+    if (pluginInfo) {
+      return {
+        colSpan: Math.max(4, Math.min(DASHBOARD_GRID_COLS, pluginInfo.default_col_span || 8)),
+        rowSpan: Math.max(2, Math.min(24, pluginInfo.default_row_span || 4)),
+      };
+    }
+  }
+  return { colSpan: 8, rowSpan: 4 };
 }
 
 export function clampGridRect(

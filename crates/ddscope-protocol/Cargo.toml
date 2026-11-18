@@ -1,0 +1,19 @@
+[package]
+name = "ddscope-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ddscope-types = { workspace = true }
+ddscope-plugin-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+memchr = { workspace = true }
+hex = { workspace = true }
+crc32fast = { workspace = true }
+libloading = { workspace = true }
+parking_lot = { workspace = true }

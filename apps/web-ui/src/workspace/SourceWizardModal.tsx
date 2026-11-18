@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+} from "react";
 import type {
   ClockConfigDto_Deserialize,
   CreateSourceRequestDto_Deserialize,
@@ -17,6 +24,13 @@ import {
   parseUdpRemoteTxAddr,
 } from "../bridge/index.ts";
 import { formatFrequencyHz } from "../scope-engine/time-format.ts";
+import {
+  buildDefaultPluginParams,
+  getExternalPluginCatalog,
+  parsePluginParamDefault,
+  resolvePluginText,
+  subscribeExternalPluginCatalog,
+} from "../widgets/plugin-registry.ts";
 import { synthesizeFallbackSourceConfig } from "./config-io.ts";
 import { useWorkspaceStore } from "./store.ts";
 import { useI18n } from "./use-i18n.ts";
@@ -64,7 +78,8 @@ type WizardProtocolCodec =
   | "just_float"
   | "just_typed"
   | "fire_water"
-  | "fixed_schema_binary";
+  | "fixed_schema_binary"
+  | "plugin";
 
 const DEFAULT_JUST_TYPED_CHANNELS: ReadonlyArray<{
   name: string;
@@ -77,15 +92,22 @@ const DEFAULT_JUST_TYPED_CHANNELS: ReadonlyArray<{
 ];
 
 export function SourceWizardModal() {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const open = useWorkspaceStore((s) => s.sourceWizardOpen);
   const editingSourceId = useWorkspaceStore((s) => s.editingSourceId);
   const setOpen = useWorkspaceStore((s) => s.setSourceWizardOpen);
   const createSource = useWorkspaceStore((s) => s.createSource);
   const updateSource = useWorkspaceStore((s) => s.updateSource);
+  const reloadExternalPlugins = useWorkspaceStore((s) => s.reloadExternalPlugins);
   const channelGroups = useWorkspaceStore((s) => s.channelGroups);
   const sourceConfigsById = useWorkspaceStore((s) => s.sourceConfigsById);
   const isEditMode = editingSourceId !== null;
+
+  const catalog = useSyncExternalStore(
+    subscribeExternalPluginCatalog,
+    getExternalPluginCatalog,
+    getExternalPluginCatalog,
+  );
 
   const [sourceId, setSourceId] = useState("sim1");
   const [displayName, setDisplayName] = useState("Auxiliary Test Source");
@@ -132,6 +154,10 @@ export function SourceWizardModal() {
   const [justTypedChannels, setJustTypedChannels] = useState<
     Array<{ name: string; data_type: JustTypedKindDto }>
   >(() => DEFAULT_JUST_TYPED_CHANNELS.map((c) => ({ ...c })));
+  const [selectedPluginId, setSelectedPluginId] = useState("");
+  const [pluginParamValues, setPluginParamValues] = useState<Record<string, unknown>>({});
+  const [pluginRawConfigJson, setPluginRawConfigJson] = useState("{}");
+  const [reloadingPlugins, setReloadingPlugins] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -248,6 +274,22 @@ export function SourceWizardModal() {
           setJustTypedChannels(
             rows.length > 0 ? rows : DEFAULT_JUST_TYPED_CHANNELS.map((c) => ({ ...c })),
           );
+        } else if (existingCfg.protocol.codec === "plugin") {
+          const pid = existingCfg.protocol.plugin_id;
+          const pInfo = catalog.protocols.find((p) => p.id === pid);
+          const defaults = buildDefaultPluginParams(pInfo?.params ?? []);
+          let parsedObj: Record<string, unknown> = {};
+          try {
+            const raw = JSON.parse(existingCfg.protocol.config_json || "{}");
+            if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+              parsedObj = raw as Record<string, unknown>;
+            }
+          } catch {
+            // Keep raw JSON string for user to inspect/fix
+          }
+          setSelectedPluginId(pid);
+          setPluginParamValues({ ...defaults, ...parsedObj });
+          setPluginRawConfigJson(existingCfg.protocol.config_json || "{}");
         }
       } else {
         setSourceId(editingSourceId);
@@ -283,6 +325,9 @@ export function SourceWizardModal() {
       setSyncDriftComp(true);
       setChannelNamesText("va, vb, vc, iq");
       setJustTypedChannels(DEFAULT_JUST_TYPED_CHANNELS.map((c) => ({ ...c })));
+      setSelectedPluginId(catalog.protocols[0]?.id ?? "");
+      setPluginParamValues(buildDefaultPluginParams(catalog.protocols[0]?.params ?? []));
+      setPluginRawConfigJson("{}");
     }
 
     bridgeClient
@@ -319,6 +364,15 @@ export function SourceWizardModal() {
       }
       return ["v_out", "i_out"];
     }
+    if (protocolCodec === "plugin") {
+      const pInfo = catalog.protocols.find((p) => p.id === selectedPluginId);
+      if (pInfo && pInfo.channels_preview.length > 0) {
+        return pInfo.channels_preview
+          .filter((c) => c.scalar_type !== "bool")
+          .map((c) => c.name);
+      }
+      return ["ch0", "ch1"];
+    }
     const existingGroup =
       editingSourceId !== null
         ? channelGroups.find((g) => g.source.source_id === editingSourceId)
@@ -338,6 +392,8 @@ export function SourceWizardModal() {
     return Array.from({ length: count }, (_, i) => `ch${i}`);
   }, [
     protocolCodec,
+    selectedPluginId,
+    catalog.protocols,
     channelNamesText,
     justTypedChannels,
     editingSourceId,
@@ -566,6 +622,34 @@ export function SourceWizardModal() {
                 ],
               };
         break;
+      case "plugin": {
+        const pInfo = catalog.protocols.find((p) => p.id === selectedPluginId);
+        let configJsonStr = "{}";
+        if (pInfo && pInfo.params.length > 0) {
+          configJsonStr = JSON.stringify(pluginParamValues);
+        } else {
+          const rawTrimmed = pluginRawConfigJson.trim();
+          if (rawTrimmed.length > 0) {
+            try {
+              const parsed = JSON.parse(rawTrimmed);
+              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                setErrorMsg(t("wizard.errPluginInvalidJson"));
+                return;
+              }
+              configJsonStr = JSON.stringify(parsed);
+            } catch {
+              setErrorMsg(t("wizard.errPluginInvalidJson"));
+              return;
+            }
+          }
+        }
+        protocol = {
+          codec: "plugin",
+          plugin_id: selectedPluginId.trim(),
+          config_json: configJsonStr,
+        };
+        break;
+      }
     }
 
     const payload: CreateSourceRequestDto_Deserialize = {
@@ -830,17 +914,67 @@ export function SourceWizardModal() {
           <div className="wizard-grid">
             <label className="wizard-field">
               <span>{t("wizard.codec")}</span>
-              <select
-                value={protocolCodec}
-                onChange={(e) => setProtocolCodec(e.target.value as WizardProtocolCodec)}
-                data-testid="wizard-protocol-codec"
-              >
-                <option value="sim_preset">{t("wizard.codec.sim")}</option>
-                <option value="just_float">{t("wizard.codec.justFloat")}</option>
-                <option value="just_typed">{t("wizard.codec.justTyped")}</option>
-                <option value="fire_water">{t("wizard.codec.fireWater")}</option>
-                <option value="fixed_schema_binary">{t("wizard.codec.fixedSchema")}</option>
-              </select>
+              <div className="wizard-codec-row">
+                <select
+                  value={
+                    protocolCodec === "plugin"
+                      ? `plugin:${selectedPluginId}`
+                      : protocolCodec
+                  }
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val.startsWith("plugin:")) {
+                      const pid = val.slice("plugin:".length);
+                      const pInfo = catalog.protocols.find((p) => p.id === pid);
+                      const defaults = buildDefaultPluginParams(pInfo?.params ?? []);
+                      setProtocolCodec("plugin");
+                      setSelectedPluginId(pid);
+                      setPluginParamValues(defaults);
+                      setPluginRawConfigJson(JSON.stringify(defaults, null, 2));
+                    } else {
+                      setProtocolCodec(val as WizardProtocolCodec);
+                    }
+                  }}
+                  data-testid="wizard-protocol-codec"
+                >
+                  <option value="sim_preset">{t("wizard.codec.sim")}</option>
+                  <option value="just_float">{t("wizard.codec.justFloat")}</option>
+                  <option value="just_typed">{t("wizard.codec.justTyped")}</option>
+                  <option value="fire_water">{t("wizard.codec.fireWater")}</option>
+                  <option value="fixed_schema_binary">{t("wizard.codec.fixedSchema")}</option>
+                  {(catalog.protocols.length > 0 || protocolCodec === "plugin") && (
+                    <optgroup label={t("wizard.codec.pluginsGroup")}>
+                      {catalog.protocols.map((p) => (
+                        <option key={p.id} value={`plugin:${p.id}`}>
+                          {resolvePluginText(p.name_en, p.name_zh, locale) || p.id} [
+                          {p.backend_mode === "cdylib" ? "DLL" : "JSON"}]
+                        </option>
+                      ))}
+                      {protocolCodec === "plugin" &&
+                        selectedPluginId &&
+                        !catalog.protocols.some((p) => p.id === selectedPluginId) && (
+                          <option value={`plugin:${selectedPluginId}`}>
+                            {selectedPluginId}
+                          </option>
+                        )}
+                    </optgroup>
+                  )}
+                </select>
+                <button
+                  type="button"
+                  className="scope-btn"
+                  disabled={reloadingPlugins}
+                  title={t("wizard.reloadPlugins")}
+                  data-testid="wizard-reload-plugins"
+                  onClick={() => {
+                    if (reloadingPlugins) return;
+                    setReloadingPlugins(true);
+                    void reloadExternalPlugins().finally(() => setReloadingPlugins(false));
+                  }}
+                >
+                  {reloadingPlugins ? "…" : t("wizard.reloadPlugins")}
+                </button>
+              </div>
             </label>
 
             {clockMode === "tier2_software_pll" && (
@@ -1032,6 +1166,140 @@ export function SourceWizardModal() {
               </div>
             </div>
           )}
+
+          {protocolCodec === "plugin" && (() => {
+            const pInfo = catalog.protocols.find((p) => p.id === selectedPluginId);
+            const backendLabel = pInfo?.backend_mode === "cdylib" ? "C-ABI DLL" : "JSON";
+            const desc = pInfo
+              ? resolvePluginText(pInfo.description_en, pInfo.description_zh, locale)
+              : "";
+            const previewText = pInfo?.channels_preview
+              .map((c) => (c.unit ? `${c.name}(${c.scalar_type},${c.unit})` : `${c.name}(${c.scalar_type})`))
+              .join(", ");
+            return (
+              <div className="wizard-plugin-box" data-testid="wizard-plugin-box">
+                <div className="wizard-plugin-header">
+                  <span>{t("wizard.plugin.paramsTitle", { mode: backendLabel })}</span>
+                  <span>
+                    {pInfo ? `${selectedPluginId} v${pInfo.version}` : selectedPluginId}
+                  </span>
+                </div>
+                {desc && <div className="wizard-plugin-desc">{desc}</div>}
+                {previewText && (
+                  <div className="wizard-plugin-channels">
+                    {t("wizard.plugin.channelsPreview", { channels: previewText })}
+                  </div>
+                )}
+                {pInfo && !pInfo.available && (
+                  <div className="wizard-plugin-error">
+                    {t("wizard.plugin.unavailable", {
+                      error: pInfo.error ?? "unavailable",
+                    })}
+                  </div>
+                )}
+                {pInfo && pInfo.params.length > 0 ? (
+                  <div className="wizard-grid">
+                    {pInfo.params.map((pm) => {
+                      const label =
+                        resolvePluginText(pm.label_en, pm.label_zh, locale) || pm.key;
+                      const curVal =
+                        pluginParamValues[pm.key] ??
+                        parsePluginParamDefault(pm.default_json);
+                      if (pm.param_type === "boolean") {
+                        return (
+                          <label key={pm.key} className="wizard-check">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(curVal)}
+                              onChange={(ev) =>
+                                setPluginParamValues((prev) => ({
+                                  ...prev,
+                                  [pm.key]: ev.target.checked,
+                                }))
+                              }
+                            />
+                            <span>{label}</span>
+                          </label>
+                        );
+                      }
+                      if (pm.param_type === "select") {
+                        return (
+                          <label key={pm.key} className="wizard-field">
+                            <span>{label}</span>
+                            <select
+                              value={String(curVal ?? pm.options[0]?.value ?? "")}
+                              onChange={(ev) =>
+                                setPluginParamValues((prev) => ({
+                                  ...prev,
+                                  [pm.key]: ev.target.value,
+                                }))
+                              }
+                            >
+                              {pm.options.map((opt) => (
+                                <option key={opt.value} value={opt.value}>
+                                  {resolvePluginText(opt.label_en, opt.label_zh, locale) ||
+                                    opt.value}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        );
+                      }
+                      if (pm.param_type === "number") {
+                        return (
+                          <label key={pm.key} className="wizard-field">
+                            <span>{label}</span>
+                            <input
+                              type="number"
+                              min={pm.min ?? undefined}
+                              max={pm.max ?? undefined}
+                              step={pm.step ?? "any"}
+                              value={
+                                typeof curVal === "number" ? curVal : Number(curVal ?? 0)
+                              }
+                              onChange={(ev) => {
+                                const num = Number(ev.target.value);
+                                if (Number.isFinite(num)) {
+                                  setPluginParamValues((prev) => ({
+                                    ...prev,
+                                    [pm.key]: num,
+                                  }));
+                                }
+                              }}
+                            />
+                          </label>
+                        );
+                      }
+                      return (
+                        <label key={pm.key} className="wizard-field">
+                          <span>{label}</span>
+                          <input
+                            type="text"
+                            value={String(curVal ?? "")}
+                            onChange={(ev) =>
+                              setPluginParamValues((prev) => ({
+                                ...prev,
+                                [pm.key]: ev.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <label className="wizard-field">
+                    <span>{t("wizard.plugin.rawConfigJson")}</span>
+                    <textarea
+                      className="wizard-plugin-textarea"
+                      value={pluginRawConfigJson}
+                      onChange={(ev) => setPluginRawConfigJson(ev.target.value)}
+                    />
+                  </label>
+                )}
+              </div>
+            );
+          })()}
 
           <label className="wizard-check">
             <input

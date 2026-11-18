@@ -759,30 +759,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddscope-clock"
+version = "0.1.0"
+dependencies = [
+ "ddscope-types",
+ "serde",
+]
+
+[[package]]
 name = "ddscope-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytemuck",
  "bytes",
- "crc32fast",
  "criterion",
  "crossbeam-channel",
- "dashmap",
+ "ddscope-clock",
+ "ddscope-dag",
  "ddscope-plugin-api",
+ "ddscope-protocol",
+ "ddscope-scope",
+ "ddscope-storage",
+ "ddscope-transport",
+ "ddscope-types",
  "fastrand",
- "hex",
- "libc",
- "memchr",
  "parking_lot",
  "serde",
  "serde_json",
- "socket2",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
- "windows-sys 0.61.2",
- "winreg",
+]
+
+[[package]]
+name = "ddscope-dag"
+version = "0.1.0"
+dependencies = [
+ "ddscope-storage",
+ "ddscope-types",
+ "parking_lot",
+ "serde",
 ]
 
 [[package]]
@@ -791,6 +807,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "ddscope-core",
+ "ddscope-plugin-api",
  "parking_lot",
  "serde",
  "serde_json",
@@ -814,6 +831,87 @@ name = "ddscope-plugin-api"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ddscope-plugin-xor-demo"
+version = "0.1.0"
+dependencies = [
+ "ddscope-plugin-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ddscope-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "ddscope-plugin-api",
+ "ddscope-types",
+ "hex",
+ "libloading 0.8.9",
+ "memchr",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "ddscope-scope"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "dashmap",
+ "ddscope-types",
+ "serde",
+]
+
+[[package]]
+name = "ddscope-storage"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "dashmap",
+ "ddscope-scope",
+ "ddscope-types",
+ "parking_lot",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ddscope-transport"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "crc32fast",
+ "crossbeam-channel",
+ "ddscope-types",
+ "fastrand",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+ "winreg",
+]
+
+[[package]]
+name = "ddscope-types"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "bytes",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2041,7 +2139,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
 dependencies = [
  "gtk-sys",
- "libloading",
+ "libloading 0.7.4",
  "once_cell",
 ]
 
@@ -2068,6 +2166,16 @@ checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
 dependencies = [
  "cfg-if",
  "winapi",
+]
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
 ]
 
 [[package]]

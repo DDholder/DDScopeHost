@@ -1,0 +1,75 @@
+{
+  "schema": "ddscope.protocol-plugin.v1",
+  "id": "scaled_int16_frame",
+  "name": {
+    "en": "Scaled Int16 Motor Frame (Plugin)",
+    "zh-CN": "定标 Int16 电机帧 (JSON 插件)"
+  },
+  "version": "1.0.0",
+  "description": {
+    "en": "External declarative protocol: AA 55 header + 3x Int16 (phase_u, phase_v, bus_v) + CRC16-CCITT",
+    "zh-CN": "外部声明式协议：AA 55 帧头 + 3 路 Int16 定标通道 + CRC16-CCITT 校验"
+  },
+  "params": [
+    {
+      "key": "current_scale",
+      "label": {
+        "en": "Current Scale (A / LSB)",
+        "zh-CN": "电流比例系数 (A / LSB)"
+      },
+      "type": "number",
+      "default": 0.01,
+      "step": 0.001
+    },
+    {
+      "key": "voltage_scale",
+      "label": {
+        "en": "Voltage Scale (V / LSB)",
+        "zh-CN": "电压比例系数 (V / LSB)"
+      },
+      "type": "number",
+      "default": 0.1,
+      "step": 0.01
+    }
+  ],
+  "channels_preview": [
+    { "name": "phase_u", "scalar_type": "i16", "unit": "A" },
+    { "name": "phase_v", "scalar_type": "i16", "unit": "A" },
+    { "name": "bus_v", "scalar_type": "i16", "unit": "V" }
+  ],
+  "backend": {
+    "mode": "declarative",
+    "framing": "fixed_binary",
+    "header_hex": "AA 55",
+    "has_hw_tick_first_col": false,
+    "checksum": "crc16_ccitt",
+    "checksum_scope": "payload_only",
+    "checksum_endian": "little",
+    "fields": [
+      {
+        "name": "phase_u",
+        "scalar_type": "i16",
+        "endian": "little",
+        "scale": 0.01,
+        "scale_param": "current_scale",
+        "unit": "A"
+      },
+      {
+        "name": "phase_v",
+        "scalar_type": "i16",
+        "endian": "little",
+        "scale": 0.01,
+        "scale_param": "current_scale",
+        "unit": "A"
+      },
+      {
+        "name": "bus_v",
+        "scalar_type": "i16",
+        "endian": "little",
+        "scale": 0.1,
+        "scale_param": "voltage_scale",
+        "unit": "V"
+      }
+    ]
+  }
+}

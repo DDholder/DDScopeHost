@@ -69,6 +69,12 @@ export const commands = {
 	removeVirtualChannel: (nodeId: string) => __TAURI_INVOKE<boolean>("remove_virtual_channel", { nodeId }),
 	/**  Removes all virtual channel DAG nodes from the workspace. */
 	clearVirtualChannels: () => __TAURI_INVOKE<number>("clear_virtual_channels"),
+	/**  Lists all discovered external protocol and widget plugins. */
+	listExternalPlugins: () => __TAURI_INVOKE<ExternalPluginCatalogDto_Serialize>("list_external_plugins"),
+	/**  Rescans external `plugins/` directories and reloads protocol plugin factories. */
+	reloadExternalPlugins: () => __TAURI_INVOKE<ExternalPluginCatalogDto_Serialize>("reload_external_plugins"),
+	/**  Loads the JavaScript module and optional stylesheet for an external widget plugin. */
+	loadWidgetPluginBundle: (pluginId: string) => __TAURI_INVOKE<WidgetPluginBundleDto_Serialize>("load_widget_plugin_bundle", { pluginId }),
 };
 
 /** Events */
@@ -245,6 +251,23 @@ export type EngineStatusDto = {
 	ddsf_version: number,
 };
 
+/**  Catalog of all discovered external protocol and widget plugins. */
+export type ExternalPluginCatalogDto = ExternalPluginCatalogDto_Serialize | ExternalPluginCatalogDto_Deserialize;
+
+/**  Catalog of all discovered external protocol and widget plugins. */
+export type ExternalPluginCatalogDto_Deserialize = {
+	search_dirs: string[],
+	protocols: ProtocolPluginInfoDto_Deserialize[],
+	widgets: WidgetPluginInfoDto_Deserialize[],
+};
+
+/**  Catalog of all discovered external protocol and widget plugins. */
+export type ExternalPluginCatalogDto_Serialize = {
+	search_dirs: string[],
+	protocols: ProtocolPluginInfoDto_Serialize[],
+	widgets: WidgetPluginInfoDto_Serialize[],
+};
+
 /**  Field specification used by `FixedSchemaBinary` protocol mode. */
 export type FixedFieldSpecDto = FixedFieldSpecDto_Serialize | FixedFieldSpecDto_Deserialize;
 
@@ -286,6 +309,63 @@ export type JustTypedChannelDto_Serialize = {
 /**  Per-channel 32-bit parse type used by `JustTyped` protocol mode. */
 export type JustTypedKindDto = "float" | "int" | "uint";
 
+/**  Preview channel hint declared by an external protocol plugin. */
+export type PluginChannelPreviewDto = PluginChannelPreviewDto_Serialize | PluginChannelPreviewDto_Deserialize;
+
+/**  Preview channel hint declared by an external protocol plugin. */
+export type PluginChannelPreviewDto_Deserialize = {
+	name: string,
+	scalar_type: string,
+	unit?: string | null,
+};
+
+/**  Preview channel hint declared by an external protocol plugin. */
+export type PluginChannelPreviewDto_Serialize = {
+	name: string,
+	scalar_type: string,
+	unit: string | null,
+};
+
+/**  Declarative parameter definition exposed by an external protocol/widget `plugin.json`. */
+export type PluginParamSpecDto = PluginParamSpecDto_Serialize | PluginParamSpecDto_Deserialize;
+
+/**  Declarative parameter definition exposed by an external protocol/widget `plugin.json`. */
+export type PluginParamSpecDto_Deserialize = {
+	key: string,
+	label_en: string,
+	label_zh: string,
+	param_type: string,
+	default_json: string,
+	min?: number | null,
+	max?: number | null,
+	step?: number | null,
+	options: PluginSelectOptionDto[],
+	description_en?: string | null,
+	description_zh?: string | null,
+};
+
+/**  Declarative parameter definition exposed by an external protocol/widget `plugin.json`. */
+export type PluginParamSpecDto_Serialize = {
+	key: string,
+	label_en: string,
+	label_zh: string,
+	param_type: string,
+	default_json: string,
+	min: number | null,
+	max: number | null,
+	step: number | null,
+	options: PluginSelectOptionDto[],
+	description_en: string | null,
+	description_zh: string | null,
+};
+
+/**  Option entry inside an external plugin's `select` parameter schema. */
+export type PluginSelectOptionDto = {
+	value: string,
+	label_en: string,
+	label_zh: string,
+};
+
 /**  Output channel selection flags for `SinglePhasePower`. */
 export type PowerOutputFlagsDto = {
 	freq: boolean,
@@ -306,10 +386,45 @@ export type PowerOutputFlagsDto = {
 export type ProtocolConfigDto = ProtocolConfigDto_Serialize | ProtocolConfigDto_Deserialize;
 
 /**  Protocol codec configuration attached to a data source. */
-export type ProtocolConfigDto_Deserialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "just_typed"; channels: JustTypedChannelDto_Deserialize[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Deserialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] };
+export type ProtocolConfigDto_Deserialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "just_typed"; channels: JustTypedChannelDto_Deserialize[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Deserialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] } | { codec: "plugin"; plugin_id: string; config_json: string };
 
 /**  Protocol codec configuration attached to a data source. */
-export type ProtocolConfigDto_Serialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "just_typed"; channels: JustTypedChannelDto_Serialize[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Serialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] };
+export type ProtocolConfigDto_Serialize = { codec: "sim_preset" } | { codec: "just_float"; channel_names: string[] } | { codec: "just_typed"; channels: JustTypedChannelDto_Serialize[] } | { codec: "fixed_schema_binary"; header_magic: number[]; fields: FixedFieldSpecDto_Serialize[]; has_hw_tick_first_col: boolean } | { codec: "fire_water"; channel_names: string[] } | { codec: "plugin"; plugin_id: string; config_json: string };
+
+/**  Discovered external protocol (data engine) plugin descriptor DTO. */
+export type ProtocolPluginInfoDto = ProtocolPluginInfoDto_Serialize | ProtocolPluginInfoDto_Deserialize;
+
+/**  Discovered external protocol (data engine) plugin descriptor DTO. */
+export type ProtocolPluginInfoDto_Deserialize = {
+	id: string,
+	name_en: string,
+	name_zh: string,
+	description_en?: string | null,
+	description_zh?: string | null,
+	version: string,
+	backend_mode: string,
+	available: boolean,
+	error?: string | null,
+	manifest_path: string,
+	params: PluginParamSpecDto_Deserialize[],
+	channels_preview: PluginChannelPreviewDto_Deserialize[],
+};
+
+/**  Discovered external protocol (data engine) plugin descriptor DTO. */
+export type ProtocolPluginInfoDto_Serialize = {
+	id: string,
+	name_en: string,
+	name_zh: string,
+	description_en: string | null,
+	description_zh: string | null,
+	version: string,
+	backend_mode: string,
+	available: boolean,
+	error: string | null,
+	manifest_path: string,
+	params: PluginParamSpecDto_Serialize[],
+	channels_preview: PluginChannelPreviewDto_Serialize[],
+};
 
 /**  Request payload for enabling/disabling bypass raw byte recording on a source. */
 export type RawRecorderRequestDto = RawRecorderRequestDto_Serialize | RawRecorderRequestDto_Deserialize;
@@ -680,6 +795,62 @@ export type VirtualOperatorDto_Deserialize = { kind: "analog_to_digital"; input_
 
 /**  Virtual operator definition exposed across the control plane. */
 export type VirtualOperatorDto_Serialize = { kind: "analog_to_digital"; input_channel: string; output_path: string; mode: AnalogToDigitalModeDto } | { kind: "to_state_machine"; output_path: string; mode: ToStateMachineModeDto_Serialize } | { kind: "to_analog"; output_path: string; unit: string | null; mode: ToAnalogModeDto } | { kind: "formula"; expression: string; output_path: string; unit: string | null; output_digital: boolean } | { kind: "window_stats"; input_channel: string; output_path: string; unit: string | null; metric: WindowMetricKindDto; window_ms: number | null } | { kind: "calculus"; input_channel: string; output_path: string; unit: string | null; mode: CalculusModeDto_Serialize } | { kind: "single_phase_power"; voltage_channel: string; current_channel: string; output_prefix: string; voltage_scale: number | null; voltage_offset: number | null; current_scale: number | null; current_offset: number | null; nominal_freq_hz: number | null; zero_cross_hysteresis_v: number | null; min_freq_hz: number | null; fallback_window_ms: number | null; outputs: PowerOutputFlagsDto };
+
+/**  Loaded ESM module and optional CSS bundle for an external widget plugin. */
+export type WidgetPluginBundleDto = WidgetPluginBundleDto_Serialize | WidgetPluginBundleDto_Deserialize;
+
+/**  Loaded ESM module and optional CSS bundle for an external widget plugin. */
+export type WidgetPluginBundleDto_Deserialize = {
+	id: string,
+	entry_js: string,
+	style_css?: string | null,
+};
+
+/**  Loaded ESM module and optional CSS bundle for an external widget plugin. */
+export type WidgetPluginBundleDto_Serialize = {
+	id: string,
+	entry_js: string,
+	style_css: string | null,
+};
+
+/**  Discovered external dashboard widget plugin descriptor DTO. */
+export type WidgetPluginInfoDto = WidgetPluginInfoDto_Serialize | WidgetPluginInfoDto_Deserialize;
+
+/**  Discovered external dashboard widget plugin descriptor DTO. */
+export type WidgetPluginInfoDto_Deserialize = {
+	id: string,
+	name_en: string,
+	name_zh: string,
+	description_en?: string | null,
+	description_zh?: string | null,
+	version: string,
+	badge: string,
+	default_col_span: number,
+	default_row_span: number,
+	binding_mode: string,
+	available: boolean,
+	error?: string | null,
+	manifest_path: string,
+	params: PluginParamSpecDto_Deserialize[],
+};
+
+/**  Discovered external dashboard widget plugin descriptor DTO. */
+export type WidgetPluginInfoDto_Serialize = {
+	id: string,
+	name_en: string,
+	name_zh: string,
+	description_en: string | null,
+	description_zh: string | null,
+	version: string,
+	badge: string,
+	default_col_span: number,
+	default_row_span: number,
+	binding_mode: string,
+	available: boolean,
+	error: string | null,
+	manifest_path: string,
+	params: PluginParamSpecDto_Serialize[],
+};
 
 /**  Supported sliding time-window metrics. */
 export type WindowMetricKindDto = "rms" | "mean" | "peak_to_peak" | "min" | "max" | "std_dev";

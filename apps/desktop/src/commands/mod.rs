@@ -363,3 +363,31 @@ pub fn clear_virtual_channels(
 ) -> Result<u32, ApiErrorDto> {
     state.clear_virtual_channels()
 }
+
+/// Lists all discovered external protocol and widget plugins.
+#[tauri::command]
+#[specta::specta]
+pub fn list_external_plugins(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<ExternalPluginCatalogDto, ApiErrorDto> {
+    state.list_external_plugins()
+}
+
+/// Rescans external `plugins/` directories and reloads protocol plugin factories.
+#[tauri::command]
+#[specta::specta]
+pub fn reload_external_plugins(
+    state: tauri::State<'_, DesktopBridgeState>,
+) -> Result<ExternalPluginCatalogDto, ApiErrorDto> {
+    state.reload_external_plugins()
+}
+
+/// Loads the JavaScript module and optional stylesheet for an external widget plugin.
+#[tauri::command]
+#[specta::specta]
+pub fn load_widget_plugin_bundle(
+    state: tauri::State<'_, DesktopBridgeState>,
+    plugin_id: String,
+) -> Result<WidgetPluginBundleDto, ApiErrorDto> {
+    state.load_widget_plugin_bundle(plugin_id)
+}

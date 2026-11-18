@@ -20,6 +20,7 @@ tauri-build = { workspace = true }
 
 [dependencies]
 ddscope-core = { workspace = true }
+ddscope-plugin-api = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

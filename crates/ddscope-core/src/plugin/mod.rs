@@ -1,13 +1,13 @@
-//! Static engine registry and future WASM / C-ABI plugin host boundary.
+//! Engine plugin registries and external descriptor / C-ABI plugin host re-exports.
 
-pub use ddscope_plugin_api::PLUGIN_API_VERSION;
-
-use crate::protocol::ProtocolCodec;
-use crate::transport::Transport;
-use crate::types::CoreResult;
-
-/// Static factory signature for creating a [`Transport`] instance from serialized JSON config.
-pub type TransportFactoryFn = fn(&str) -> CoreResult<Box<dyn Transport>>;
-
-/// Static factory signature for creating a [`ProtocolCodec`] instance from serialized JSON config.
-pub type ProtocolCodecFactoryFn = fn(&str) -> CoreResult<Box<dyn ProtocolCodec>>;
+pub use ddscope_plugin_api::{
+    DDSCOPE_C_ABI_VERSION, PLUGIN_API_VERSION, PROTOCOL_PLUGIN_SCHEMA_V1,
+    WIDGET_PLUGIN_SCHEMA_V1,
+};
+pub use ddscope_protocol::plugin_host::{
+    discover_and_register_external_plugins, discover_external_plugins, read_widget_plugin_bundle,
+    resolve_plugin_search_dirs, ExternalPluginCatalog, ExternalProtocolPluginEntry,
+    ExternalWidgetPluginEntry, LoadedWidgetBundle,
+};
+pub use ddscope_protocol::{ProtocolCodecFactory, ProtocolCodecFactoryFn};
+pub use ddscope_transport::TransportFactoryFn;

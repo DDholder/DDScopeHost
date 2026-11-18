@@ -2,6 +2,14 @@
 resolver = "2"
 members = [
   "crates/ddscope-plugin-api",
+  "crates/ddscope-types",
+  "crates/ddscope-clock",
+  "crates/ddscope-scope",
+  "crates/ddscope-transport",
+  "crates/ddscope-protocol",
+  "crates/ddscope-storage",
+  "crates/ddscope-dag",
+  "crates/ddscope-plugin-xor-demo",
   "crates/ddscope-core",
   "crates/ddscope-cli",
   "apps/desktop",
@@ -15,7 +23,15 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 ddscope-plugin-api = { path = "crates/ddscope-plugin-api" }
+ddscope-types = { path = "crates/ddscope-types" }
+ddscope-clock = { path = "crates/ddscope-clock" }
+ddscope-scope = { path = "crates/ddscope-scope" }
+ddscope-transport = { path = "crates/ddscope-transport" }
+ddscope-protocol = { path = "crates/ddscope-protocol" }
+ddscope-storage = { path = "crates/ddscope-storage" }
+ddscope-dag = { path = "crates/ddscope-dag" }
 ddscope-core = { path = "crates/ddscope-core" }
+libloading = "0.8"
 
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

@@ -4,11 +4,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ddscope_core::clock::{ClockMode, ClockSyncConfig};
+use ddscope_core::plugin::{ExternalPluginCatalog, LoadedWidgetBundle};
 use ddscope_core::protocol::{
     ChecksumKind, ChecksumScope, DownlinkPayload, FireWaterConfig, FixedFieldSpec,
     FixedSchemaBinaryConfig, JustFloatConfig, JustTypedChannelKind, JustTypedChannelSpec,
     JustTypedConfig, SimPresetConfig, TransactionResult,
 };
+use ddscope_plugin_api::{is_valid_plugin_id, PluginParamSpec};
 use ddscope_core::scope::{
     EdgeSlope, ScopeControllerConfig, TriggerCondition, TriggerSweepMode,
 };
@@ -33,14 +35,16 @@ use ddscope_core::{
 use super::dto::{
     AnalogToDigitalModeDto, ApiErrorDto, CalculusModeDto, ChannelModalityDto, ChannelNodeDto,
     ChannelTreeSnapshotDto, ClockConfigDto, CreateSourceRequestDto, DownlinkPayloadDto,
-    DownlinkReceiptDto, EdgeSlopeDto, FixedFieldSpecDto, PowerOutputFlagsDto, ProtocolConfigDto,
-    ScopeLaneKindDto, ScopeViewportConfigDto, ScopeViewportSummaryDto, SendDownlinkRequestDto,
-    SerialFlowControlDto, SerialParityDto, SerialPortInfoDto, SerialStopBitsDto,
-    SourceChannelGroupDto, SourceRuntimeStateDto, SourceSummaryDto, SourceTelemetryDto,
-    StateLabelEntryDto, StateLabelSpecDto, StateRangeRuleDto, StateValueEntryDto,
-    SyncGroupUpdateDto, ToAnalogModeDto, ToStateMachineModeDto, TransportConfigDto,
-    TriggerConditionDto, TriggerSweepModeDto, TxPriorityDto, VirtualNodeConfigDto,
-    VirtualNodeSummaryDto, VirtualOperatorDto, WindowMetricKindDto, WorkspaceTelemetryEvent,
+    DownlinkReceiptDto, EdgeSlopeDto, ExternalPluginCatalogDto, FixedFieldSpecDto,
+    PluginChannelPreviewDto, PluginParamSpecDto, PluginSelectOptionDto, PowerOutputFlagsDto,
+    ProtocolConfigDto, ProtocolPluginInfoDto, ScopeLaneKindDto, ScopeViewportConfigDto,
+    ScopeViewportSummaryDto, SendDownlinkRequestDto, SerialFlowControlDto, SerialParityDto,
+    SerialPortInfoDto, SerialStopBitsDto, SourceChannelGroupDto, SourceRuntimeStateDto,
+    SourceSummaryDto, SourceTelemetryDto, StateLabelEntryDto, StateLabelSpecDto,
+    StateRangeRuleDto, StateValueEntryDto, SyncGroupUpdateDto, ToAnalogModeDto,
+    ToStateMachineModeDto, TransportConfigDto, TriggerConditionDto, TriggerSweepModeDto,
+    TxPriorityDto, VirtualNodeConfigDto, VirtualNodeSummaryDto, VirtualOperatorDto,
+    WidgetPluginBundleDto, WidgetPluginInfoDto, WindowMetricKindDto, WorkspaceTelemetryEvent,
 };
 use super::dto::{JustTypedChannelDto, JustTypedKindDto};
 use ddscope_core::workspace::DownlinkRequest;
@@ -147,7 +151,9 @@ pub fn create_source_dto_to_core(req: CreateSourceRequestDto) -> Result<SourceCo
             SimWireFormat::JustFloat
         }
         ProtocolConfigDto::FireWater { .. } => SimWireFormat::FireWaterCsv,
-        ProtocolConfigDto::FixedSchemaBinary { .. } => SimWireFormat::SimPreset,
+        ProtocolConfigDto::FixedSchemaBinary { .. } | ProtocolConfigDto::Plugin { .. } => {
+            SimWireFormat::SimPreset
+        }
     };
 
     let sim_analog_channels = match &req.transport {
@@ -402,6 +408,37 @@ pub fn create_source_dto_to_core(req: CreateSourceRequestDto) -> Result<SourceCo
                 max_carry_bytes: 64 * 1024,
             })
         }
+        ProtocolConfigDto::Plugin {
+            plugin_id,
+            config_json,
+        } => {
+            let trimmed_id = plugin_id.trim();
+            if !is_valid_plugin_id(trimmed_id) {
+                return Err(ApiErrorDto::invalid_config(format!(
+                    "invalid external protocol plugin_id `{trimmed_id}`"
+                )));
+            }
+            let trimmed_cfg = config_json.trim();
+            let normalized_cfg = if trimmed_cfg.is_empty() {
+                "{}".to_string()
+            } else {
+                let parsed: serde_json::Value = serde_json::from_str(trimmed_cfg).map_err(|e| {
+                    ApiErrorDto::invalid_config(format!(
+                        "plugin `{trimmed_id}` config_json must be valid JSON: {e}"
+                    ))
+                })?;
+                if !parsed.is_object() {
+                    return Err(ApiErrorDto::invalid_config(format!(
+                        "plugin `{trimmed_id}` config_json must be a JSON object"
+                    )));
+                }
+                parsed.to_string()
+            };
+            SourceProtocolConfig::Custom {
+                codec_id: trimmed_id.to_owned(),
+                json_config: normalized_cfg,
+            }
+        }
     };
 
     Ok(SourceConfig {
@@ -544,11 +581,13 @@ pub fn source_config_core_to_dto(cfg: &SourceConfig) -> Result<CreateSourceReque
                 .collect(),
             has_hw_tick_first_col: fb.has_hw_tick_first_col,
         },
-        SourceProtocolConfig::Custom { codec_id, .. } => {
-            return Err(ApiErrorDto::invalid_config(format!(
-                "custom protocol `{codec_id}` is not exportable as CreateSourceRequestDto"
-            )));
-        }
+        SourceProtocolConfig::Custom {
+            codec_id,
+            json_config,
+        } => ProtocolConfigDto::Plugin {
+            plugin_id: codec_id.clone(),
+            config_json: json_config.clone(),
+        },
     };
 
     Ok(CreateSourceRequestDto {
@@ -1409,5 +1448,130 @@ pub fn virtual_summary_to_dto(ws: &CoreWorkspace, summary: VirtualNodeSummary) -
         name: summary.name,
         enabled: summary.enabled,
         output_channels,
+    }
+}
+
+fn plugin_param_spec_to_dto(p: &PluginParamSpec) -> PluginParamSpecDto {
+    PluginParamSpecDto {
+        key: p.key.clone(),
+        label_en: p.label.en().to_string(),
+        label_zh: p.label.zh_cn().to_string(),
+        param_type: p.param_type.as_str().to_string(),
+        default_json: p.default_value.to_string(),
+        min: p.min,
+        max: p.max,
+        step: p.step,
+        options: p
+            .options
+            .iter()
+            .map(|opt| PluginSelectOptionDto {
+                value: opt.value.clone(),
+                label_en: opt.label.en().to_string(),
+                label_zh: opt.label.zh_cn().to_string(),
+            })
+            .collect(),
+        description_en: p.description.as_ref().map(|d| d.en().to_string()),
+        description_zh: p.description.as_ref().map(|d| d.zh_cn().to_string()),
+    }
+}
+
+/// Converts a core [`ExternalPluginCatalog`] snapshot into an IPC-friendly [`ExternalPluginCatalogDto`].
+pub fn external_plugin_catalog_to_dto(catalog: ExternalPluginCatalog) -> ExternalPluginCatalogDto {
+    ExternalPluginCatalogDto {
+        search_dirs: catalog
+            .search_dirs
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+        protocols: catalog
+            .protocols
+            .into_iter()
+            .map(|entry| ProtocolPluginInfoDto {
+                id: entry.manifest.id,
+                name_en: entry.manifest.name.en().to_string(),
+                name_zh: entry.manifest.name.zh_cn().to_string(),
+                description_en: entry
+                    .manifest
+                    .description
+                    .as_ref()
+                    .map(|d| d.en().to_string()),
+                description_zh: entry
+                    .manifest
+                    .description
+                    .as_ref()
+                    .map(|d| d.zh_cn().to_string()),
+                version: entry.manifest.version,
+                backend_mode: entry.manifest.backend.mode_tag().to_string(),
+                available: entry.available,
+                error: entry.error,
+                manifest_path: entry.manifest_path.to_string_lossy().into_owned(),
+                params: entry
+                    .manifest
+                    .params
+                    .iter()
+                    .map(plugin_param_spec_to_dto)
+                    .collect(),
+                channels_preview: entry
+                    .manifest
+                    .channels_preview
+                    .into_iter()
+                    .map(|c| PluginChannelPreviewDto {
+                        name: c.name,
+                        scalar_type: c.scalar_type,
+                        unit: c.unit,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        widgets: catalog
+            .widgets
+            .into_iter()
+            .map(|entry| {
+                let badge = entry
+                    .manifest
+                    .badge
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "PLG".to_string());
+                WidgetPluginInfoDto {
+                    id: entry.manifest.id,
+                    name_en: entry.manifest.name.en().to_string(),
+                    name_zh: entry.manifest.name.zh_cn().to_string(),
+                    description_en: entry
+                        .manifest
+                        .description
+                        .as_ref()
+                        .map(|d| d.en().to_string()),
+                    description_zh: entry
+                        .manifest
+                        .description
+                        .as_ref()
+                        .map(|d| d.zh_cn().to_string()),
+                    version: entry.manifest.version,
+                    badge,
+                    default_col_span: entry.manifest.default_col_span,
+                    default_row_span: entry.manifest.default_row_span,
+                    binding_mode: entry.manifest.binding_mode.as_str().to_string(),
+                    available: entry.available,
+                    error: entry.error,
+                    manifest_path: entry.manifest_path.to_string_lossy().into_owned(),
+                    params: entry
+                        .manifest
+                        .params
+                        .iter()
+                        .map(plugin_param_spec_to_dto)
+                        .collect(),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Converts a core [`LoadedWidgetBundle`] into [`WidgetPluginBundleDto`].
+pub fn loaded_widget_bundle_to_dto(bundle: LoadedWidgetBundle) -> WidgetPluginBundleDto {
+    WidgetPluginBundleDto {
+        id: bundle.id,
+        entry_js: bundle.entry_js,
+        style_css: bundle.style_css,
     }
 }

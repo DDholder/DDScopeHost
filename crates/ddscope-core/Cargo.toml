@@ -7,31 +7,25 @@ license.workspace = true
 
 [dependencies]
 ddscope-plugin-api = { workspace = true }
+ddscope-types = { workspace = true }
+ddscope-clock = { workspace = true }
+ddscope-scope = { workspace = true }
+ddscope-transport = { workspace = true }
+ddscope-protocol = { workspace = true }
+ddscope-storage = { workspace = true }
+ddscope-dag = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
-bytemuck = { workspace = true }
 tokio = { workspace = true }
 crossbeam-channel = { workspace = true }
-dashmap = { workspace = true }
 arc-swap = { workspace = true }
 parking_lot = { workspace = true }
-memchr = { workspace = true }
-socket2 = { workspace = true }
-hex = { workspace = true }
-fastrand = { workspace = true }
-crc32fast = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
-winreg = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
 
 [dev-dependencies]
+bytemuck = { workspace = true }
+fastrand = { workspace = true }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type DragEvent } from "react";
 import type { ChannelModalityDto, ChannelNodeDto_Serialize } from "../bridge/bindings.ts";
 import { bridgeClient } from "../bridge/control-client.ts";
 import { DdsfSnapshotKind } from "../bridge/ddsf-spec.ts";
@@ -14,6 +14,8 @@ import {
 } from "../scope-engine/time-format.ts";
 import {
   CommandPanel,
+  getExternalPluginCatalog,
+  subscribeExternalPluginCatalog,
   VirtualChannelPanel,
   WIDGET_CATALOG,
   WidgetToolbox,
@@ -100,6 +102,12 @@ export function ChannelTreeSidebar() {
     (s) => s.placeVirtualOutputsWatchTable,
   );
   const addScope = useWorkspaceStore((s) => s.addScope);
+  const reloadExternalPlugins = useWorkspaceStore((s) => s.reloadExternalPlugins);
+  const pluginCatalog = useSyncExternalStore(
+    subscribeExternalPluginCatalog,
+    getExternalPluginCatalog,
+    getExternalPluginCatalog,
+  );
 
   const sourcesImportRef = useRef<HTMLInputElement | null>(null);
   const [sourceIoNotice, setSourceIoNotice] = useState<{
@@ -375,7 +383,9 @@ export function ChannelTreeSidebar() {
           onClick={() => setSidebarTab("toolbox")}
         >
           <span>{t("sidebar.tab.toolbox")}</span>
-          <span className="sidebar-tab-badge">{WIDGET_CATALOG.length}</span>
+          <span className="sidebar-tab-badge">
+            {WIDGET_CATALOG.length + pluginCatalog.widgets.length}
+          </span>
         </button>
         <button
           type="button"
@@ -696,7 +706,11 @@ export function ChannelTreeSidebar() {
         </div>
       ) : sidebarTab === "toolbox" ? (
         <div className="sidebar-tab-panel" data-testid="sidebar-panel-toolbox">
-          <WidgetToolbox locale={locale} onQuickAddWidget={handleQuickAddWidget} />
+          <WidgetToolbox
+            locale={locale}
+            onQuickAddWidget={handleQuickAddWidget}
+            onReloadPlugins={reloadExternalPlugins}
+          />
         </div>
       ) : (
         <div className="sidebar-tab-panel" data-testid="sidebar-panel-commands">

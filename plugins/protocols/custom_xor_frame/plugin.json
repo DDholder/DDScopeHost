@@ -1,0 +1,63 @@
+{
+  "schema": "ddscope.protocol-plugin.v1",
+  "id": "custom_xor_frame",
+  "name": {
+    "en": "XOR Masked Frame (.dll Plugin)",
+    "zh-CN": "XOR 掩码帧 (C-ABI 动态库插件)"
+  },
+  "version": "1.0.0",
+  "description": {
+    "en": "Native C-ABI dynamic library plugin decoding [DD 7E] + XOR-masked (f32, f32, u32) + XOR8 checksum",
+    "zh-CN": "原生 C-ABI 动态库插件：解析 [DD 7E] + XOR 掩码载荷 (f32, f32, u32) + XOR8 校验"
+  },
+  "params": [
+    {
+      "key": "xor_key",
+      "label": {
+        "en": "XOR Mask Key (0-255)",
+        "zh-CN": "XOR 掩码密钥 (0-255)"
+      },
+      "type": "number",
+      "default": 90,
+      "min": 0,
+      "max": 255,
+      "step": 1
+    },
+    {
+      "key": "ch0_name",
+      "label": {
+        "en": "Channel 0 Name",
+        "zh-CN": "通道 0 名称"
+      },
+      "type": "string",
+      "default": "xor_ia"
+    },
+    {
+      "key": "ch1_name",
+      "label": {
+        "en": "Channel 1 Name",
+        "zh-CN": "通道 1 名称"
+      },
+      "type": "string",
+      "default": "xor_ib"
+    },
+    {
+      "key": "seq_name",
+      "label": {
+        "en": "Sequence Channel Name",
+        "zh-CN": "帧序号通道名称"
+      },
+      "type": "string",
+      "default": "xor_seq"
+    }
+  ],
+  "channels_preview": [
+    { "name": "xor_ia", "scalar_type": "f32", "unit": "A" },
+    { "name": "xor_ib", "scalar_type": "f32", "unit": "A" },
+    { "name": "xor_seq", "scalar_type": "u32" }
+  ],
+  "backend": {
+    "mode": "cdylib",
+    "library": "ddscope_plugin_xor_demo"
+  }
+}

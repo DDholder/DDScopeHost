@@ -29,8 +29,12 @@ import {
   normalizeBitParserConfig,
 } from "../widgets/bit-parser.ts";
 import {
-  WIDGET_TYPES,
+  isValidExternalPluginId,
+  normalizeWidgetPluginConfig,
+} from "../widgets/plugin-registry.ts";
+import {
   clampGridRect,
+  isValidWidgetType,
   type DashboardCanvasConfig,
   type DashboardWidgetItem,
   type WidgetBitParserConfig,
@@ -171,6 +175,7 @@ export interface PortableCanvasWidgetV1 {
   buttonConfig?: WidgetButtonConfig;
   cmdTableConfig?: WidgetCmdTableConfig;
   bitParserConfig?: WidgetBitParserConfig;
+  pluginConfig?: Record<string, unknown>;
 }
 
 export interface PortableDashboardCanvasV1 {
@@ -265,6 +270,7 @@ const VALID_PROTOCOL_CODECS = new Set([
   "just_typed",
   "fixed_schema_binary",
   "fire_water",
+  "plugin",
 ]);
 
 const VALID_SWEEP_MODES = new Set<TriggerSweepModeDto>([
@@ -535,6 +541,34 @@ function validateAndNormalizeSourcesList(
         }
       }
     }
+    if (item.protocol.codec === "plugin") {
+      if (!isValidExternalPluginId(item.protocol.plugin_id)) {
+        throw new Error(
+          `${fieldLabel}[${idx}].protocol.plugin_id '${String(item.protocol.plugin_id)}' is invalid.`,
+        );
+      }
+      if (
+        item.protocol.config_json !== undefined &&
+        typeof item.protocol.config_json !== "string"
+      ) {
+        throw new Error(`${fieldLabel}[${idx}].protocol.config_json must be a JSON string.`);
+      }
+      if (typeof item.protocol.config_json === "string" && item.protocol.config_json.trim()) {
+        let parsedCfg: unknown;
+        try {
+          parsedCfg = JSON.parse(item.protocol.config_json);
+        } catch {
+          throw new Error(
+            `${fieldLabel}[${idx}].protocol.config_json is not valid JSON.`,
+          );
+        }
+        if (!isRecord(parsedCfg)) {
+          throw new Error(
+            `${fieldLabel}[${idx}].protocol.config_json must decode to a JSON object.`,
+          );
+        }
+      }
+    }
     if (typeof item.auto_start !== "boolean") {
       throw new Error(`${fieldLabel}[${idx}].auto_start must be a boolean.`);
     }
@@ -748,6 +782,12 @@ function serializeWidgetList(
             return normalized ? { bitParserConfig: normalized } : {};
           })()
         : {}),
+      ...(w.pluginConfig
+        ? (() => {
+            const normalized = normalizeWidgetPluginConfig(w.pluginConfig);
+            return normalized ? { pluginConfig: normalized } : {};
+          })()
+        : {}),
     };
   });
 }
@@ -899,10 +939,7 @@ function parsePortableWidgets(
       throw new Error(`${pathLabel}[${idx}] must be an object.`);
     }
     const widgetType = wRaw.type;
-    if (
-      typeof widgetType !== "string" ||
-      !(WIDGET_TYPES as readonly string[]).includes(widgetType)
-    ) {
+    if (!isValidWidgetType(widgetType)) {
       throw new Error(`${pathLabel}[${idx}].type '${String(widgetType)}' is invalid.`);
     }
     const id =
@@ -949,6 +986,12 @@ function parsePortableWidgets(
         ? (() => {
             const normalized = normalizeBitParserConfig(wRaw.bitParserConfig);
             return normalized ? { bitParserConfig: normalized } : {};
+          })()
+        : {}),
+      ...(wRaw.pluginConfig !== undefined
+        ? (() => {
+            const normalized = normalizeWidgetPluginConfig(wRaw.pluginConfig);
+            return normalized ? { pluginConfig: normalized } : {};
           })()
         : {}),
     };
@@ -1950,6 +1993,12 @@ export function rehydrateBoardFromConfig(args: {
             : rawWidget.type === "bit_parser"
               ? { bitParserConfig: createDefaultBitParserConfig() }
               : {}),
+          ...(rawWidget.pluginConfig !== undefined
+            ? (() => {
+                const normalized = normalizeWidgetPluginConfig(rawWidget.pluginConfig);
+                return normalized ? { pluginConfig: normalized } : {};
+              })()
+            : {}),
         });
       }
 

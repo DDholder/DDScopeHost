@@ -2,14 +2,15 @@
 //!
 //! Strictly decoupled from Tauri, WebView, and UI frameworks.
 
-pub mod clock;
-pub mod dag;
+pub use ddscope_clock as clock;
+pub use ddscope_dag as dag;
+pub use ddscope_protocol as protocol;
+pub use ddscope_scope as scope;
+pub use ddscope_storage as storage;
+pub use ddscope_transport as transport;
+pub use ddscope_types as types;
+
 pub mod plugin;
-pub mod protocol;
-pub mod scope;
-pub mod storage;
-pub mod transport;
-pub mod types;
 pub mod workspace;
 
 pub use dag::{

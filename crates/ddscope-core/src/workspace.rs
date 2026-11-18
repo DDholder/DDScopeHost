@@ -20,6 +20,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::{ClockMode, ClockSyncConfig, ClockSyncDiagnostics, StreamClockSynchronizer};
 use crate::dag::{VirtualDagEngine, VirtualNodeConfig, VirtualNodeSummary, VIRTUAL_SOURCE_ID};
+use crate::plugin::{
+    discover_and_register_external_plugins, read_widget_plugin_bundle, resolve_plugin_search_dirs,
+    ExternalPluginCatalog, LoadedWidgetBundle,
+};
 use crate::protocol::{
     encode_hex_string, DownlinkPayload, FireWaterConfig, FireWaterCsvCodec, FixedSchemaBinaryCodec,
     FixedSchemaBinaryConfig, JustFloatCodec, JustFloatConfig, JustTypedCodec, JustTypedConfig,
@@ -695,7 +699,7 @@ pub struct SourceSession {
     scheduler: TransportScheduler,
     clock: Arc<Mutex<StreamClockSynchronizer>>,
     codec: Arc<Mutex<Box<dyn ProtocolCodec>>>,
-    protocol_name: &'static str,
+    protocol_name: String,
     declared_descriptors: Vec<ChannelDescriptor>,
     channels: Vec<Arc<ChannelEntry>>,
     hub: Arc<ChannelHub>,
@@ -767,7 +771,7 @@ impl SourceSession {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| source_id.as_str().to_owned());
 
-        let protocol_name = components.codec.protocol_name();
+        let protocol_name = components.codec.protocol_name().to_owned();
 
         let channels = hub.register_channels(&declared_descriptors)?;
         let scheduler = TransportScheduler::new(components.transport, components.runtime_config);
@@ -817,10 +821,10 @@ impl SourceSession {
         self.scheduler.capabilities()
     }
 
-    /// Returns the static protocol name of the attached [`ProtocolCodec`].
+    /// Returns the protocol name of the attached [`ProtocolCodec`].
     #[inline]
-    pub fn protocol_name(&self) -> &'static str {
-        self.protocol_name
+    pub fn protocol_name(&self) -> &str {
+        &self.protocol_name
     }
 
     /// Returns the configured [`ClockMode`].
@@ -1582,7 +1586,8 @@ pub struct CoreWorkspace {
     quota_manager: Arc<MemoryQuotaManager>,
     tokio_handle: tokio::runtime::Handle,
     transport_registry: Arc<TransportRegistry>,
-    protocol_registry: Arc<ProtocolRegistry>,
+    protocol_registry: RwLock<ProtocolRegistry>,
+    plugin_catalog: RwLock<ExternalPluginCatalog>,
     sources: RwLock<HashMap<SourceId, Arc<Mutex<SourceSession>>>>,
     scopes: Mutex<BTreeMap<ScopeId, ManagedScope>>,
     sync_groups: SyncGroupCoordinator,
@@ -1616,12 +1621,16 @@ impl CoreWorkspace {
         let hub = Arc::new(ChannelHub::with_quota_manager(Arc::clone(&quota_manager)));
         let dag = Arc::new(VirtualDagEngine::new());
         hub.register_watermark_listener(dag.watermark_listener());
+        let mut protocol_registry = ProtocolRegistry::with_builtin_codecs();
+        let search_dirs = resolve_plugin_search_dirs();
+        let plugin_catalog = discover_and_register_external_plugins(&mut protocol_registry, &search_dirs);
         Self {
             hub,
             quota_manager,
             tokio_handle,
             transport_registry: Arc::new(TransportRegistry::with_builtin_transports()),
-            protocol_registry: Arc::new(ProtocolRegistry::with_builtin_codecs()),
+            protocol_registry: RwLock::new(protocol_registry),
+            plugin_catalog: RwLock::new(plugin_catalog),
             sources: RwLock::new(HashMap::new()),
             scopes: Mutex::new(BTreeMap::new()),
             sync_groups: SyncGroupCoordinator::new(),
@@ -1666,6 +1675,33 @@ impl CoreWorkspace {
     /// Enumerates OS serial ports currently visible to the host.
     pub fn list_serial_ports(&self) -> CoreResult<Vec<SerialPortInfo>> {
         list_serial_ports()
+    }
+
+    /// Returns a snapshot of discovered external protocol and widget plugins.
+    pub fn external_plugin_catalog(&self) -> ExternalPluginCatalog {
+        self.plugin_catalog.read().clone()
+    }
+
+    /// Rescans configured `plugins/` search directories and atomically swaps the dynamic protocol
+    /// registry and external plugin catalog without affecting already-running sessions.
+    pub fn reload_external_plugins(&self) -> ExternalPluginCatalog {
+        let search_dirs = resolve_plugin_search_dirs();
+        self.reload_external_plugins_from(&search_dirs)
+    }
+
+    /// Rescans `dirs` explicitly and swaps the external plugin catalog and dynamic protocol factories.
+    pub fn reload_external_plugins_from(&self, dirs: &[PathBuf]) -> ExternalPluginCatalog {
+        let mut next_reg = ProtocolRegistry::with_builtin_codecs();
+        let next_catalog = discover_and_register_external_plugins(&mut next_reg, dirs);
+        *self.protocol_registry.write() = next_reg;
+        *self.plugin_catalog.write() = next_catalog.clone();
+        next_catalog
+    }
+
+    /// Reads the ESM script and optional stylesheet for an external widget plugin by ID.
+    pub fn load_widget_plugin_bundle(&self, plugin_id: &str) -> CoreResult<LoadedWidgetBundle> {
+        let catalog = self.plugin_catalog.read().clone();
+        read_widget_plugin_bundle(&catalog, plugin_id)
     }
 
     /// Returns all workspace run-divider boundary timestamps (nanoseconds on the unified clock).
@@ -1713,12 +1749,15 @@ impl CoreWorkspace {
         }
 
         let auto_start = config.auto_start;
-        let mut session = SourceSession::with_registries(
-            config,
-            Arc::clone(&self.hub),
-            &self.transport_registry,
-            &self.protocol_registry,
-        )?;
+        let mut session = {
+            let p_reg = self.protocol_registry.read();
+            SourceSession::with_registries(
+                config,
+                Arc::clone(&self.hub),
+                &self.transport_registry,
+                &p_reg,
+            )?
+        };
         session.timeline.store(Some(Arc::clone(&self.timeline)));
         session.dag.store(Some(Arc::clone(&self.dag)));
         if auto_start {
@@ -1822,11 +1861,10 @@ impl CoreWorkspace {
 
         // Validate new transport, clock, and protocol before touching the running session.
         let auto_start = config.auto_start;
-        let (stored_config, mut components) = build_source_session_components(
-            config,
-            &self.transport_registry,
-            &self.protocol_registry,
-        )?;
+        let (stored_config, mut components) = {
+            let p_reg = self.protocol_registry.read();
+            build_source_session_components(config, &self.transport_registry, &p_reg)?
+        };
         let new_source_id = components.source_id.clone();
 
         let old_arc = self

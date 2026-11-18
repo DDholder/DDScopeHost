@@ -19,7 +19,7 @@ import {
 } from "dockview";
 import { VIRTUAL_SOURCE_ID } from "../bridge/virtual-eval.ts";
 import { ScopeViewportWidget, type ScopeCallbacks } from "../scope-engine/index.ts";
-import { DashboardCanvas, WIDGET_TYPES, type WidgetType } from "../widgets/index.ts";
+import { DashboardCanvas, isValidWidgetType, type WidgetType } from "../widgets/index.ts";
 import { useWorkspaceStore } from "./store.ts";
 import {
   DDSCOPE_POINTER_DROP_EVENT,
@@ -327,8 +327,8 @@ function parseWatermarkWidgetType(ev: DragEvent): WidgetType | null {
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as { widgetType?: string };
-      if (parsed.widgetType && (WIDGET_TYPES as readonly string[]).includes(parsed.widgetType)) {
-        return parsed.widgetType as WidgetType;
+      if (isValidWidgetType(parsed.widgetType)) {
+        return parsed.widgetType;
       }
     } catch {
       // Ignore malformed payload
@@ -337,8 +337,8 @@ function parseWatermarkWidgetType(ev: DragEvent): WidgetType | null {
   const plain = ev.dataTransfer.getData("text/plain");
   if (plain.startsWith("widget:")) {
     const candidate = plain.slice("widget:".length);
-    if ((WIDGET_TYPES as readonly string[]).includes(candidate)) {
-      return candidate as WidgetType;
+    if (isValidWidgetType(candidate)) {
+      return candidate;
     }
   }
   return null;

@@ -1,0 +1,12 @@
+[package]
+name = "ddscope-dag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ddscope-types = { workspace = true }
+ddscope-storage = { workspace = true }
+serde = { workspace = true }
+parking_lot = { workspace = true }

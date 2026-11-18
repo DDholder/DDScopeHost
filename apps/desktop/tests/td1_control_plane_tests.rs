@@ -832,3 +832,71 @@ async fn just_typed_control_plane_declares_per_channel_types_and_roundtrips_conf
 
     ws.shutdown().await.expect("shutdown workspace");
 }
+
+#[tokio::test]
+async fn external_plugins_control_plane_lists_catalog_loads_bundle_and_roundtrips_source_config() {
+    let ws = Arc::new(CoreWorkspace::new(tokio::runtime::Handle::current()));
+    let plugins_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("plugins");
+    ws.reload_external_plugins_from(&[plugins_dir]);
+    let state = DesktopBridgeState::with_workspace(Arc::clone(&ws));
+
+    let catalog = state.list_external_plugins().expect("list_external_plugins");
+    assert!(catalog
+        .protocols
+        .iter()
+        .any(|p| p.id == "scaled_int16_frame" && p.available));
+    assert!(catalog
+        .widgets
+        .iter()
+        .any(|w| w.id == "bar_level_monitor" && w.available));
+
+    let bundle = state
+        .load_widget_plugin_bundle("bar_level_monitor".to_string())
+        .expect("load widget plugin bundle");
+    assert!(bundle.entry_js.contains("mount("));
+    assert!(bundle.style_css.is_some());
+
+    // Traversal must be rejected at IPC control plane too
+    assert!(state
+        .load_widget_plugin_bundle("../evil".to_string())
+        .is_err());
+
+    let req = CreateSourceRequestDto {
+        source_id: "ext_proto_src".to_string(),
+        display_name: Some("Scaled Int16 Plugin".to_string()),
+        transport: TransportConfigDto::Udp {
+            bind_addr: "127.0.0.1:0".to_string(),
+            multicast_group: None,
+            recv_buffer_bytes: 1_048_576,
+            remote_tx_addr: None,
+        },
+        clock: ClockConfigDto::Tier2SoftwarePll {
+            nominal_sample_rate_hz: Some(20_000.0),
+        },
+        protocol: ProtocolConfigDto::Plugin {
+            plugin_id: "scaled_int16_frame".to_string(),
+            config_json: r#"{"current_scale":0.05,"voltage_scale":0.25}"#.to_string(),
+        },
+        auto_start: false,
+    };
+
+    state.create_source(req.clone()).expect("create plugin source");
+    let tree = state.get_channel_tree().expect("get_channel_tree");
+    let grp = tree
+        .sources
+        .iter()
+        .find(|g| g.source.source_id == "ext_proto_src")
+        .expect("ext_proto_src must exist");
+    let paths: Vec<&str> = grp.channels.iter().map(|c| c.local_path.as_str()).collect();
+    assert!(paths.contains(&"phase_u"));
+    assert!(paths.contains(&"phase_v"));
+    assert!(paths.contains(&"bus_v"));
+
+    let cfgs = state.get_source_configs().expect("get_source_configs");
+    assert_eq!(cfgs.len(), 1);
+    assert_eq!(cfgs[0].protocol, req.protocol);
+
+    ws.shutdown().await.expect("shutdown workspace");
+}

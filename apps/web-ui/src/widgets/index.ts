@@ -1,6 +1,8 @@
 export const WIDGETS_READY = true;
 
 export * from "./types.ts";
+export * from "./plugin-registry.ts";
+export * from "./PluginWidgetHost.tsx";
 export * from "./WidgetToolbox.tsx";
 export * from "./CommandPanel.tsx";
 export * from "./VirtualChannelPanel.tsx";

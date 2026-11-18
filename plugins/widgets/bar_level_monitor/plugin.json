@@ -1,0 +1,60 @@
+{
+  "schema": "ddscope.widget-plugin.v1",
+  "id": "bar_level_monitor",
+  "name": {
+    "en": "Bar Level Monitor",
+    "zh-CN": "柱状电平监视器"
+  },
+  "version": "1.0.0",
+  "description": {
+    "en": "External plugin widget showing live level bar, peak-hold marker, and warning threshold.",
+    "zh-CN": "外部插件控件：带峰值保持刻度线与告警阈值的实时柱状电平监视器。"
+  },
+  "badge": "BAR",
+  "default_col_span": 8,
+  "default_row_span": 4,
+  "binding_mode": "single_channel",
+  "entry_js": "index.js",
+  "style_css": "style.css",
+  "params": [
+    {
+      "key": "min",
+      "label": {
+        "en": "Min Scale",
+        "zh-CN": "量程下限"
+      },
+      "type": "number",
+      "default": -25,
+      "step": 1
+    },
+    {
+      "key": "max",
+      "label": {
+        "en": "Max Scale",
+        "zh-CN": "量程上限"
+      },
+      "type": "number",
+      "default": 25,
+      "step": 1
+    },
+    {
+      "key": "warnThreshold",
+      "label": {
+        "en": "Warn Threshold",
+        "zh-CN": "告警阈值"
+      },
+      "type": "number",
+      "default": 18,
+      "step": 0.5
+    },
+    {
+      "key": "showPeakHold",
+      "label": {
+        "en": "Show Peak Hold",
+        "zh-CN": "显示峰值保持"
+      },
+      "type": "boolean",
+      "default": true
+    }
+  ]
+}

@@ -47,6 +47,15 @@ import type {
 } from "../scope-engine/types.ts";
 import { createDefaultBitParserConfig } from "../widgets/bit-parser.ts";
 import {
+  buildDefaultPluginParams,
+  clearLoadedWidgetModuleCache,
+  getPluginWidgetInfo,
+  isPluginWidgetType,
+  pluginIdFromWidgetType,
+  resolvePluginText,
+  setExternalPluginCatalog,
+} from "../widgets/plugin-registry.ts";
+import {
   clampGridRect,
   defaultSizeForWidgetType,
   findFreeGridSlot,
@@ -187,6 +196,7 @@ export interface WorkspaceStoreState {
   setLocale: (locale: UiLocale) => void;
   initWorkspace: () => Promise<void>;
   refreshChannelTree: () => Promise<void>;
+  reloadExternalPlugins: () => Promise<void>;
   setMockRateHz: (rate: 60 | 120) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   setSidebarTab: (tab: "sources" | "virtual" | "toolbox" | "commands") => void;
@@ -1472,6 +1482,10 @@ export function createWorkspaceStore(
       if (get().initialized) return;
       persistLocale(get().locale);
       try {
+        await client
+          .listExternalPlugins()
+          .then(setExternalPluginCatalog)
+          .catch(() => {});
         await client.startDataPlane(get().mockRateHz);
         const rawStatus = await fetchStatus();
         const status: RuntimeStatus =
@@ -1633,6 +1647,12 @@ export function createWorkspaceStore(
           pinnedBytes: tree.pinned_bytes ?? 0,
         },
       });
+    },
+
+    reloadExternalPlugins: async () => {
+      clearLoadedWidgetModuleCache();
+      const catalog = await client.reloadExternalPlugins();
+      setExternalPluginCatalog(catalog);
     },
 
     setMockRateHz: (rate) => {
@@ -2399,19 +2419,35 @@ export function createWorkspaceStore(
         scopeId = get().addScope(undefined, { dockInStage: false });
       }
 
-      const defaultTitle =
-        ch && widgetType !== "watch_table"
+      const isPlugin = isPluginWidgetType(widgetType);
+      const pluginInfo = isPlugin ? getPluginWidgetInfo(widgetType) : undefined;
+      const pluginBindingMode = pluginInfo?.binding_mode ?? "single_channel";
+      const pluginLabel = pluginInfo
+        ? resolvePluginText(pluginInfo.name_en, pluginInfo.name_zh, state.locale)
+        : isPluginWidgetType(widgetType)
+          ? pluginIdFromWidgetType(widgetType)
+          : "";
+
+      const defaultTitle = isPlugin
+        ? ch && pluginBindingMode === "single_channel"
+          ? ch.full_path
+          : pluginLabel
+        : ch && widgetType !== "watch_table"
           ? ch.full_path
           : translate(state.locale, `toolbox.widget.${widgetType}.name` as MessageKey);
 
       const binding =
-        ch &&
-        widgetType !== "watch_table" &&
-        widgetType !== "param_slider" &&
-        widgetType !== "cmd_button" &&
-        widgetType !== "cmd_table"
-          ? { channelId: ch.channel_id, scale: 1, offset: 0 }
-          : null;
+        isPlugin
+          ? ch && pluginBindingMode === "single_channel"
+            ? { channelId: ch.channel_id, scale: 1, offset: 0 }
+            : null
+          : ch &&
+              widgetType !== "watch_table" &&
+              widgetType !== "param_slider" &&
+              widgetType !== "cmd_button" &&
+              widgetType !== "cmd_table"
+            ? { channelId: ch.channel_id, scale: 1, offset: 0 }
+            : null;
 
       const item: DashboardWidgetItem = {
         id: widgetId,
@@ -2423,10 +2459,14 @@ export function createWorkspaceStore(
         rowSpan: clamped.rowSpan,
         primaryBinding: widgetType === "mso_scope" ? null : binding,
         bindings:
-          ch && widgetType === "watch_table"
+          ch &&
+          (widgetType === "watch_table" || (isPlugin && pluginBindingMode === "multi_channel"))
             ? [{ channelId: ch.channel_id, scale: 1, offset: 0 }]
             : [],
         scopeId,
+        ...(isPlugin
+          ? { pluginConfig: buildDefaultPluginParams(pluginInfo?.params ?? []) }
+          : {}),
         ...(widgetType === "radial_gauge"
           ? {
               gaugeConfig:
@@ -2669,6 +2709,35 @@ export function createWorkspaceStore(
               ...prevCfg,
               sourceId: downlinkSourceId,
             },
+          };
+        }
+        if (isPluginWidgetType(prev.type)) {
+          const pluginInfo = getPluginWidgetInfo(prev.type);
+          const mode = pluginInfo?.binding_mode ?? "single_channel";
+          if (mode === "none") return prev;
+          if (mode === "multi_channel") {
+            if (prev.bindings.some((b) => b.channelId === channelId)) {
+              return prev;
+            }
+            return {
+              ...prev,
+              bindings: [...prev.bindings, { channelId, scale: 1, offset: 0 }],
+            };
+          }
+          const prevChPath = prev.primaryBinding
+            ? state.channelsById[prev.primaryBinding.channelId]?.full_path
+            : undefined;
+          const defaultEn = pluginInfo?.name_en ?? pluginIdFromWidgetType(prev.type);
+          const defaultZh = pluginInfo?.name_zh ?? defaultEn;
+          const isDefaultOrPrev =
+            prev.title === defaultEn ||
+            prev.title === defaultZh ||
+            (prevChPath !== undefined && prev.title === prevChPath) ||
+            prev.title.trim().length === 0;
+          return {
+            ...prev,
+            ...(isDefaultOrPrev ? { title: ch.full_path } : {}),
+            primaryBinding: { channelId, scale: 1, offset: 0 },
           };
         }
         return prev;

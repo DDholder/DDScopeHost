@@ -42,6 +42,9 @@ pub fn create_specta_builder() -> Builder<tauri::Wry> {
             commands::upsert_virtual_channel,
             commands::remove_virtual_channel,
             commands::clear_virtual_channels,
+            commands::list_external_plugins,
+            commands::reload_external_plugins,
+            commands::load_widget_plugin_bundle,
         ])
         .events(collect_events![commands::WorkspaceTelemetryEvent])
 }

@@ -28,12 +28,14 @@ import { RadialGaugeWidget } from "./RadialGaugeWidget.tsx";
 import { StatusLedWidget } from "./StatusLedWidget.tsx";
 import { BitParserWidget } from "./BitParserWidget.tsx";
 import { WatchTableWidget } from "./WatchTableWidget.tsx";
+import { PluginWidgetHost } from "./PluginWidgetHost.tsx";
+import { isPluginWidgetType } from "./plugin-registry.ts";
 import {
   DASHBOARD_GRID_COLS,
   DASHBOARD_GRID_ROW_STRIDE_PX,
-  WIDGET_TYPES,
   clampGridRect,
   computeCanvasGridCell,
+  isValidWidgetType,
   type DashboardCanvasConfig,
   type DashboardWidgetItem,
   type WidgetType,
@@ -101,8 +103,8 @@ function parseDroppedWidgetType(ev: DragEvent): WidgetType | null {
   if (rawJson) {
     try {
       const parsed = JSON.parse(rawJson) as { widgetType?: string };
-      if (parsed.widgetType && (WIDGET_TYPES as readonly string[]).includes(parsed.widgetType)) {
-        return parsed.widgetType as WidgetType;
+      if (isValidWidgetType(parsed.widgetType)) {
+        return parsed.widgetType;
       }
     } catch {
       // Ignore malformed widget payload
@@ -111,8 +113,8 @@ function parseDroppedWidgetType(ev: DragEvent): WidgetType | null {
   const plain = ev.dataTransfer.getData("text/plain");
   if (plain.startsWith("widget:")) {
     const candidate = plain.slice("widget:".length);
-    if ((WIDGET_TYPES as readonly string[]).includes(candidate)) {
-      return candidate as WidgetType;
+    if (isValidWidgetType(candidate)) {
+      return candidate;
     }
   }
   return null;
@@ -627,6 +629,18 @@ export function DashboardCanvas({
         );
       }
       default:
+        if (isPluginWidgetType(widget.type)) {
+          return (
+            <PluginWidgetHost
+              widget={widget}
+              channelsById={channelsById}
+              locale={locale}
+              onUpdateWidget={handleUpdate}
+              onBindChannel={bindChannel}
+              onSendDownlink={onSendDownlink}
+            />
+          );
+        }
         return null;
     }
   };
