@@ -31,10 +31,12 @@ import {
 import {
   detectInitialLocale,
   getDefaultCanvasTitle,
+  getDefaultPageTitle,
   getDefaultScopeTitle,
   persistLocale,
   translate,
   translateDefaultCanvasTitle,
+  translateDefaultPageTitle,
   translateDefaultScopeTitle,
   type MessageKey,
   type UiLocale,
@@ -70,6 +72,8 @@ import {
   type BoardConfigFileV1,
   type DownlinkUiConfig,
   type ProjectConfigFileV1,
+  type RehydratedWorkspacePage,
+  type WorkspacePageExportInput,
 } from "./config-io.ts";
 import {
   backfillCommandArgValuesFromCanvases,
@@ -114,6 +118,8 @@ const TRACE_COLORS = [
   0xf97316ff, // orange
   0xe879f9ff, // fuchsia
 ];
+
+export type WorkspacePageState = RehydratedWorkspacePage;
 
 export interface DownlinkLogEntry {
   id: number;
@@ -172,6 +178,11 @@ export interface WorkspaceStoreState {
   pendingDockviewLayout: Record<string, unknown> | null;
   layoutRestoreSeq: number;
 
+  pages: Record<number, WorkspacePageState>;
+  pageOrder: number[];
+  activePageId: number;
+  nextPageId: number;
+
   setLocale: (locale: UiLocale) => void;
   initWorkspace: () => Promise<void>;
   refreshChannelTree: () => Promise<void>;
@@ -203,6 +214,7 @@ export interface WorkspaceStoreState {
 
   addScope: (title?: string, options?: { dockInStage?: boolean }) => number;
   removeScope: (scopeId: number) => void;
+  renameScope: (scopeId: number, title: string) => void;
   updateScope: (scopeId: number, updater: (prev: ScopeUiConfig) => ScopeUiConfig) => void;
   setScopeCanvasWidth: (scopeId: number, widthPx: number) => void;
   rearmScope: (scopeId: number) => void;
@@ -221,9 +233,15 @@ export interface WorkspaceStoreState {
 
   addCanvas: (title?: string) => number;
   removeCanvas: (canvasId: number) => void;
+  renameCanvas: (canvasId: number, title: string) => void;
   setCanvasOrder: (order: number[]) => void;
   setActiveCanvasId: (canvasId: number | null) => void;
   toggleCanvasLock: (canvasId: number) => void;
+
+  addPage: (title?: string) => number;
+  removePage: (pageId: number) => void;
+  setActivePage: (pageId: number) => void;
+  renamePage: (pageId: number, title: string) => void;
   clearCanvasWidgets: (canvasId: number) => void;
   addWidgetToCanvas: (
     canvasId: number,
@@ -838,6 +856,39 @@ export function createWorkspaceStore(
       return list;
     };
 
+    const isStandaloneScopeAcrossPages = (
+      state: WorkspaceStoreState,
+      scopeId: number,
+    ): boolean =>
+      state.scopeOrder.includes(scopeId) ||
+      Object.values(state.pages).some((p) => p.scopeOrder.includes(scopeId));
+
+    const patchActivePage = (
+      state: WorkspaceStoreState,
+      patch: Partial<Omit<WorkspacePageState, "pageId">>,
+    ): Pick<
+      WorkspaceStoreState,
+      "pages" | "scopeOrder" | "canvasOrder" | "focusedScopeId" | "activeCanvasId"
+    > => {
+      const curPage = state.pages[state.activePageId] ?? {
+        pageId: state.activePageId,
+        title: getDefaultPageTitle(state.locale, state.activePageId),
+        scopeOrder: state.scopeOrder,
+        canvasOrder: state.canvasOrder,
+        focusedScopeId: state.focusedScopeId,
+        activeCanvasId: state.activeCanvasId,
+        dockviewLayout: state.pendingDockviewLayout,
+      };
+      const updatedPage: WorkspacePageState = { ...curPage, ...patch };
+      return {
+        pages: { ...state.pages, [state.activePageId]: updatedPage },
+        scopeOrder: updatedPage.scopeOrder,
+        canvasOrder: updatedPage.canvasOrder,
+        focusedScopeId: updatedPage.focusedScopeId,
+        activeCanvasId: updatedPage.activeCanvasId,
+      };
+    };
+
     const collectBoardExportInput = (state: WorkspaceStoreState) => {
       const liveLayout = dockviewLayoutAccessor
         ? dockviewLayoutAccessor()
@@ -852,6 +903,41 @@ export function createWorkspaceStore(
             ? state.downlinkConfig.targetSource
             : physicalGroups[0].source.source_id;
 
+      const pagesForExport: WorkspacePageExportInput[] =
+        state.pageOrder.length > 0
+          ? state.pageOrder
+              .map((pid) => state.pages[pid])
+              .filter((p): p is WorkspacePageState => Boolean(p))
+              .map((p) => ({
+                pageId: p.pageId,
+                title: p.title,
+                scopeOrder:
+                  p.pageId === state.activePageId ? state.scopeOrder : p.scopeOrder,
+                canvasOrder:
+                  p.pageId === state.activePageId ? state.canvasOrder : p.canvasOrder,
+                focusedScopeId:
+                  p.pageId === state.activePageId
+                    ? state.focusedScopeId
+                    : p.focusedScopeId,
+                activeCanvasId:
+                  p.pageId === state.activePageId
+                    ? state.activeCanvasId
+                    : p.activeCanvasId,
+                dockviewLayout:
+                  p.pageId === state.activePageId ? liveLayout : p.dockviewLayout,
+              }))
+          : [
+              {
+                pageId: state.activePageId,
+                title: getDefaultPageTitle(state.locale, state.activePageId),
+                scopeOrder: state.scopeOrder,
+                canvasOrder: state.canvasOrder,
+                focusedScopeId: state.focusedScopeId,
+                activeCanvasId: state.activeCanvasId,
+                dockviewLayout: liveLayout,
+              },
+            ];
+
       return {
         scopes: state.scopes,
         scopeOrder: state.scopeOrder,
@@ -865,12 +951,15 @@ export function createWorkspaceStore(
           downlinkBarCollapsed: state.downlinkBarCollapsed,
           focusedScopeId: state.focusedScopeId,
           activeCanvasId: state.activeCanvasId,
+          activePageId: state.activePageId,
         },
         downlink: {
           ...state.downlinkConfig,
           targetSource: effectiveTargetSource,
         },
         dockviewLayout: liveLayout,
+        pages: pagesForExport,
+        activePageId: state.activePageId,
         commands: state.commands,
       };
     };
@@ -883,6 +972,7 @@ export function createWorkspaceStore(
         availableSourceIds: stateBefore.channelGroups
           .filter((g) => !isVirtualSourceGroup(g.source.source_id, g.source.transport_kind))
           .map((g) => g.source.source_id),
+        locale: stateBefore.locale,
       });
 
       const oldScopeIds = Object.keys(stateBefore.scopes).map((k) => Number(k));
@@ -921,6 +1011,10 @@ export function createWorkspaceStore(
         commands: rehydrated.commands,
         nextCommandSeq: rehydrated.nextCommandSeq,
         pendingDockviewLayout: rehydrated.dockviewLayout,
+        pages: rehydrated.pages,
+        pageOrder: rehydrated.pageOrder,
+        activePageId: rehydrated.activePageId,
+        nextPageId: rehydrated.nextPageId,
         layoutRestoreSeq: s.layoutRestoreSeq + 1,
       }));
 
@@ -931,8 +1025,11 @@ export function createWorkspaceStore(
       );
 
       return {
-        scopeCount: rehydrated.scopeOrder.length,
-        canvasCount: rehydrated.canvasOrder.length,
+        scopeCount: Object.values(rehydrated.pages).reduce(
+          (sum, p) => sum + p.scopeOrder.length,
+          0,
+        ),
+        canvasCount: Object.keys(rehydrated.canvases).length,
         widgetCount: Object.values(rehydrated.canvases).reduce(
           (sum, cv) => sum + cv.widgets.length,
           0,
@@ -1311,6 +1408,21 @@ export function createWorkspaceStore(
     pendingDockviewLayout: null,
     layoutRestoreSeq: 0,
 
+    pages: {
+      1: {
+        pageId: 1,
+        title: getDefaultPageTitle(detectInitialLocale(), 1),
+        scopeOrder: [],
+        canvasOrder: [],
+        focusedScopeId: 1,
+        activeCanvasId: 1,
+        dockviewLayout: null,
+      },
+    },
+    pageOrder: [1],
+    activePageId: 1,
+    nextPageId: 2,
+
     setLocale: (nextLocale) => {
       persistLocale(nextLocale);
       const state = get();
@@ -1336,10 +1448,22 @@ export function createWorkspaceStore(
           nextCanvases[Number(idStr)] = cv;
         }
       }
+      const nextPages: Record<number, WorkspacePageState> = {};
+      let changedPages = false;
+      for (const [idStr, pg] of Object.entries(state.pages)) {
+        const nextTitle = translateDefaultPageTitle(pg.title, nextLocale);
+        if (nextTitle !== pg.title) {
+          changedPages = true;
+          nextPages[Number(idStr)] = { ...pg, title: nextTitle };
+        } else {
+          nextPages[Number(idStr)] = pg;
+        }
+      }
       set({
         locale: nextLocale,
         ...(changedScopes ? { scopes: nextScopes } : {}),
         ...(changedCanvases ? { canvases: nextCanvases } : {}),
+        ...(changedPages ? { pages: nextPages } : {}),
       });
     },
 
@@ -1459,6 +1583,20 @@ export function createWorkspaceStore(
             activeCanvasId: 1,
             nextCanvasId: 2,
             nextWidgetSeq: defaultCanvas.nextWidgetSeq,
+            pages: {
+              1: {
+                pageId: 1,
+                title: getDefaultPageTitle(get().locale, 1),
+                scopeOrder: [1, 2],
+                canvasOrder: [1],
+                focusedScopeId: 1,
+                activeCanvasId: 1,
+                dockviewLayout: null,
+              },
+            },
+            pageOrder: [1],
+            activePageId: 1,
+            nextPageId: 2,
           });
         }
       } catch (err: unknown) {
@@ -1512,7 +1650,8 @@ export function createWorkspaceStore(
     openCreateSourceWizard: () => set({ editingSourceId: null, sourceWizardOpen: true }),
     openEditSourceWizard: (sourceId) =>
       set({ editingSourceId: sourceId, sourceWizardOpen: true }),
-    setFocusedScopeId: (scopeId) => set({ focusedScopeId: scopeId }),
+    setFocusedScopeId: (scopeId) =>
+      set((state) => patchActivePage(state, { focusedScopeId: scopeId })),
     updateDownlinkConfig: (patch) =>
       set((s) => ({
         downlinkConfig: {
@@ -1712,10 +1851,10 @@ export function createWorkspaceStore(
       set({
         scopes: { ...state.scopes, [scopeId]: newScope },
         ...(dockInStage
-          ? {
+          ? patchActivePage(state, {
               scopeOrder: [...state.scopeOrder, scopeId],
               focusedScopeId: scopeId,
-            }
+            })
           : {}),
         nextScopeId: scopeId + 1,
       });
@@ -1732,17 +1871,45 @@ export function createWorkspaceStore(
       if (!state.scopes[scopeId]) return;
       const nextScopes = { ...state.scopes };
       delete nextScopes[scopeId];
-      const nextOrder = state.scopeOrder.filter((id) => id !== scopeId);
-      const nextFocused =
-        state.focusedScopeId === scopeId ? (nextOrder[0] ?? null) : state.focusedScopeId;
+
+      const nextPages: Record<number, WorkspacePageState> = {};
+      for (const [pidStr, pg] of Object.entries(state.pages)) {
+        const pid = Number(pidStr);
+        const filtered = pg.scopeOrder.filter((id) => id !== scopeId);
+        const focused =
+          pg.focusedScopeId === scopeId ? (filtered[0] ?? null) : pg.focusedScopeId;
+        nextPages[pid] =
+          filtered.length !== pg.scopeOrder.length || focused !== pg.focusedScopeId
+            ? { ...pg, scopeOrder: filtered, focusedScopeId: focused }
+            : pg;
+      }
+
+      const activePage = nextPages[state.activePageId];
+      const nextOrder = activePage
+        ? activePage.scopeOrder
+        : state.scopeOrder.filter((id) => id !== scopeId);
+      const nextFocused = activePage
+        ? activePage.focusedScopeId
+        : state.focusedScopeId === scopeId
+          ? (nextOrder[0] ?? null)
+          : state.focusedScopeId;
 
       set({
         scopes: nextScopes,
+        pages: nextPages,
         scopeOrder: nextOrder,
         focusedScopeId: nextFocused,
       });
       client.topicBus.deleteScopeCache(scopeId);
       client.removeScopeViewport(scopeId).catch(() => {});
+    },
+
+    renameScope: (scopeId, title) => {
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      get().updateScope(scopeId, (prev) =>
+        prev.title === trimmed ? prev : { ...prev, title: trimmed },
+      );
     },
 
     updateScope: (scopeId, updater) => {
@@ -1932,8 +2099,10 @@ export function createWorkspaceStore(
       };
       set({
         canvases: { ...state.canvases, [canvasId]: newCanvas },
-        canvasOrder: [...state.canvasOrder, canvasId],
-        activeCanvasId: canvasId,
+        ...patchActivePage(state, {
+          canvasOrder: [...state.canvasOrder, canvasId],
+          activeCanvasId: canvasId,
+        }),
         nextCanvasId: canvasId + 1,
       });
       return canvasId;
@@ -1944,25 +2113,226 @@ export function createWorkspaceStore(
       const target = state.canvases[canvasId];
       if (!target) return;
       for (const w of target.widgets) {
-        if (w.type === "mso_scope" && w.scopeId !== null && !state.scopeOrder.includes(w.scopeId)) {
+        if (
+          w.type === "mso_scope" &&
+          w.scopeId !== null &&
+          !isStandaloneScopeAcrossPages(state, w.scopeId)
+        ) {
           get().removeScope(w.scopeId);
         }
       }
-      const nextCanvases = { ...get().canvases };
+      const latest = get();
+      const nextCanvases = { ...latest.canvases };
       delete nextCanvases[canvasId];
-      const nextOrder = state.canvasOrder.filter((id) => id !== canvasId);
-      const nextActive =
-        state.activeCanvasId === canvasId ? (nextOrder[0] ?? null) : state.activeCanvasId;
+
+      const nextPages: Record<number, WorkspacePageState> = {};
+      for (const [pidStr, pg] of Object.entries(latest.pages)) {
+        const pid = Number(pidStr);
+        const filtered = pg.canvasOrder.filter((id) => id !== canvasId);
+        const active =
+          pg.activeCanvasId === canvasId ? (filtered[0] ?? null) : pg.activeCanvasId;
+        nextPages[pid] =
+          filtered.length !== pg.canvasOrder.length || active !== pg.activeCanvasId
+            ? { ...pg, canvasOrder: filtered, activeCanvasId: active }
+            : pg;
+      }
+
+      const activePage = nextPages[latest.activePageId];
+      const nextOrder = activePage
+        ? activePage.canvasOrder
+        : latest.canvasOrder.filter((id) => id !== canvasId);
+      const nextActive = activePage
+        ? activePage.activeCanvasId
+        : latest.activeCanvasId === canvasId
+          ? (nextOrder[0] ?? null)
+          : latest.activeCanvasId;
+
       set({
         canvases: nextCanvases,
+        pages: nextPages,
         canvasOrder: nextOrder,
         activeCanvasId: nextActive,
       });
     },
 
-    setCanvasOrder: (order) => set({ canvasOrder: order }),
+    renameCanvas: (canvasId, title) => {
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      const state = get();
+      const prev = state.canvases[canvasId];
+      if (!prev || prev.title === trimmed) return;
+      set({
+        canvases: {
+          ...state.canvases,
+          [canvasId]: { ...prev, title: trimmed },
+        },
+      });
+    },
 
-    setActiveCanvasId: (canvasId) => set({ activeCanvasId: canvasId }),
+    setCanvasOrder: (order) =>
+      set((state) => patchActivePage(state, { canvasOrder: order })),
+
+    setActiveCanvasId: (canvasId) =>
+      set((state) => patchActivePage(state, { activeCanvasId: canvasId })),
+
+    addPage: (title) => {
+      const state = get();
+      const pageId = state.nextPageId;
+      const liveLayout = dockviewLayoutAccessor
+        ? dockviewLayoutAccessor()
+        : state.pendingDockviewLayout;
+      const prevActive = state.pages[state.activePageId];
+      const nextPages: Record<number, WorkspacePageState> = { ...state.pages };
+      if (prevActive) {
+        nextPages[state.activePageId] = {
+          ...prevActive,
+          scopeOrder: state.scopeOrder,
+          canvasOrder: state.canvasOrder,
+          focusedScopeId: state.focusedScopeId,
+          activeCanvasId: state.activeCanvasId,
+          dockviewLayout: liveLayout,
+        };
+      }
+      const resolvedTitle = title?.trim() || getDefaultPageTitle(state.locale, pageId);
+      nextPages[pageId] = {
+        pageId,
+        title: resolvedTitle,
+        scopeOrder: [],
+        canvasOrder: [],
+        focusedScopeId: null,
+        activeCanvasId: null,
+        dockviewLayout: null,
+      };
+      set((s) => ({
+        pages: nextPages,
+        pageOrder: [...s.pageOrder, pageId],
+        activePageId: pageId,
+        nextPageId: pageId + 1,
+        scopeOrder: [],
+        canvasOrder: [],
+        focusedScopeId: null,
+        activeCanvasId: null,
+        pendingDockviewLayout: null,
+        layoutRestoreSeq: s.layoutRestoreSeq + 1,
+      }));
+      return pageId;
+    },
+
+    setActivePage: (pageId) => {
+      const state = get();
+      if (pageId === state.activePageId) return;
+      const target = state.pages[pageId];
+      if (!target) return;
+
+      const liveLayout = dockviewLayoutAccessor
+        ? dockviewLayoutAccessor()
+        : state.pendingDockviewLayout;
+      const nextPages: Record<number, WorkspacePageState> = { ...state.pages };
+      const curPage = nextPages[state.activePageId];
+      if (curPage) {
+        nextPages[state.activePageId] = {
+          ...curPage,
+          scopeOrder: state.scopeOrder,
+          canvasOrder: state.canvasOrder,
+          focusedScopeId: state.focusedScopeId,
+          activeCanvasId: state.activeCanvasId,
+          dockviewLayout: liveLayout,
+        };
+      }
+
+      set((s) => ({
+        pages: nextPages,
+        activePageId: pageId,
+        scopeOrder: target.scopeOrder,
+        canvasOrder: target.canvasOrder,
+        focusedScopeId: target.focusedScopeId,
+        activeCanvasId: target.activeCanvasId,
+        pendingDockviewLayout: target.dockviewLayout,
+        layoutRestoreSeq: s.layoutRestoreSeq + 1,
+      }));
+    },
+
+    renamePage: (pageId, title) => {
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      const state = get();
+      const target = state.pages[pageId];
+      if (!target || target.title === trimmed) return;
+      set({
+        pages: {
+          ...state.pages,
+          [pageId]: { ...target, title: trimmed },
+        },
+      });
+    },
+
+    removePage: (pageId) => {
+      const state = get();
+      if (state.pageOrder.length <= 1 || !state.pages[pageId]) return;
+
+      const target = state.pages[pageId];
+      const removedIdx = state.pageOrder.indexOf(pageId);
+      const nextPageOrder = state.pageOrder.filter((id) => id !== pageId);
+      const nextPages = { ...state.pages };
+      delete nextPages[pageId];
+
+      const remainingStandaloneScopes = new Set<number>();
+      for (const pg of Object.values(nextPages)) {
+        for (const sid of pg.scopeOrder) {
+          remainingStandaloneScopes.add(sid);
+        }
+      }
+
+      const scopesToDelete = new Set<number>(target.scopeOrder);
+      const nextCanvases = { ...state.canvases };
+      for (const cid of target.canvasOrder) {
+        const cv = state.canvases[cid];
+        if (cv) {
+          for (const w of cv.widgets) {
+            if (
+              w.type === "mso_scope" &&
+              w.scopeId !== null &&
+              !remainingStandaloneScopes.has(w.scopeId)
+            ) {
+              scopesToDelete.add(w.scopeId);
+            }
+          }
+          delete nextCanvases[cid];
+        }
+      }
+
+      const nextScopes = { ...state.scopes };
+      for (const sid of scopesToDelete) {
+        delete nextScopes[sid];
+        client.topicBus.deleteScopeCache(sid);
+        client.removeScopeViewport(sid).catch(() => {});
+      }
+
+      if (state.activePageId === pageId) {
+        const nextActiveId = nextPageOrder[Math.min(removedIdx, nextPageOrder.length - 1)];
+        const nextActive = nextPages[nextActiveId];
+        set((s) => ({
+          scopes: nextScopes,
+          canvases: nextCanvases,
+          pages: nextPages,
+          pageOrder: nextPageOrder,
+          activePageId: nextActiveId,
+          scopeOrder: nextActive.scopeOrder,
+          canvasOrder: nextActive.canvasOrder,
+          focusedScopeId: nextActive.focusedScopeId,
+          activeCanvasId: nextActive.activeCanvasId,
+          pendingDockviewLayout: nextActive.dockviewLayout,
+          layoutRestoreSeq: s.layoutRestoreSeq + 1,
+        }));
+      } else {
+        set({
+          scopes: nextScopes,
+          canvases: nextCanvases,
+          pages: nextPages,
+          pageOrder: nextPageOrder,
+        });
+      }
+    },
 
     toggleCanvasLock: (canvasId) => {
       const state = get();
@@ -1981,7 +2351,11 @@ export function createWorkspaceStore(
       const prev = state.canvases[canvasId];
       if (!prev) return;
       for (const w of prev.widgets) {
-        if (w.type === "mso_scope" && w.scopeId !== null && !state.scopeOrder.includes(w.scopeId)) {
+        if (
+          w.type === "mso_scope" &&
+          w.scopeId !== null &&
+          !isStandaloneScopeAcrossPages(state, w.scopeId)
+        ) {
           get().removeScope(w.scopeId);
         }
       }
@@ -2149,7 +2523,7 @@ export function createWorkspaceStore(
       if (
         target.type === "mso_scope" &&
         target.scopeId !== null &&
-        !state.scopeOrder.includes(target.scopeId)
+        !isStandaloneScopeAcrossPages(state, target.scopeId)
       ) {
         get().removeScope(target.scopeId);
       }

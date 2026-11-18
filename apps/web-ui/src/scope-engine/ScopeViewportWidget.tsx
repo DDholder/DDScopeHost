@@ -1584,6 +1584,39 @@ export function ScopeViewportWidget({
           {config.tracks.length === 0 && (
             <span className="scope-empty-hint">{t("scope.emptyTracksHint")}</span>
           )}
+          {(() => {
+            const boundIds = new Set(config.tracks.map((tr) => tr.channelId));
+            const available = Object.values(channelsById)
+              .filter((ch) => !boundIds.has(ch.channel_id))
+              .sort((a, b) => a.full_path.localeCompare(b.full_path));
+            if (available.length === 0) return null;
+            return (
+              <select
+                className="scope-select-sm scope-add-track-select"
+                data-testid={`scope-add-track-${config.scopeId}`}
+                aria-label={t("scope.addTrackPlaceholder")}
+                value=""
+                onMouseDown={(ev) => ev.stopPropagation()}
+                onClick={(ev) => ev.stopPropagation()}
+                onChange={(ev) => {
+                  const id = Number.parseInt(ev.target.value, 10);
+                  if (Number.isFinite(id)) {
+                    callbacks.onDropChannel(config.scopeId, id);
+                  }
+                }}
+              >
+                <option value="" disabled>
+                  {t("scope.addTrackPlaceholder")}
+                </option>
+                {available.map((ch) => (
+                  <option key={ch.channel_id} value={ch.channel_id}>
+                    {ch.full_path}
+                    {ch.unit ? ` (${ch.unit})` : ""}
+                  </option>
+                ))}
+              </select>
+            );
+          })()}
         </div>
 
         {/* Per-channel independent Scale / Offset & Color editor bar */}

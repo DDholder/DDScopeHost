@@ -7,6 +7,7 @@ import { readJsonFileFromInput, saveJsonFile } from "./file-dialog.ts";
 import { SourceWizardModal } from "./SourceWizardModal.tsx";
 import { useWorkspaceStore } from "./store.ts";
 import { useI18n } from "./use-i18n.ts";
+import { WorkspacePageBar } from "./WorkspacePageBar.tsx";
 
 export function WorkspaceShell() {
   const { locale, setLocale, t } = useI18n();
@@ -287,12 +288,15 @@ export function WorkspaceShell() {
             </div>
           </main>
         ) : (
-          <div className="ddscope-main-row">
-            <ChannelTreeSidebar />
-            <main className="ddscope-viewport-stage">
-              <DockviewStage />
-            </main>
-          </div>
+          <>
+            <WorkspacePageBar />
+            <div className="ddscope-main-row">
+              <ChannelTreeSidebar />
+              <main className="ddscope-viewport-stage">
+                <DockviewStage />
+              </main>
+            </div>
+          </>
         )}
       </div>
 

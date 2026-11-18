@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ChannelNodeDto_Serialize } from "../bridge/bindings.ts";
 import { bridgeClient } from "../bridge/control-client.ts";
 import { DdsfSnapshotKind } from "../bridge/ddsf-spec.ts";
@@ -114,6 +114,29 @@ export function WatchTableWidget({
     flushRows();
   }, [widget.bindings, channelsById, locale, flushRows]);
 
+  const boundChannelIds = useMemo(
+    () => new Set(widget.bindings.map((b) => b.channelId)),
+    [widget.bindings],
+  );
+
+  const handleAddChannel = useCallback(
+    (channelId: number) => {
+      if (onBindChannel) {
+        onBindChannel(channelId);
+        return;
+      }
+      onUpdateWidget((prev) =>
+        prev.bindings.some((b) => b.channelId === channelId)
+          ? prev
+          : {
+              ...prev,
+              bindings: [...prev.bindings, { channelId, scale: 1, offset: 0 }],
+            },
+      );
+    },
+    [onBindChannel, onUpdateWidget],
+  );
+
   if (widget.bindings.length === 0) {
     return (
       <div className="widget-unbound-box">
@@ -121,7 +144,8 @@ export function WatchTableWidget({
         <ChannelBindSelect
           channelsById={channelsById}
           placeholder={t("widget.selectChannel")}
-          onBindChannel={onBindChannel}
+          dataTestId={`watch-add-select-${widget.id}`}
+          onBindChannel={handleAddChannel}
         />
       </div>
     );
@@ -129,7 +153,21 @@ export function WatchTableWidget({
 
   return (
     <div className="widget-watch-wrap" data-testid={`widget-watch-${widget.id}`}>
-      <table className="widget-watch-table">
+      <div className="watch-table-toolbar">
+        <span className="watch-count-badge">
+          {t("widget.watch.countBadge", { count: widget.bindings.length })}
+        </span>
+        <ChannelBindSelect
+          channelsById={channelsById}
+          excludeChannelIds={boundChannelIds}
+          placeholder={t("widget.watch.addChannel")}
+          className="watch-add-select"
+          dataTestId={`watch-add-select-${widget.id}`}
+          onBindChannel={handleAddChannel}
+        />
+      </div>
+      <div className="widget-watch-table-scroll">
+        <table className="widget-watch-table">
         <thead>
           <tr>
             <th>{t("widget.watch.ch")}</th>
@@ -228,7 +266,8 @@ export function WatchTableWidget({
             );
           })}
         </tbody>
-      </table>
+        </table>
+      </div>
     </div>
   );
 }

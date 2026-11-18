@@ -167,7 +167,7 @@ function resolveDropTarget(
     };
   }
 
-  if (payload.kind === "widget" || payload.kind === "command") {
+  if (payload.kind === "widget" || payload.kind === "command" || payload.kind === "channel") {
     const watermark = findFirstMatching(stack, "[data-drop-watermark]");
     if (watermark) {
       return {

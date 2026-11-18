@@ -3,28 +3,35 @@ import type { ChannelNodeDto_Serialize } from "../bridge/bindings.ts";
 export interface ChannelBindSelectProps {
   channelsById: Record<number, ChannelNodeDto_Serialize>;
   placeholder: string;
+  excludeChannelIds?: ReadonlySet<number>;
+  className?: string;
+  dataTestId?: string;
   onBindChannel?: (channelId: number) => void;
 }
 
 /**
- * Fallback channel-picker dropdown shown inside unbound widgets when drag-and-drop
- * is inconvenient or unsupported.
+ * Channel-picker dropdown shown inside unbound or multi-channel widgets so
+ * users can add channels directly without drag-and-drop.
  */
 export function ChannelBindSelect({
   channelsById,
   placeholder,
+  excludeChannelIds,
+  className,
+  dataTestId,
   onBindChannel,
 }: ChannelBindSelectProps) {
   if (!onBindChannel) return null;
-  const options = Object.values(channelsById).sort((a, b) =>
-    a.full_path.localeCompare(b.full_path),
-  );
+  const options = Object.values(channelsById)
+    .filter((ch) => !excludeChannelIds?.has(ch.channel_id))
+    .sort((a, b) => a.full_path.localeCompare(b.full_path));
   if (options.length === 0) return null;
 
   return (
     <select
-      className="widget-unbound-select"
-      defaultValue=""
+      className={className ?? "widget-unbound-select"}
+      data-testid={dataTestId}
+      value=""
       onPointerDown={(ev) => ev.stopPropagation()}
       onClick={(ev) => ev.stopPropagation()}
       onChange={(ev) => {

@@ -480,6 +480,19 @@ export const EN_MESSAGES = {
   "virtual.power.m.i_pk": "I Peak (A)",
   "virtual.power.m.energy_wh": "Energy (Wh)",
   "virtual.outputsTitle": "Live Output Channels ({count})",
+
+  // Multi-channel add, rename & Workspace Pages
+  "widget.watch.addChannel": "+ Add channel...",
+  "widget.watch.countBadge": "{count} ch",
+  "scope.addTrackPlaceholder": "+ Track...",
+  "stage.renameTabTitle": "Double-click or click to rename",
+  "canvas.renameTitle": "Rename canvas",
+  "widget.renameTitle": "Rename widget",
+  "page.add": "+ New Page",
+  "page.addTitle": "Create a new workspace page",
+  "page.closeTitle": "Delete page",
+  "page.keepLastTitle": "Keep at least one page",
+  "page.renameTitle": "Double-click or click to rename page",
 } as const;
 
 export type MessageKey = keyof typeof EN_MESSAGES;
@@ -954,6 +967,19 @@ export const ZH_CN_MESSAGES: Record<MessageKey, string> = {
   "virtual.power.m.i_pk": "电流峰值 Ipk (A)",
   "virtual.power.m.energy_wh": "累计电能 (Wh)",
   "virtual.outputsTitle": "实时派生输出通道 ({count})",
+
+  // 多通道添加、重命名与全局大页面切换
+  "widget.watch.addChannel": "+ 添加通道...",
+  "widget.watch.countBadge": "{count} 路",
+  "scope.addTrackPlaceholder": "+ 添加通道...",
+  "stage.renameTabTitle": "双击或点击重命名",
+  "canvas.renameTitle": "重命名画布",
+  "widget.renameTitle": "重命名控件",
+  "page.add": "+ 新建页面",
+  "page.addTitle": "新建整页工作区",
+  "page.closeTitle": "删除此页面",
+  "page.keepLastTitle": "至少保留一个页面",
+  "page.renameTitle": "双击或点击重命名页面",
 };
 
 const DICTIONARIES: Record<UiLocale, Record<MessageKey, string>> = {
@@ -1070,6 +1096,22 @@ export function translateDefaultCanvasTitle(title: string, targetLocale: UiLocal
   const zhMatch = /^测控仪表画布 (\d+)$/.exec(title);
   if (zhMatch) {
     return getDefaultCanvasTitle(targetLocale, Number(zhMatch[1]));
+  }
+  return title;
+}
+
+export function getDefaultPageTitle(locale: UiLocale, pageId = 1): string {
+  return locale === "zh-CN" ? `页面 ${pageId}` : `Page ${pageId}`;
+}
+
+export function translateDefaultPageTitle(title: string, targetLocale: UiLocale): string {
+  const enMatch = /^Page (\d+)$/.exec(title);
+  if (enMatch) {
+    return getDefaultPageTitle(targetLocale, Number(enMatch[1]));
+  }
+  const zhMatch = /^页面 (\d+)$/.exec(title);
+  if (zhMatch) {
+    return getDefaultPageTitle(targetLocale, Number(zhMatch[1]));
   }
   return title;
 }

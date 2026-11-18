@@ -16,6 +16,7 @@ import {
   sortVirtualNodesTopologically,
   validateVirtualNodeConfig,
 } from "../bridge/virtual-eval.ts";
+import { getDefaultPageTitle, type UiLocale } from "../i18n/index.ts";
 import type { AnalogLayoutMode } from "../scope-engine/layout.ts";
 import type {
   ScopeTrackUiBinding,
@@ -77,6 +78,7 @@ export interface BoardUiLayoutStateV1 {
   downlinkBarCollapsed: boolean;
   focusedScopeId: number | null;
   activeCanvasId: number | null;
+  activePageId?: number;
 }
 
 export interface CommandsConfigFileV1 {
@@ -171,12 +173,43 @@ export interface PortableDashboardCanvasV1 {
   widgets: PortableCanvasWidgetV1[];
 }
 
+export interface PortableBoardPageV1 {
+  pageId: number;
+  title: string;
+  dockviewLayout: Record<string, unknown> | null;
+  standaloneScopes: PortableStandaloneScopeV1[];
+  canvases: PortableDashboardCanvasV1[];
+  focusedScopeId: number | null;
+  activeCanvasId: number | null;
+}
+
+export interface WorkspacePageExportInput {
+  pageId: number;
+  title: string;
+  scopeOrder: number[];
+  canvasOrder: number[];
+  focusedScopeId: number | null;
+  activeCanvasId: number | null;
+  dockviewLayout: Record<string, unknown> | null;
+}
+
+export interface RehydratedWorkspacePage {
+  pageId: number;
+  title: string;
+  scopeOrder: number[];
+  canvasOrder: number[];
+  focusedScopeId: number | null;
+  activeCanvasId: number | null;
+  dockviewLayout: Record<string, unknown> | null;
+}
+
 export interface ProjectBoardSectionsV1 {
   ui: BoardUiLayoutStateV1;
   downlink: DownlinkUiConfig;
   dockviewLayout: Record<string, unknown> | null;
   standaloneScopes: PortableStandaloneScopeV1[];
   canvases: PortableDashboardCanvasV1[];
+  pages?: PortableBoardPageV1[];
   commands?: CommandDefinition[];
 }
 
@@ -672,38 +705,93 @@ export interface BoardExportInput {
   ui: BoardUiLayoutStateV1;
   downlink: DownlinkUiConfig;
   dockviewLayout: Record<string, unknown> | null;
+  pages?: ReadonlyArray<WorkspacePageExportInput>;
+  activePageId?: number;
   commands?: CommandDefinition[];
 }
 
-function buildBoardConfigSections(input: BoardExportInput): ProjectBoardSectionsV1 {
+function serializePortablePageSection(
+  scopeIds: ReadonlyArray<number>,
+  canvasIds: ReadonlyArray<number>,
+  scopes: Record<number, ScopeUiConfig>,
+  canvasesMap: Record<number, DashboardCanvasConfig>,
+  channelsById: Record<number, ChannelNodeDto_Serialize>,
+): {
+  standaloneScopes: PortableStandaloneScopeV1[];
+  canvases: PortableDashboardCanvasV1[];
+} {
   const standaloneScopes: PortableStandaloneScopeV1[] = [];
-  for (const scopeId of input.scopeOrder) {
-    const sc = input.scopes[scopeId];
+  for (const scopeId of scopeIds) {
+    const sc = scopes[scopeId];
     if (!sc) continue;
     standaloneScopes.push({
       scopeId,
-      config: serializePortableScope(sc, input.channelsById),
+      config: serializePortableScope(sc, channelsById),
     });
   }
 
   const canvases: PortableDashboardCanvasV1[] = [];
-  for (const canvasId of input.canvasOrder) {
-    const cv = input.canvases[canvasId];
+  for (const canvasId of canvasIds) {
+    const cv = canvasesMap[canvasId];
     if (!cv) continue;
     canvases.push({
       canvasId,
       title: cv.title,
       locked: cv.locked,
-      widgets: serializeWidgetList(cv, input.scopes, input.channelsById),
+      widgets: serializeWidgetList(cv, scopes, channelsById),
     });
   }
 
+  return { standaloneScopes, canvases };
+}
+
+function buildBoardConfigSections(input: BoardExportInput): ProjectBoardSectionsV1 {
+  const activeSection = serializePortablePageSection(
+    input.scopeOrder,
+    input.canvasOrder,
+    input.scopes,
+    input.canvases,
+    input.channelsById,
+  );
+
+  const shouldEmitPages =
+    Boolean(input.pages && input.pages.length > 0) &&
+    (input.pages!.length > 1 ||
+      input.pages![0].pageId !== 1 ||
+      (input.pages![0].title !== getDefaultPageTitle("en", input.pages![0].pageId) &&
+        input.pages![0].title !== getDefaultPageTitle("zh-CN", input.pages![0].pageId)));
+
+  const pages = shouldEmitPages
+    ? input.pages!.map((p) => {
+        const sec = serializePortablePageSection(
+          p.scopeOrder,
+          p.canvasOrder,
+          input.scopes,
+          input.canvases,
+          input.channelsById,
+        );
+        return {
+          pageId: p.pageId,
+          title: p.title,
+          dockviewLayout: p.dockviewLayout,
+          standaloneScopes: sec.standaloneScopes,
+          canvases: sec.canvases,
+          focusedScopeId: p.focusedScopeId,
+          activeCanvasId: p.activeCanvasId,
+        };
+      })
+    : undefined;
+
   return {
-    ui: { ...input.ui },
+    ui: {
+      ...input.ui,
+      ...(input.activePageId !== undefined ? { activePageId: input.activePageId } : {}),
+    },
     downlink: { ...input.downlink },
     dockviewLayout: input.dockviewLayout,
-    standaloneScopes,
-    canvases,
+    standaloneScopes: activeSection.standaloneScopes,
+    canvases: activeSection.canvases,
+    ...(pages ? { pages } : {}),
     commands: (input.commands ?? []).map((cmd, idx) =>
       normalizeCommandDefinition(cmd, idx + 1),
     ),
@@ -832,6 +920,11 @@ function normalizeUiLayoutState(
       typeof uiRec.activeCanvasId === "number" && Number.isFinite(uiRec.activeCanvasId)
         ? uiRec.activeCanvasId
         : fallbackActiveCanvasId,
+    ...(typeof uiRec.activePageId === "number" &&
+    Number.isInteger(uiRec.activePageId) &&
+    uiRec.activePageId > 0
+      ? { activePageId: uiRec.activePageId }
+      : {}),
   };
 }
 
@@ -860,66 +953,124 @@ function normalizeDownlinkUiConfig(rawDownlink: unknown): DownlinkUiConfig {
   };
 }
 
-function validateAndNormalizeBoardSections(
-  rawBoard: Record<string, unknown>,
-  fieldPrefix = "",
-): ProjectBoardSectionsV1 {
-  const prefixLabel = fieldPrefix ? `${fieldPrefix}.` : "";
-
-  if (!Array.isArray(rawBoard.standaloneScopes)) {
-    throw new Error(`'${prefixLabel}standaloneScopes' field must be an array.`);
+function parsePortableStandaloneScopesList(
+  rawList: unknown,
+  fieldPath: string,
+): PortableStandaloneScopeV1[] {
+  if (!Array.isArray(rawList)) {
+    throw new Error(`'${fieldPath}' field must be an array.`);
   }
-
-  const standaloneScopes: PortableStandaloneScopeV1[] = rawBoard.standaloneScopes.map(
-    (item, idx) => {
-      if (!isRecord(item)) {
-        throw new Error(`${prefixLabel}standaloneScopes[${idx}] must be an object.`);
-      }
-      if (
-        typeof item.scopeId !== "number" ||
-        !Number.isInteger(item.scopeId) ||
-        item.scopeId <= 0
-      ) {
-        throw new Error(`${prefixLabel}standaloneScopes[${idx}].scopeId must be a positive integer.`);
-      }
-      if (!isRecord(item.config)) {
-        throw new Error(`${prefixLabel}standaloneScopes[${idx}].config must be an object.`);
-      }
-      return {
-        scopeId: item.scopeId,
-        config: item.config as unknown as PortableScopeConfigV1,
-      };
-    },
-  );
-
-  if (!Array.isArray(rawBoard.canvases)) {
-    throw new Error(`'${prefixLabel}canvases' field must be an array.`);
-  }
-
-  const canvases: PortableDashboardCanvasV1[] = rawBoard.canvases.map((item, idx) => {
+  return rawList.map((item, idx) => {
     if (!isRecord(item)) {
-      throw new Error(`${prefixLabel}canvases[${idx}] must be an object.`);
+      throw new Error(`${fieldPath}[${idx}] must be an object.`);
+    }
+    if (
+      typeof item.scopeId !== "number" ||
+      !Number.isInteger(item.scopeId) ||
+      item.scopeId <= 0
+    ) {
+      throw new Error(`${fieldPath}[${idx}].scopeId must be a positive integer.`);
+    }
+    if (!isRecord(item.config)) {
+      throw new Error(`${fieldPath}[${idx}].config must be an object.`);
+    }
+    return {
+      scopeId: item.scopeId,
+      config: item.config as unknown as PortableScopeConfigV1,
+    };
+  });
+}
+
+function parsePortableCanvasesList(
+  rawList: unknown,
+  fieldPath: string,
+): PortableDashboardCanvasV1[] {
+  if (!Array.isArray(rawList)) {
+    throw new Error(`'${fieldPath}' field must be an array.`);
+  }
+  return rawList.map((item, idx) => {
+    if (!isRecord(item)) {
+      throw new Error(`${fieldPath}[${idx}] must be an object.`);
     }
     if (
       typeof item.canvasId !== "number" ||
       !Number.isInteger(item.canvasId) ||
       item.canvasId <= 0
     ) {
-      throw new Error(`${prefixLabel}canvases[${idx}].canvasId must be a positive integer.`);
+      throw new Error(`${fieldPath}[${idx}].canvasId must be a positive integer.`);
     }
     if (typeof item.title !== "string") {
-      throw new Error(`${prefixLabel}canvases[${idx}].title must be a string.`);
+      throw new Error(`${fieldPath}[${idx}].title must be a string.`);
     }
     if (!Array.isArray(item.widgets)) {
-      throw new Error(`${prefixLabel}canvases[${idx}].widgets must be an array.`);
+      throw new Error(`${fieldPath}[${idx}].widgets must be an array.`);
     }
     return {
       canvasId: item.canvasId,
       title: item.title,
       locked: Boolean(item.locked),
-      widgets: parsePortableWidgets(item.widgets, `${prefixLabel}canvases[${idx}].widgets`),
+      widgets: parsePortableWidgets(item.widgets, `${fieldPath}[${idx}].widgets`),
     };
   });
+}
+
+function validateAndNormalizeBoardSections(
+  rawBoard: Record<string, unknown>,
+  fieldPrefix = "",
+): ProjectBoardSectionsV1 {
+  const prefixLabel = fieldPrefix ? `${fieldPrefix}.` : "";
+
+  const standaloneScopes = parsePortableStandaloneScopesList(
+    rawBoard.standaloneScopes,
+    `${prefixLabel}standaloneScopes`,
+  );
+  const canvases = parsePortableCanvasesList(
+    rawBoard.canvases,
+    `${prefixLabel}canvases`,
+  );
+
+  let pages: PortableBoardPageV1[] | undefined;
+  if (rawBoard.pages !== undefined) {
+    if (!Array.isArray(rawBoard.pages)) {
+      throw new Error(`'${prefixLabel}pages' field must be an array.`);
+    }
+    pages = rawBoard.pages.map((pRaw, pIdx) => {
+      const pPath = `${prefixLabel}pages[${pIdx}]`;
+      if (!isRecord(pRaw)) {
+        throw new Error(`${pPath} must be an object.`);
+      }
+      if (
+        typeof pRaw.pageId !== "number" ||
+        !Number.isInteger(pRaw.pageId) ||
+        pRaw.pageId <= 0
+      ) {
+        throw new Error(`${pPath}.pageId must be a positive integer.`);
+      }
+      if (typeof pRaw.title !== "string") {
+        throw new Error(`${pPath}.title must be a string.`);
+      }
+      const pScopes = parsePortableStandaloneScopesList(
+        pRaw.standaloneScopes,
+        `${pPath}.standaloneScopes`,
+      );
+      const pCanvases = parsePortableCanvasesList(pRaw.canvases, `${pPath}.canvases`);
+      return {
+        pageId: pRaw.pageId,
+        title: pRaw.title,
+        dockviewLayout: isRecord(pRaw.dockviewLayout) ? pRaw.dockviewLayout : null,
+        standaloneScopes: pScopes,
+        canvases: pCanvases,
+        focusedScopeId:
+          typeof pRaw.focusedScopeId === "number" && Number.isFinite(pRaw.focusedScopeId)
+            ? pRaw.focusedScopeId
+            : (pScopes[0]?.scopeId ?? null),
+        activeCanvasId:
+          typeof pRaw.activeCanvasId === "number" && Number.isFinite(pRaw.activeCanvasId)
+            ? pRaw.activeCanvasId
+            : (pCanvases[0]?.canvasId ?? null),
+      };
+    });
+  }
 
   const fallbackFocusedScopeId = standaloneScopes[0]?.scopeId ?? null;
   const fallbackActiveCanvasId = canvases[0]?.canvasId ?? null;
@@ -943,6 +1094,7 @@ function validateAndNormalizeBoardSections(
     dockviewLayout: isRecord(rawBoard.dockviewLayout) ? rawBoard.dockviewLayout : null,
     standaloneScopes,
     canvases,
+    ...(pages ? { pages } : {}),
     commands,
   };
 }
@@ -1407,6 +1559,7 @@ export function rehydrateBoardFromConfig(args: {
   file: BoardConfigFileV1;
   channelsById: Record<number, ChannelNodeDto_Serialize>;
   availableSourceIds?: string[];
+  locale?: UiLocale;
 }): {
   scopes: Record<number, ScopeUiConfig>;
   scopeOrder: number[];
@@ -1418,11 +1571,15 @@ export function rehydrateBoardFromConfig(args: {
   ui: BoardUiLayoutStateV1;
   downlink: DownlinkUiConfig;
   dockviewLayout: Record<string, unknown> | null;
+  pages: Record<number, RehydratedWorkspacePage>;
+  pageOrder: number[];
+  activePageId: number;
+  nextPageId: number;
   commands: CommandDefinition[];
   nextCommandSeq: number;
   missingChannelPaths: string[];
 } {
-  const { file, channelsById, availableSourceIds } = args;
+  const { file, channelsById, availableSourceIds, locale = "en" } = args;
 
   const channelByFullPath = new Map<string, ChannelNodeDto_Serialize>();
   for (const ch of Object.values(channelsById)) {
@@ -1546,37 +1703,73 @@ export function rehydrateBoardFromConfig(args: {
     };
   };
 
+  const rawPagesInput: PortableBoardPageV1[] =
+    file.pages && file.pages.length > 0
+      ? file.pages
+      : [
+          {
+            pageId: 1,
+            title: getDefaultPageTitle(locale, 1),
+            dockviewLayout: file.dockviewLayout,
+            standaloneScopes: file.standaloneScopes,
+            canvases: file.canvases,
+            focusedScopeId: file.ui.focusedScopeId,
+            activeCanvasId: file.ui.activeCanvasId,
+          },
+        ];
+
+  const usedPageIds = new Set<number>();
+  let fallbackPageCursor = 1;
+  const assignedPages = rawPagesInput.map((rawPage) => {
+    let pageId = rawPage.pageId;
+    if (!Number.isInteger(pageId) || pageId <= 0 || usedPageIds.has(pageId)) {
+      while (usedPageIds.has(fallbackPageCursor)) {
+        fallbackPageCursor += 1;
+      }
+      pageId = fallbackPageCursor;
+    }
+    usedPageIds.add(pageId);
+    return { ...rawPage, pageId };
+  });
+
   const scopes: Record<number, ScopeUiConfig> = {};
-  const scopeOrder: number[] = [];
   const usedScopeIds = new Set<number>();
   let fallbackScopeCursor = 1;
+  const pageScopeOrderMap = new Map<number, number[]>();
 
-  for (const entry of file.standaloneScopes) {
-    let scopeId = entry.scopeId;
-    if (!Number.isInteger(scopeId) || scopeId <= 0 || usedScopeIds.has(scopeId)) {
-      while (usedScopeIds.has(fallbackScopeCursor)) {
-        fallbackScopeCursor += 1;
+  // Pass 1: rehydrate all standalone scopes across all pages before allocating embedded scope IDs
+  for (const p of assignedPages) {
+    const pScopeOrder: number[] = [];
+    for (const entry of p.standaloneScopes) {
+      let scopeId = entry.scopeId;
+      if (!Number.isInteger(scopeId) || scopeId <= 0 || usedScopeIds.has(scopeId)) {
+        while (usedScopeIds.has(fallbackScopeCursor)) {
+          fallbackScopeCursor += 1;
+        }
+        scopeId = fallbackScopeCursor;
       }
-      scopeId = fallbackScopeCursor;
+      usedScopeIds.add(scopeId);
+      pScopeOrder.push(scopeId);
+      scopes[scopeId] = rehydrateScopeConfig(scopeId, entry.config, `MSO Scope ${scopeId}`);
     }
-    usedScopeIds.add(scopeId);
-    scopeOrder.push(scopeId);
-    scopes[scopeId] = rehydrateScopeConfig(scopeId, entry.config, `MSO Scope ${scopeId}`);
+    pageScopeOrderMap.set(p.pageId, pScopeOrder);
   }
 
-  let cursorScopeId = Math.max(0, ...scopeOrder) + 1;
+  let cursorScopeId = Math.max(0, ...usedScopeIds) + 1;
 
-  // Pre-scan explicit widget IDs across canvases so generated fallback IDs never collide
+  // Pre-scan explicit widget IDs across all pages' canvases so generated fallback IDs never collide
   const reservedWidgetIds = new Set<string>();
   let maxWidgetSeq = 0;
-  for (const rawCanvas of file.canvases) {
-    for (const rawWidget of rawCanvas.widgets) {
-      if (typeof rawWidget.id === "string" && rawWidget.id.trim().length > 0) {
-        const cleanId = rawWidget.id.trim();
-        reservedWidgetIds.add(cleanId);
-        const seqMatch = /^w_(\d+)$/.exec(cleanId);
-        if (seqMatch) {
-          maxWidgetSeq = Math.max(maxWidgetSeq, Number(seqMatch[1]));
+  for (const p of assignedPages) {
+    for (const rawCanvas of p.canvases) {
+      for (const rawWidget of rawCanvas.widgets) {
+        if (typeof rawWidget.id === "string" && rawWidget.id.trim().length > 0) {
+          const cleanId = rawWidget.id.trim();
+          reservedWidgetIds.add(cleanId);
+          const seqMatch = /^w_(\d+)$/.exec(cleanId);
+          if (seqMatch) {
+            maxWidgetSeq = Math.max(maxWidgetSeq, Number(seqMatch[1]));
+          }
         }
       }
     }
@@ -1596,120 +1789,148 @@ export function rehydrateBoardFromConfig(args: {
     return fresh;
   };
 
+  const resolveWidgetBinding = (
+    b: PortableWidgetChannelBindingV1 | null | undefined,
+  ): WidgetChannelBinding | null => {
+    if (!b) return null;
+    const resolvedId = resolveChannelId(b.channelPath, b.fallbackChannelId);
+    if (resolvedId === null) return null;
+    return {
+      channelId: resolvedId,
+      scale: finiteOr(b.scale, 1),
+      offset: finiteOr(b.offset, 0),
+    };
+  };
+
   const canvases: Record<number, DashboardCanvasConfig> = {};
-  const canvasOrder: number[] = [];
   const usedCanvasIds = new Set<number>();
   let fallbackCanvasCursor = 1;
+  const pages: Record<number, RehydratedWorkspacePage> = {};
+  const pageOrder: number[] = [];
 
-  for (const rawCanvas of file.canvases) {
-    let canvasId = rawCanvas.canvasId;
-    if (!Number.isInteger(canvasId) || canvasId <= 0 || usedCanvasIds.has(canvasId)) {
-      while (usedCanvasIds.has(fallbackCanvasCursor)) {
-        fallbackCanvasCursor += 1;
-      }
-      canvasId = fallbackCanvasCursor;
-    }
-    usedCanvasIds.add(canvasId);
-    canvasOrder.push(canvasId);
-
-    const widgets: DashboardWidgetItem[] = [];
-    for (const rawWidget of rawCanvas.widgets) {
-      const widgetId = allocateNextWidgetId(rawWidget.id);
-      const clamped = clampGridRect(
-        rawWidget.col,
-        rawWidget.row,
-        rawWidget.colSpan,
-        rawWidget.rowSpan,
-      );
-
-      const resolveWidgetBinding = (
-        b: PortableWidgetChannelBindingV1 | null | undefined,
-      ): WidgetChannelBinding | null => {
-        if (!b) return null;
-        const resolvedId = resolveChannelId(b.channelPath, b.fallbackChannelId);
-        if (resolvedId === null) return null;
-        return {
-          channelId: resolvedId,
-          scale: finiteOr(b.scale, 1),
-          offset: finiteOr(b.offset, 0),
-        };
-      };
-
-      const primaryBinding = resolveWidgetBinding(rawWidget.primaryBinding);
-      const bindings: WidgetChannelBinding[] = [];
-      for (const rawB of rawWidget.bindings) {
-        const resolved = resolveWidgetBinding(rawB);
-        if (resolved && !bindings.some((item) => item.channelId === resolved.channelId)) {
-          bindings.push(resolved);
+  // Pass 2: rehydrate each page's canvases, widgets (including embedded scopes), and Dockview layout
+  for (const p of assignedPages) {
+    const pCanvasOrder: number[] = [];
+    for (const rawCanvas of p.canvases) {
+      let canvasId = rawCanvas.canvasId;
+      if (!Number.isInteger(canvasId) || canvasId <= 0 || usedCanvasIds.has(canvasId)) {
+        while (usedCanvasIds.has(fallbackCanvasCursor)) {
+          fallbackCanvasCursor += 1;
         }
+        canvasId = fallbackCanvasCursor;
       }
+      usedCanvasIds.add(canvasId);
+      pCanvasOrder.push(canvasId);
 
-      let scopeId: number | null = null;
-      if (rawWidget.type === "mso_scope") {
-        while (usedScopeIds.has(cursorScopeId)) {
-          cursorScopeId += 1;
-        }
-        scopeId = cursorScopeId;
-        cursorScopeId += 1;
-        usedScopeIds.add(scopeId);
-        scopes[scopeId] = rehydrateScopeConfig(
-          scopeId,
-          rawWidget.embeddedScope,
-          rawWidget.title,
+      const widgets: DashboardWidgetItem[] = [];
+      for (const rawWidget of rawCanvas.widgets) {
+        const widgetId = allocateNextWidgetId(rawWidget.id);
+        const clamped = clampGridRect(
+          rawWidget.col,
+          rawWidget.row,
+          rawWidget.colSpan,
+          rawWidget.rowSpan,
         );
+
+        const primaryBinding = resolveWidgetBinding(rawWidget.primaryBinding);
+        const bindings: WidgetChannelBinding[] = [];
+        for (const rawB of rawWidget.bindings) {
+          const resolved = resolveWidgetBinding(rawB);
+          if (resolved && !bindings.some((item) => item.channelId === resolved.channelId)) {
+            bindings.push(resolved);
+          }
+        }
+
+        let scopeId: number | null = null;
+        if (rawWidget.type === "mso_scope") {
+          while (usedScopeIds.has(cursorScopeId)) {
+            cursorScopeId += 1;
+          }
+          scopeId = cursorScopeId;
+          cursorScopeId += 1;
+          usedScopeIds.add(scopeId);
+          scopes[scopeId] = rehydrateScopeConfig(
+            scopeId,
+            rawWidget.embeddedScope,
+            rawWidget.title,
+          );
+        }
+
+        widgets.push({
+          id: widgetId,
+          type: rawWidget.type,
+          title: rawWidget.title,
+          col: clamped.col,
+          row: clamped.row,
+          colSpan: clamped.colSpan,
+          rowSpan: clamped.rowSpan,
+          primaryBinding,
+          bindings,
+          scopeId,
+          ...(rawWidget.gaugeConfig ? { gaugeConfig: { ...rawWidget.gaugeConfig } } : {}),
+          ...(rawWidget.sliderConfig ? { sliderConfig: { ...rawWidget.sliderConfig } } : {}),
+          ...(rawWidget.buttonConfig ? { buttonConfig: { ...rawWidget.buttonConfig } } : {}),
+          ...(rawWidget.cmdTableConfig
+            ? (() => {
+                const normalized = normalizeCmdTableConfig(rawWidget.cmdTableConfig);
+                return normalized ? { cmdTableConfig: normalized } : {};
+              })()
+            : {}),
+        });
       }
 
-      widgets.push({
-        id: widgetId,
-        type: rawWidget.type,
-        title: rawWidget.title,
-        col: clamped.col,
-        row: clamped.row,
-        colSpan: clamped.colSpan,
-        rowSpan: clamped.rowSpan,
-        primaryBinding,
-        bindings,
-        scopeId,
-        ...(rawWidget.gaugeConfig ? { gaugeConfig: { ...rawWidget.gaugeConfig } } : {}),
-        ...(rawWidget.sliderConfig ? { sliderConfig: { ...rawWidget.sliderConfig } } : {}),
-        ...(rawWidget.buttonConfig ? { buttonConfig: { ...rawWidget.buttonConfig } } : {}),
-        ...(rawWidget.cmdTableConfig
-          ? (() => {
-              const normalized = normalizeCmdTableConfig(rawWidget.cmdTableConfig);
-              return normalized ? { cmdTableConfig: normalized } : {};
-            })()
-          : {}),
-      });
+      canvases[canvasId] = {
+        canvasId,
+        title: rawCanvas.title,
+        locked: Boolean(rawCanvas.locked),
+        widgets,
+      };
     }
 
-    canvases[canvasId] = {
-      canvasId,
-      title: rawCanvas.title,
-      locked: Boolean(rawCanvas.locked),
-      widgets,
+    const pScopeOrder = pageScopeOrderMap.get(p.pageId) ?? [];
+    const pDockviewLayout = sanitizeDockviewLayout(
+      p.dockviewLayout,
+      scopes,
+      pScopeOrder,
+      canvases,
+      pCanvasOrder,
+    );
+    const pFocusedScopeId =
+      typeof p.focusedScopeId === "number" && pScopeOrder.includes(p.focusedScopeId)
+        ? p.focusedScopeId
+        : (pScopeOrder[0] ?? null);
+    const pActiveCanvasId =
+      typeof p.activeCanvasId === "number" && pCanvasOrder.includes(p.activeCanvasId)
+        ? p.activeCanvasId
+        : (pCanvasOrder[0] ?? null);
+
+    pages[p.pageId] = {
+      pageId: p.pageId,
+      title: p.title.trim() || getDefaultPageTitle(locale, p.pageId),
+      scopeOrder: pScopeOrder,
+      canvasOrder: pCanvasOrder,
+      focusedScopeId: pFocusedScopeId,
+      activeCanvasId: pActiveCanvasId,
+      dockviewLayout: pDockviewLayout,
     };
+    pageOrder.push(p.pageId);
   }
 
+  const activePageId =
+    typeof file.ui.activePageId === "number" && pages[file.ui.activePageId]
+      ? file.ui.activePageId
+      : pageOrder[0];
+  const activePage = pages[activePageId];
+  const scopeOrder = [...activePage.scopeOrder];
+  const canvasOrder = [...activePage.canvasOrder];
+  const dockviewLayout = activePage.dockviewLayout;
+  const focusedScopeId = activePage.focusedScopeId;
+  const activeCanvasId = activePage.activeCanvasId;
+
   const nextScopeId = Math.max(0, ...usedScopeIds) + 1;
-  const nextCanvasId = Math.max(0, ...canvasOrder) + 1;
+  const nextCanvasId = Math.max(0, ...usedCanvasIds) + 1;
   const nextWidgetSeq = maxWidgetSeq + 1;
-
-  const dockviewLayout = sanitizeDockviewLayout(
-    file.dockviewLayout,
-    scopes,
-    scopeOrder,
-    canvases,
-    canvasOrder,
-  );
-
-  const focusedScopeId =
-    typeof file.ui.focusedScopeId === "number" && scopes[file.ui.focusedScopeId]
-      ? file.ui.focusedScopeId
-      : (scopeOrder[0] ?? null);
-  const activeCanvasId =
-    typeof file.ui.activeCanvasId === "number" && canvases[file.ui.activeCanvasId]
-      ? file.ui.activeCanvasId
-      : (canvasOrder[0] ?? null);
+  const nextPageId = Math.max(0, ...pageOrder) + 1;
 
   const ui: BoardUiLayoutStateV1 = {
     mockRateHz: file.ui.mockRateHz === 60 ? 60 : 120,
@@ -1725,6 +1946,7 @@ export function rehydrateBoardFromConfig(args: {
     downlinkBarCollapsed: Boolean(file.ui.downlinkBarCollapsed),
     focusedScopeId,
     activeCanvasId,
+    activePageId,
   };
 
   let maxCmdSeq = 0;
@@ -1784,6 +2006,10 @@ export function rehydrateBoardFromConfig(args: {
     ui,
     downlink,
     dockviewLayout,
+    pages,
+    pageOrder,
+    activePageId,
+    nextPageId,
     commands: syncedCommands,
     nextCommandSeq,
     missingChannelPaths: Array.from(missingSet),

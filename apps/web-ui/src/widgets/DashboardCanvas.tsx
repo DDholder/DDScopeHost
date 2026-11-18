@@ -52,6 +52,7 @@ export interface DashboardCanvasProps {
   onCanvasWidthChanged: (scopeId: number, widthPx: number) => void;
   onToggleLock: (canvasId: number) => void;
   onClearCanvas: (canvasId: number) => void;
+  onRenameCanvas?: (canvasId: number, title: string) => void;
   onAddWidget: (
     canvasId: number,
     widgetType: WidgetType,
@@ -154,6 +155,7 @@ export function DashboardCanvas({
   onCanvasWidthChanged,
   onToggleLock,
   onClearCanvas,
+  onRenameCanvas,
   onAddWidget,
   onUpdateWidget,
   onRemoveWidget,
@@ -169,6 +171,57 @@ export function DashboardCanvas({
   const gridRef = useRef<HTMLDivElement | null>(null);
   const [gridDragOver, setGridDragOver] = useState(false);
   const [cardDragOverId, setCardDragOverId] = useState<string | null>(null);
+  const [renamingCanvas, setRenamingCanvas] = useState(false);
+  const [canvasTitleDraft, setCanvasTitleDraft] = useState("");
+  const [renamingWidgetId, setRenamingWidgetId] = useState<string | null>(null);
+  const [widgetTitleDraft, setWidgetTitleDraft] = useState("");
+  const skipBlurCommitRef = useRef(false);
+
+  const startCanvasRename = () => {
+    if (!onRenameCanvas) return;
+    skipBlurCommitRef.current = false;
+    setCanvasTitleDraft(canvas.title);
+    setRenamingCanvas(true);
+  };
+
+  const commitCanvasRename = () => {
+    if (skipBlurCommitRef.current) {
+      skipBlurCommitRef.current = false;
+      return;
+    }
+    setRenamingCanvas(false);
+    const trimmed = canvasTitleDraft.trim();
+    if (trimmed && trimmed !== canvas.title) {
+      onRenameCanvas?.(canvas.canvasId, trimmed);
+    }
+  };
+
+  const startWidgetRename = (widget: DashboardWidgetItem) => {
+    if (canvas.locked) return;
+    skipBlurCommitRef.current = false;
+    setWidgetTitleDraft(widget.title);
+    setRenamingWidgetId(widget.id);
+  };
+
+  const commitWidgetRename = (widget: DashboardWidgetItem) => {
+    if (skipBlurCommitRef.current) {
+      skipBlurCommitRef.current = false;
+      return;
+    }
+    setRenamingWidgetId(null);
+    const trimmed = widgetTitleDraft.trim();
+    if (!trimmed || trimmed === widget.title) return;
+    onUpdateWidget(canvas.canvasId, widget.id, (prev) => ({
+      ...prev,
+      title: trimmed,
+    }));
+    if (widget.type === "mso_scope" && widget.scopeId !== null) {
+      scopeCallbacks.onUpdateScope(widget.scopeId, (prev) => ({
+        ...prev,
+        title: trimmed,
+      }));
+    }
+  };
 
   const computeDropCell = (clientX: number, clientY: number): { col: number; row: number } => {
     const el = gridRef.current;
@@ -573,7 +626,53 @@ export function DashboardCanvas({
       data-testid={`dashboard-canvas-${canvas.canvasId}`}
     >
       <div className="dashboard-canvas-toolbar">
-        <span className="dashboard-canvas-title">{canvas.title}</span>
+        {renamingCanvas ? (
+          <input
+            type="text"
+            className="inline-rename-input"
+            data-testid={`rename-canvas-input-${canvas.canvasId}`}
+            value={canvasTitleDraft}
+            autoFocus
+            onFocus={(ev) => ev.currentTarget.select()}
+            onChange={(ev) => setCanvasTitleDraft(ev.target.value)}
+            onBlur={commitCanvasRename}
+            onPointerDown={(ev) => ev.stopPropagation()}
+            onMouseDown={(ev) => ev.stopPropagation()}
+            onClick={(ev) => ev.stopPropagation()}
+            onKeyDown={(ev) => {
+              ev.stopPropagation();
+              if (ev.key === "Enter") {
+                ev.preventDefault();
+                commitCanvasRename();
+              } else if (ev.key === "Escape") {
+                ev.preventDefault();
+                skipBlurCommitRef.current = true;
+                setRenamingCanvas(false);
+              }
+            }}
+          />
+        ) : (
+          <div className="dashboard-canvas-title-wrap">
+            <span
+              className="dashboard-canvas-title"
+              title={onRenameCanvas ? t("canvas.renameTitle") : undefined}
+              onDoubleClick={startCanvasRename}
+            >
+              {canvas.title}
+            </span>
+            {onRenameCanvas && (
+              <button
+                type="button"
+                className="inline-rename-btn"
+                title={t("canvas.renameTitle")}
+                data-testid={`rename-canvas-btn-${canvas.canvasId}`}
+                onClick={startCanvasRename}
+              >
+                ✎
+              </button>
+            )}
+          </div>
+        )}
         <span className="dashboard-canvas-hint">{t("canvas.dropHint")}</span>
         <div className="dashboard-canvas-actions">
           <button
@@ -664,7 +763,59 @@ export function DashboardCanvas({
                   className="widget-card-header"
                   onPointerDown={(ev) => startMoveDrag(ev, widget)}
                 >
-                  <span className="widget-card-title">{widget.title}</span>
+                  {renamingWidgetId === widget.id ? (
+                    <input
+                      type="text"
+                      className="inline-rename-input"
+                      data-testid={`rename-widget-input-${widget.id}`}
+                      value={widgetTitleDraft}
+                      autoFocus
+                      onFocus={(ev) => ev.currentTarget.select()}
+                      onChange={(ev) => setWidgetTitleDraft(ev.target.value)}
+                      onBlur={() => commitWidgetRename(widget)}
+                      onPointerDown={(ev) => ev.stopPropagation()}
+                      onMouseDown={(ev) => ev.stopPropagation()}
+                      onClick={(ev) => ev.stopPropagation()}
+                      onKeyDown={(ev) => {
+                        ev.stopPropagation();
+                        if (ev.key === "Enter") {
+                          ev.preventDefault();
+                          commitWidgetRename(widget);
+                        } else if (ev.key === "Escape") {
+                          ev.preventDefault();
+                          skipBlurCommitRef.current = true;
+                          setRenamingWidgetId(null);
+                        }
+                      }}
+                    />
+                  ) : (
+                    <div className="widget-card-title-wrap">
+                      <span
+                        className="widget-card-title"
+                        title={!canvas.locked ? t("widget.renameTitle") : widget.title}
+                        onDoubleClick={(ev) => {
+                          ev.stopPropagation();
+                          startWidgetRename(widget);
+                        }}
+                      >
+                        {widget.title}
+                      </span>
+                      {!canvas.locked && (
+                        <button
+                          type="button"
+                          className="inline-rename-btn"
+                          title={t("widget.renameTitle")}
+                          data-testid={`rename-widget-btn-${widget.id}`}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            startWidgetRename(widget);
+                          }}
+                        >
+                          ✎
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {!canvas.locked && (
                     <button
                       type="button"
