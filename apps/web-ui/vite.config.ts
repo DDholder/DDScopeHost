@@ -22,4 +22,21 @@ export default defineConfig({
     },
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const norm = id.replaceAll("\\", "/");
+          if (!norm.includes("/node_modules/")) return undefined;
+          if (/\/node_modules\/(dockview|dockview-react|dockview-core)\//.test(norm)) {
+            return "vendor-dockview";
+          }
+          if (/\/node_modules\/(react|react-dom|scheduler|zustand)\//.test(norm)) {
+            return "vendor-react";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
 });
