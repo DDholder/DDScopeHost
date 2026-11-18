@@ -24,10 +24,15 @@ import type {
   WheelZoomTarget,
 } from "../scope-engine/types.ts";
 import {
+  createDefaultBitParserConfig,
+  normalizeBitParserConfig,
+} from "../widgets/bit-parser.ts";
+import {
   WIDGET_TYPES,
   clampGridRect,
   type DashboardCanvasConfig,
   type DashboardWidgetItem,
+  type WidgetBitParserConfig,
   type WidgetButtonConfig,
   type WidgetChannelBinding,
   type WidgetCmdTableConfig,
@@ -164,6 +169,7 @@ export interface PortableCanvasWidgetV1 {
   sliderConfig?: WidgetSliderConfig;
   buttonConfig?: WidgetButtonConfig;
   cmdTableConfig?: WidgetCmdTableConfig;
+  bitParserConfig?: WidgetBitParserConfig;
 }
 
 export interface PortableDashboardCanvasV1 {
@@ -692,6 +698,12 @@ function serializeWidgetList(
       ...(w.cmdTableConfig
         ? { cmdTableConfig: normalizeCmdTableConfig(w.cmdTableConfig) }
         : {}),
+      ...(w.bitParserConfig
+        ? (() => {
+            const normalized = normalizeBitParserConfig(w.bitParserConfig);
+            return normalized ? { bitParserConfig: normalized } : {};
+          })()
+        : {}),
     };
   });
 }
@@ -887,6 +899,12 @@ function parsePortableWidgets(
         ? (() => {
             const normalized = normalizeCmdTableConfig(wRaw.cmdTableConfig);
             return normalized ? { cmdTableConfig: normalized } : {};
+          })()
+        : {}),
+      ...(wRaw.bitParserConfig !== undefined
+        ? (() => {
+            const normalized = normalizeBitParserConfig(wRaw.bitParserConfig);
+            return normalized ? { bitParserConfig: normalized } : {};
           })()
         : {}),
     };
@@ -1876,6 +1894,18 @@ export function rehydrateBoardFromConfig(args: {
                 return normalized ? { cmdTableConfig: normalized } : {};
               })()
             : {}),
+          ...(rawWidget.bitParserConfig !== undefined
+            ? (() => {
+                const normalized = normalizeBitParserConfig(rawWidget.bitParserConfig);
+                return normalized
+                  ? { bitParserConfig: normalized }
+                  : rawWidget.type === "bit_parser"
+                    ? { bitParserConfig: createDefaultBitParserConfig() }
+                    : {};
+              })()
+            : rawWidget.type === "bit_parser"
+              ? { bitParserConfig: createDefaultBitParserConfig() }
+              : {}),
         });
       }
 

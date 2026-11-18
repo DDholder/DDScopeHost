@@ -5,6 +5,7 @@ export const WIDGET_TYPES = [
   "digital_meter",
   "radial_gauge",
   "status_led",
+  "bit_parser",
   "watch_table",
   "param_slider",
   "cmd_button",
@@ -64,6 +65,25 @@ export interface WidgetCmdTableConfig {
   rows: WidgetCmdTableRow[];
 }
 
+export type BitParserWidth = 8 | 16 | 32;
+export type BitParserTone = "info" | "ok" | "warn" | "fault";
+
+export interface WidgetBitItem {
+  /** 0-based bit index (0 = LSB, up to 31 = MSB). */
+  bit: number;
+  /** Message displayed when this bit is 1. */
+  label: string;
+  /** Badge color tone when active. */
+  tone: BitParserTone;
+}
+
+export interface WidgetBitParserConfig {
+  bitWidth: BitParserWidth;
+  bits: WidgetBitItem[];
+  /** When true, set bits without a configured label also display as 'Bit N'. */
+  showUnlabeled?: boolean;
+}
+
 export interface DashboardWidgetItem {
   id: string;
   type: WidgetType;
@@ -79,6 +99,7 @@ export interface DashboardWidgetItem {
   sliderConfig?: WidgetSliderConfig;
   buttonConfig?: WidgetButtonConfig;
   cmdTableConfig?: WidgetCmdTableConfig;
+  bitParserConfig?: WidgetBitParserConfig;
 }
 
 export interface DashboardCanvasConfig {
@@ -100,6 +121,7 @@ export const WIDGET_CATALOG: ReadonlyArray<WidgetCatalogEntry> = [
   { type: "digital_meter", badge: "NUM", defaultColSpan: 8, defaultRowSpan: 4 },
   { type: "radial_gauge", badge: "ARC", defaultColSpan: 8, defaultRowSpan: 5 },
   { type: "status_led", badge: "LED", defaultColSpan: 8, defaultRowSpan: 4 },
+  { type: "bit_parser", badge: "BIT", defaultColSpan: 12, defaultRowSpan: 5 },
   { type: "watch_table", badge: "TBL", defaultColSpan: 16, defaultRowSpan: 5 },
   { type: "param_slider", badge: "SLD", defaultColSpan: 12, defaultRowSpan: 3 },
   { type: "cmd_button", badge: "CMD", defaultColSpan: 8, defaultRowSpan: 3 },

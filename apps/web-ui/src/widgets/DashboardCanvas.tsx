@@ -26,6 +26,7 @@ import { DigitalMeterWidget } from "./DigitalMeterWidget.tsx";
 import { ParamSliderWidget } from "./ParamSliderWidget.tsx";
 import { RadialGaugeWidget } from "./RadialGaugeWidget.tsx";
 import { StatusLedWidget } from "./StatusLedWidget.tsx";
+import { BitParserWidget } from "./BitParserWidget.tsx";
 import { WatchTableWidget } from "./WatchTableWidget.tsx";
 import {
   DASHBOARD_GRID_COLS,
@@ -533,6 +534,16 @@ export function DashboardCanvas({
             widget={widget}
             channelsById={channelsById}
             locale={locale}
+            onBindChannel={bindChannel}
+          />
+        );
+      case "bit_parser":
+        return (
+          <BitParserWidget
+            widget={widget}
+            channelsById={channelsById}
+            locale={locale}
+            onUpdateWidget={handleUpdate}
             onBindChannel={bindChannel}
           />
         );

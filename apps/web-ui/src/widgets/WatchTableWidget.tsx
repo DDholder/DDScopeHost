@@ -4,7 +4,6 @@ import { bridgeClient } from "../bridge/control-client.ts";
 import { DdsfSnapshotKind } from "../bridge/ddsf-spec.ts";
 import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
-import { channelValueToAxis } from "../scope-engine/layout.ts";
 import { formatMetricValue } from "../scope-engine/time-format.ts";
 import { ChannelBindSelect } from "./ChannelBindSelect.tsx";
 import type { DashboardWidgetItem, WidgetChannelBinding } from "./types.ts";
@@ -27,8 +26,7 @@ export function WatchTableWidget({
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
     translate(locale, key, params);
 
-  const rawCellRefs = useRef<Map<number, HTMLTableCellElement>>(new Map());
-  const scaledCellRefs = useRef<Map<number, HTMLTableCellElement>>(new Map());
+  const valCellRefs = useRef<Map<number, HTMLTableCellElement>>(new Map());
 
   const bindingsRef = useRef<WidgetChannelBinding[]>(widget.bindings);
   bindingsRef.current = widget.bindings;
@@ -49,34 +47,23 @@ export function WatchTableWidget({
       const snap = snaps.get(b.channelId);
       if (!snap) continue;
       const ch = chMap[b.channelId];
-      const rawCell = rawCellRefs.current.get(b.channelId);
-      const scaledCell = scaledCellRefs.current.get(b.channelId);
+      const valCell = valCellRefs.current.get(b.channelId);
+      if (!valCell) continue;
 
       if (snap.kind === DdsfSnapshotKind.Bool) {
-        const text =
+        valCell.textContent =
           snap.val > 0.5
             ? translate(curLocale, "sidebar.valHigh")
             : translate(curLocale, "sidebar.valLow");
-        if (rawCell) rawCell.textContent = text;
-        if (scaledCell) {
-          scaledCell.textContent = text;
-          scaledCell.className = snap.val > 0.5 ? "watch-val val-high" : "watch-val val-low";
-        }
+        valCell.className = snap.val > 0.5 ? "watch-val val-high" : "watch-val val-low";
       } else if (snap.kind === DdsfSnapshotKind.StateEnum) {
         const code = Math.round(snap.val);
-        const text = ch?.state_labels.find((l) => l.code === code)?.name ?? `S${code}`;
-        if (rawCell) rawCell.textContent = String(code);
-        if (scaledCell) {
-          scaledCell.textContent = text;
-          scaledCell.className = code === 3 ? "watch-val val-fault" : "watch-val val-state";
-        }
+        valCell.textContent =
+          ch?.state_labels.find((l) => l.code === code)?.name ?? `S${code}`;
+        valCell.className = code === 3 ? "watch-val val-fault" : "watch-val val-state";
       } else {
-        const scaled = channelValueToAxis(snap.val, b.scale, b.offset);
-        if (rawCell) rawCell.textContent = formatMetricValue(snap.val, ch?.unit ?? null);
-        if (scaledCell) {
-          scaledCell.textContent = formatMetricValue(scaled, ch?.unit ?? null);
-          scaledCell.className = "watch-val";
-        }
+        valCell.textContent = formatMetricValue(snap.val, ch?.unit ?? null);
+        valCell.className = "watch-val";
       }
     }
   }, []);
@@ -171,9 +158,6 @@ export function WatchTableWidget({
         <thead>
           <tr>
             <th>{t("widget.watch.ch")}</th>
-            <th>{t("widget.watch.raw")}</th>
-            <th>{t("widget.watch.scale")}</th>
-            <th>{t("widget.watch.offset")}</th>
             <th>{t("widget.watch.scaled")}</th>
             <th />
           </tr>
@@ -181,68 +165,14 @@ export function WatchTableWidget({
         <tbody>
           {widget.bindings.map((b) => {
             const ch = channelsById[b.channelId];
-            const isScalar = !ch || ch.modality === "scalar";
             return (
               <tr key={b.channelId}>
                 <td className="watch-ch-name">{ch ? ch.full_path : `ch${b.channelId}`}</td>
                 <td
-                  className="watch-raw"
-                  ref={(el) => {
-                    if (el) rawCellRefs.current.set(b.channelId, el);
-                    else rawCellRefs.current.delete(b.channelId);
-                  }}
-                >
-                  --
-                </td>
-                <td>
-                  {isScalar ? (
-                    <input
-                      type="number"
-                      className="watch-num-input"
-                      step="0.1"
-                      value={b.scale}
-                      onChange={(ev) => {
-                        const scale = Number.parseFloat(ev.target.value);
-                        if (!Number.isFinite(scale)) return;
-                        onUpdateWidget((prev) => ({
-                          ...prev,
-                          bindings: prev.bindings.map((item) =>
-                            item.channelId === b.channelId ? { ...item, scale } : item,
-                          ),
-                        }));
-                      }}
-                    />
-                  ) : (
-                    "--"
-                  )}
-                </td>
-                <td>
-                  {isScalar ? (
-                    <input
-                      type="number"
-                      className="watch-num-input"
-                      step="1"
-                      value={b.offset}
-                      onChange={(ev) => {
-                        const offset = Number.parseFloat(ev.target.value);
-                        if (!Number.isFinite(offset)) return;
-                        onUpdateWidget((prev) => ({
-                          ...prev,
-                          bindings: prev.bindings.map((item) =>
-                            item.channelId === b.channelId ? { ...item, offset } : item,
-                          ),
-                        }));
-                      }}
-                    />
-                  ) : (
-                    "--"
-                  )}
-                </td>
-                <td
                   className="watch-val"
                   ref={(el) => {
-                    if (el) scaledCellRefs.current.set(b.channelId, el);
-                    else scaledCellRefs.current.delete(b.channelId);
+                    if (el) valCellRefs.current.set(b.channelId, el);
+                    else valCellRefs.current.delete(b.channelId);
                   }}
                 >
                   --

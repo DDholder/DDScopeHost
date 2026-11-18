@@ -45,6 +45,7 @@ import type {
   ScopeTrackUiBinding,
   ScopeUiConfig,
 } from "../scope-engine/types.ts";
+import { createDefaultBitParserConfig } from "../widgets/bit-parser.ts";
 import {
   clampGridRect,
   defaultSizeForWidgetType,
@@ -2467,6 +2468,11 @@ export function createWorkspaceStore(
               },
             }
           : {}),
+        ...(widgetType === "bit_parser"
+          ? {
+              bitParserConfig: createDefaultBitParserConfig(),
+            }
+          : {}),
       };
 
       const latest = get();
@@ -2561,6 +2567,22 @@ export function createWorkspaceStore(
           return {
             ...prev,
             bindings: [...prev.bindings, { channelId, scale: 1, offset: 0 }],
+          };
+        }
+        if (prev.type === "bit_parser") {
+          const prevChPath = prev.primaryBinding
+            ? state.channelsById[prev.primaryBinding.channelId]?.full_path
+            : undefined;
+          const isDefaultOrPrevChannelTitle =
+            prev.title === translate("en", "toolbox.widget.bit_parser.name") ||
+            prev.title === translate("zh-CN", "toolbox.widget.bit_parser.name") ||
+            (prevChPath !== undefined && prev.title === prevChPath) ||
+            prev.title.trim().length === 0;
+          return {
+            ...prev,
+            ...(isDefaultOrPrevChannelTitle ? { title: ch.full_path } : {}),
+            primaryBinding: { channelId, scale: 1, offset: 0 },
+            bitParserConfig: prev.bitParserConfig ?? createDefaultBitParserConfig(),
           };
         }
         if (
