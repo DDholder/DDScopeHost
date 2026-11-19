@@ -414,6 +414,8 @@ function buildDefaultScopeConfigs(
       yAxisScale: 15,
       yAxisOffset: 0,
       wheelZoomTarget: "x",
+      persistenceMode: "off",
+      persistenceColorMode: "phosphor",
     };
     const scope2Empty: ScopeUiConfig = {
       scopeId: 2,
@@ -435,6 +437,8 @@ function buildDefaultScopeConfigs(
       yAxisScale: 25,
       yAxisOffset: 50,
       wheelZoomTarget: "x",
+      persistenceMode: "off",
+      persistenceColorMode: "phosphor",
     };
     return { 1: scope1Empty, 2: scope2Empty };
   }
@@ -575,6 +579,8 @@ function buildDefaultScopeConfigs(
     yAxisScale: 15,
     yAxisOffset: 0,
     wheelZoomTarget: "x",
+    persistenceMode: "off",
+    persistenceColorMode: "phosphor",
   };
 
   const scope2TriggerCh = chVbus ?? chIa;
@@ -638,6 +644,8 @@ function buildDefaultScopeConfigs(
     yAxisScale: 25,
     yAxisOffset: 50,
     wheelZoomTarget: "x",
+    persistenceMode: "off",
+    persistenceColorMode: "phosphor",
   };
 
   return { 1: scope1, 2: scope2 };
@@ -1847,6 +1855,8 @@ export function createWorkspaceStore(
         yAxisScale: 15,
         yAxisOffset: 0,
         wheelZoomTarget: "x",
+        persistenceMode: "off",
+        persistenceColorMode: "phosphor",
       };
 
       set({

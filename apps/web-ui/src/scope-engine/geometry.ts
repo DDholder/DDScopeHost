@@ -67,6 +67,8 @@ export interface RibbonLabelPlacement {
 export interface BuiltScopeGeometry {
   vertices: Float32Array;
   gridVertexCount: number;
+  analogVertexCount: number;
+  overlaySignalVertexCount: number;
   signalVertexCount: number;
   totalVertexCount: number;
   ribbonLabels: RibbonLabelPlacement[];
@@ -255,6 +257,7 @@ export class ScopeGeometryBuilder {
 
     let sawRaw = false;
     let sawM4 = false;
+    let afterAnalogVertexCount = gridVertexCount;
 
     if (scopeData) {
       const trackMap = new Map<number, DdsfTrackBlockView>();
@@ -298,6 +301,8 @@ export class ScopeGeometryBuilder {
         }
       }
 
+      afterAnalogVertexCount = this.floatCursor / FLOATS_PER_VERTEX;
+
       // 2b. Digital logic lanes
       for (let i = 0; i < layout.digitalLanes.length; i += 1) {
         const lane = layout.digitalLanes[i];
@@ -335,6 +340,8 @@ export class ScopeGeometryBuilder {
     }
 
     const totalVertexCount = this.floatCursor / FLOATS_PER_VERTEX;
+    const analogVertexCount = Math.max(0, afterAnalogVertexCount - gridVertexCount);
+    const overlaySignalVertexCount = Math.max(0, totalVertexCount - afterAnalogVertexCount);
     const signalVertexCount = totalVertexCount - gridVertexCount;
 
     const dataModeTag: BuiltScopeGeometry["dataModeTag"] =
@@ -343,6 +350,8 @@ export class ScopeGeometryBuilder {
     return {
       vertices: this.buffer.subarray(0, this.floatCursor),
       gridVertexCount,
+      analogVertexCount,
+      overlaySignalVertexCount,
       signalVertexCount,
       totalVertexCount,
       ribbonLabels,

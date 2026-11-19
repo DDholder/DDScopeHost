@@ -11,6 +11,12 @@ import { translate, type UiLocale } from "../i18n/index.ts";
 import type { RenderBackendKind } from "./backend.ts";
 import type { RibbonLabelPlacement } from "./geometry.ts";
 import {
+  THERMAL_LUT_STOPS,
+  thermalPaletteCss,
+  type PersistenceColorMode,
+  type PersistenceMode,
+} from "./persistence.ts";
+import {
   DEFAULT_Y_AXIS_CONFIG,
   channelValueToY,
   yToAnalogValue,
@@ -57,6 +63,8 @@ export interface ScopeHudState {
   ribbonLabels: ReadonlyArray<RibbonLabelPlacement>;
   dataModeTag: "RAW" | "M4" | "MIXED" | "IDLE";
   backendKind: RenderBackendKind;
+  persistenceMode?: PersistenceMode;
+  persistenceColorMode?: PersistenceColorMode;
   fps: number;
   p99FrameMs: number;
   hoverHandle: HudHitTarget;
@@ -420,10 +428,74 @@ export function renderScopeHud(
   ctx.textAlign = "left";
   ctx.fillText(tbText, plotLeft, topMidY);
 
-  const perfText = `${state.backendKind.toUpperCase()} · ${state.dataModeTag} · ${state.fps.toFixed(0)} fps (${state.p99FrameMs.toFixed(1)}ms)`;
+  let persistPrefix = "";
+  if (state.persistenceMode && state.persistenceMode !== "off") {
+    const modeKey =
+      state.persistenceMode === "short"
+        ? "hud.persistMode.short"
+        : state.persistenceMode === "medium"
+          ? "hud.persistMode.medium"
+          : state.persistenceMode === "long"
+            ? "hud.persistMode.long"
+            : "hud.persistMode.infinite";
+    const modeText = translate(locale, modeKey);
+    persistPrefix = `${translate(locale, "hud.persistTag", { mode: modeText })} · `;
+  }
+  const perfText = `${persistPrefix}${state.backendKind.toUpperCase()} · ${state.dataModeTag} · ${state.fps.toFixed(0)} fps (${state.p99FrameMs.toFixed(1)}ms)`;
   ctx.fillStyle = state.backendKind === "webgpu" ? "#38bdf8" : "#a78bfa";
   ctx.textAlign = "right";
   ctx.fillText(perfText, plotRight, topMidY);
+
+  // 1b. Thermal Persistence Colorbar Legend
+  if (
+    state.persistenceMode &&
+    state.persistenceMode !== "off" &&
+    state.persistenceColorMode === "thermal" &&
+    layout.analogRegion.width >= 160 &&
+    layout.analogRegion.height >= 48
+  ) {
+    ctx.font = '600 9px "JetBrains Mono", ui-monospace, monospace';
+    const lowText = translate(locale, "hud.thermalLow");
+    const highText = translate(locale, "hud.thermalHigh");
+    const lowW = Math.ceil(ctx.measureText(lowText).width);
+    const highW = Math.ceil(ctx.measureText(highText).width);
+    const barW = 54;
+    const barH = 6;
+    const legendW = 6 + lowW + 5 + barW + 5 + highW + 6;
+    const legendH = 16;
+    const legendX = layout.analogRegion.x + layout.analogRegion.width - legendW - 6;
+    const legendY = layout.analogRegion.y + 6;
+
+    ctx.fillStyle = "rgba(11, 15, 23, 0.86)";
+    ctx.fillRect(legendX, legendY, legendW, legendH);
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(legendX, legendY, legendW, legendH);
+
+    const midY = legendY + legendH * 0.5 + 0.5;
+    ctx.fillStyle = "#94a3b8";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText(lowText, legendX + 6, midY);
+
+    const barX = legendX + 6 + lowW + 5;
+    const barY = legendY + (legendH - barH) * 0.5;
+    const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    for (let s = 0; s < THERMAL_LUT_STOPS.length; s += 1) {
+      const stop = THERMAL_LUT_STOPS[s];
+      grad.addColorStop(stop.t, thermalPaletteCss(stop.t, 1));
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+    ctx.lineWidth = 0.75;
+    ctx.strokeRect(barX, barY, barW, barH);
+
+    ctx.fillStyle = "#fef3c7";
+    ctx.textAlign = "right";
+    ctx.fillText(highText, legendX + legendW - 6, midY);
+    ctx.font = '600 11px "JetBrains Mono", "Fira Code", ui-monospace, monospace';
+  }
 
   // 2. X-Axis Time Labels along bottom gutter
   ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';

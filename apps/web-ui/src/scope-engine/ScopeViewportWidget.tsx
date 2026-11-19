@@ -40,6 +40,16 @@ import {
   type ScopeTrackRenderConfig,
 } from "./layout.ts";
 import {
+  buildAcquisitionSignature,
+  buildPersistenceViewKey,
+  computePersistenceDecayFactor,
+  getPersistenceSettleDurationSec,
+  getPersistenceTauSec,
+  type PersistenceColorMode,
+  type PersistenceMode,
+  type PersistenceRenderState,
+} from "./persistence.ts";
+import {
   formatFrequencyHz,
   formatMetricValue,
   formatTimeNs,
@@ -225,6 +235,22 @@ export function ScopeViewportWidget({
   const backendRef = useRef<ScopeRenderBackend | null>(null);
   const backendKindRef = useRef<RenderBackendKind>("webgl2");
   const geometryRef = useRef(new ScopeGeometryBuilder(32_768));
+  const clearPersistTokenRef = useRef(0);
+  const persistTrackerRef = useRef<{
+    lastViewKey: string;
+    lastAcqSig: string | null;
+    lastRenderTimeMs: number;
+    lastDepositTimeMs: number;
+    wasFrozen: boolean;
+    hasEnergy: boolean;
+  }>({
+    lastViewKey: "",
+    lastAcqSig: null,
+    lastRenderTimeMs: 0,
+    lastDepositTimeMs: 0,
+    wasFrozen: false,
+    hasEnergy: false,
+  });
 
   const sizeRef = useRef<{ cssW: number; cssH: number; dpr: number }>({
     cssW: 0,
@@ -487,12 +513,20 @@ export function ScopeViewportWidget({
       const { cssW, cssH, dpr } = sizeRef.current;
       if (cssW < 2 || cssH < 2 || !backendRef.current) return;
 
-      if (dirtyRef.current) {
+      const cfg = configRef.current;
+      const scopeData = pendingScopeRef.current;
+      const pMode: PersistenceMode = cfg.persistenceMode ?? "off";
+      const pColorMode: PersistenceColorMode = cfg.persistenceColorMode ?? "phosphor";
+      const tracker = persistTrackerRef.current;
+      const frozen =
+        cfg.paused || scopeData?.triggerState === TriggerRuntimeStateCode.LatchedPinned;
+      const isFiniteDecay = pMode !== "off" && pMode !== "infinite";
+      const needsDecayTick = isFiniteDecay && !frozen && tracker.hasEnergy;
+
+      if (dirtyRef.current || needsDecayTick) {
         dirtyRef.current = false;
         const tStart = performance.now();
-        const cfg = configRef.current;
         const tracks = trackConfigsRef.current;
-        const scopeData = pendingScopeRef.current;
 
         const layout = computeMsoLayout(cssW, cssH, tracks, cfg.analogLayout);
         const axisCfg = {
@@ -525,7 +559,79 @@ export function ScopeViewportWidget({
 
         const physW = Math.round(cssW * dpr);
         const physH = Math.round(cssH * dpr);
-        backendRef.current.render(physW, physH, dpr, layout, built);
+
+        let persistenceArg: PersistenceRenderState | undefined;
+        if (pMode === "off") {
+          tracker.lastViewKey = "";
+          tracker.lastAcqSig = null;
+          tracker.lastRenderTimeMs = 0;
+          tracker.lastDepositTimeMs = 0;
+          tracker.wasFrozen = false;
+          tracker.hasEnergy = false;
+        } else {
+          const viewKey = buildPersistenceViewKey({
+            physicalWidth: physW,
+            physicalHeight: physH,
+            analogRegion: layout.analogRegion,
+            timeSpanNs: cfg.timeSpanNs,
+            panOffsetNs: cfg.panOffsetNs,
+            preTriggerRatio: cfg.preTriggerRatio,
+            yAxisScale: axisCfg.yAxisScale,
+            yAxisOffset: axisCfg.yAxisOffset,
+            analogLayout: cfg.analogLayout,
+            sweepMode: cfg.sweepMode,
+            tracks,
+            clearToken: clearPersistTokenRef.current,
+          });
+          const viewChanged = viewKey !== tracker.lastViewKey;
+          const settled =
+            isFiniteDecay &&
+            !frozen &&
+            tracker.hasEnergy &&
+            tracker.lastDepositTimeMs > 0 &&
+            tStart - tracker.lastDepositTimeMs >=
+              getPersistenceSettleDurationSec(pMode) * 1000;
+          const needsClear = viewChanged || settled;
+
+          if (viewChanged) {
+            tracker.lastAcqSig = null;
+          }
+
+          const acqSig = buildAcquisitionSignature(scopeData);
+          const depositCurrentFrame =
+            built.analogVertexCount > 0 &&
+            acqSig !== null &&
+            acqSig !== tracker.lastAcqSig;
+
+          const dtSec =
+            needsClear || tracker.wasFrozen || tracker.lastRenderTimeMs === 0
+              ? 0
+              : Math.min(0.25, Math.max(0, (tStart - tracker.lastRenderTimeMs) / 1000));
+          const decayFactor = computePersistenceDecayFactor(pMode, dtSec, frozen);
+
+          persistenceArg = {
+            mode: pMode,
+            colorMode: pColorMode,
+            decayFactor,
+            dtSec,
+            tauSec: getPersistenceTauSec(pMode),
+            depositCurrentFrame,
+            clear: needsClear,
+          };
+
+          tracker.lastViewKey = viewKey;
+          tracker.lastRenderTimeMs = tStart;
+          tracker.wasFrozen = frozen;
+          if (depositCurrentFrame) {
+            tracker.lastAcqSig = acqSig;
+            tracker.lastDepositTimeMs = tStart;
+            tracker.hasEnergy = true;
+          } else if (needsClear) {
+            tracker.hasEnergy = false;
+          }
+        }
+
+        backendRef.current.render(physW, physH, dpr, layout, built, persistenceArg);
 
         const frameDt = performance.now() - tStart;
         const perf = perfStatsRef.current;
@@ -565,6 +671,8 @@ export function ScopeViewportWidget({
             ribbonLabels: built.ribbonLabels,
             dataModeTag: built.dataModeTag,
             backendKind: backendKindRef.current,
+            persistenceMode: pMode,
+            persistenceColorMode: pColorMode,
             fps: perf.fps,
             p99FrameMs: perf.p99Ms,
             hoverHandle: hoverHandleRef.current,
@@ -1048,6 +1156,8 @@ export function ScopeViewportWidget({
   const statusMeta = triggerStateLabel(runtimeTriggerState);
   const analogTracks = config.tracks.filter((t) => t.lane === "analog");
   const wheelMode = config.wheelZoomTarget ?? "x";
+  const persistenceMode = config.persistenceMode ?? "off";
+  const persistenceColorMode = config.persistenceColorMode ?? "phosphor";
   const editingTrack =
     editingChannelId !== null
       ? config.tracks.find((tr) => tr.channelId === editingChannelId) ?? null
@@ -1283,6 +1393,62 @@ export function ScopeViewportWidget({
           >
             {t("scope.cursors")}
           </button>
+
+          <select
+            className={`scope-select ${persistenceMode !== "off" ? "scope-select-active" : ""}`}
+            aria-label={t("scope.persistAria")}
+            data-testid={`scope-persist-${config.scopeId}`}
+            value={persistenceMode}
+            onChange={(ev) => {
+              const mode = ev.target.value as PersistenceMode;
+              callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                ...prev,
+                persistenceMode: mode,
+              }));
+            }}
+          >
+            <option value="off">{t("scope.persist.off")}</option>
+            <option value="short">{t("scope.persist.short")}</option>
+            <option value="medium">{t("scope.persist.medium")}</option>
+            <option value="long">{t("scope.persist.long")}</option>
+            <option value="infinite">{t("scope.persist.infinite")}</option>
+          </select>
+
+          {persistenceMode !== "off" && (
+            <>
+              <button
+                type="button"
+                className={`scope-btn ${persistenceColorMode === "thermal" ? "active scope-btn-thermal" : ""}`}
+                title={t("scope.persistColorTitle")}
+                data-testid={`scope-persist-color-${config.scopeId}`}
+                onClick={() =>
+                  callbacks.onUpdateScope(config.scopeId, (prev) => ({
+                    ...prev,
+                    persistenceColorMode:
+                      (prev.persistenceColorMode ?? "phosphor") === "phosphor"
+                        ? "thermal"
+                        : "phosphor",
+                  }))
+                }
+              >
+                {persistenceColorMode === "thermal"
+                  ? t("scope.persistColor.thermal")
+                  : t("scope.persistColor.phosphor")}
+              </button>
+              <button
+                type="button"
+                className="scope-btn"
+                title={t("scope.persistClearTitle")}
+                data-testid={`scope-persist-clear-${config.scopeId}`}
+                onClick={() => {
+                  clearPersistTokenRef.current += 1;
+                  dirtyRef.current = true;
+                }}
+              >
+                {t("scope.persistClear")}
+              </button>
+            </>
+          )}
 
           <select
             className="scope-select"

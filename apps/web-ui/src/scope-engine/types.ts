@@ -5,6 +5,7 @@ import type {
   TriggerSweepModeDto,
 } from "../bridge/bindings.ts";
 import type { AnalogLayoutMode } from "./layout.ts";
+import type { PersistenceColorMode, PersistenceMode } from "./persistence.ts";
 
 export type WheelZoomTarget = "x" | "y" | "xy";
 
@@ -31,6 +32,10 @@ export interface ScopeUiConfig {
   yAxisOffset: number;
   /** Wheel zoom target inside the plot area when no modifier key is held. */
   wheelZoomTarget?: WheelZoomTarget;
+  /** Hardware DSO-style waveform persistence/afterglow decay preset. */
+  persistenceMode?: PersistenceMode;
+  /** Persistence color grading mode: per-channel phosphor or hit-density thermal LUT. */
+  persistenceColorMode?: PersistenceColorMode;
   sweepMode: TriggerSweepModeDto;
   autoTimeoutMs: number;
   trigger: TriggerConditionDto | null;

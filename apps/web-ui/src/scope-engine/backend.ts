@@ -1,5 +1,6 @@
 import type { BuiltScopeGeometry } from "./geometry.ts";
 import type { MsoLayout } from "./layout.ts";
+import type { PersistenceRenderState } from "./persistence.ts";
 
 export type RenderBackendKind = "webgpu" | "webgl2" | "canvas2d";
 
@@ -12,6 +13,7 @@ export interface ScopeRenderBackend {
     dpr: number,
     layout: MsoLayout,
     geometry: BuiltScopeGeometry,
+    persistence?: PersistenceRenderState,
   ): void;
   dispose(): void;
 }

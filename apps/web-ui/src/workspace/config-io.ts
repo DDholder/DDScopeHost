@@ -19,6 +19,12 @@ import {
 } from "../bridge/virtual-eval.ts";
 import { getDefaultPageTitle, type UiLocale } from "../i18n/index.ts";
 import type { AnalogLayoutMode } from "../scope-engine/layout.ts";
+import {
+  isPersistenceColorMode,
+  isPersistenceMode,
+  type PersistenceColorMode,
+  type PersistenceMode,
+} from "../scope-engine/persistence.ts";
 import type {
   ScopeTrackUiBinding,
   ScopeUiConfig,
@@ -135,6 +141,8 @@ export interface PortableScopeConfigV1 {
   yAxisScale: number;
   yAxisOffset: number;
   wheelZoomTarget: WheelZoomTarget;
+  persistenceMode?: PersistenceMode;
+  persistenceColorMode?: PersistenceColorMode;
   sweepMode: TriggerSweepModeDto;
   autoTimeoutMs: number;
   trigger: PortableTriggerV1 | null;
@@ -639,6 +647,8 @@ function serializePortableScope(
     yAxisScale: scope.yAxisScale,
     yAxisOffset: scope.yAxisOffset,
     wheelZoomTarget: scope.wheelZoomTarget ?? "xy",
+    persistenceMode: scope.persistenceMode ?? "off",
+    persistenceColorMode: scope.persistenceColorMode ?? "phosphor",
     sweepMode: scope.sweepMode,
     autoTimeoutMs: scope.autoTimeoutMs,
     trigger: scope.trigger
@@ -1744,6 +1754,12 @@ export function rehydrateBoardFromConfig(args: {
         rawScope && VALID_WHEEL_ZOOM_TARGETS.has(rawScope.wheelZoomTarget)
           ? rawScope.wheelZoomTarget
           : "xy",
+      persistenceMode: isPersistenceMode(rawScope?.persistenceMode)
+        ? rawScope.persistenceMode
+        : "off",
+      persistenceColorMode: isPersistenceColorMode(rawScope?.persistenceColorMode)
+        ? rawScope.persistenceColorMode
+        : "phosphor",
       sweepMode:
         rawScope && VALID_SWEEP_MODES.has(rawScope.sweepMode) ? rawScope.sweepMode : "auto",
       autoTimeoutMs: Math.max(50, finiteOr(rawScope?.autoTimeoutMs, 250)),
