@@ -8,6 +8,8 @@ import { channelValueToAxis } from "../scope-engine/layout.ts";
 import { formatMetricValue } from "../scope-engine/time-format.ts";
 import { ChannelBindSelect } from "./ChannelBindSelect.tsx";
 import type { DashboardWidgetItem, WidgetChannelBinding } from "./types.ts";
+import { WidgetConfigModal } from "./WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "./WidgetHeaderSlot.tsx";
 
 export interface DigitalMeterWidgetProps {
   widget: DashboardWidgetItem;
@@ -97,8 +99,8 @@ export function DigitalMeterWidget({
 
       const cvs = sparkCanvasRef.current;
       if (cvs && peaks.history.length >= 2) {
-        const w = cvs.clientWidth || 160;
-        const h = cvs.clientHeight || 36;
+        const w = Math.max(40, cvs.clientWidth || 160);
+        const h = Math.max(18, cvs.clientHeight || 36);
         if (cvs.width !== w || cvs.height !== h) {
           cvs.width = w;
           cvs.height = h;
@@ -158,31 +160,123 @@ export function DigitalMeterWidget({
     return unsub;
   }, [binding?.channelId, locale]);
 
+  const headerControls = (
+    <WidgetHeaderActions>
+      {binding && (
+        <button
+          type="button"
+          className="widget-header-btn"
+          title={t("widget.resetPeaks")}
+          onClick={() => {
+            peaksRef.current = { min: Infinity, max: -Infinity, history: [] };
+            if (minRef.current) minRef.current.textContent = "--";
+            if (maxRef.current) maxRef.current.textContent = "--";
+          }}
+        >
+          ↺
+        </button>
+      )}
+      <button
+        type="button"
+        className={`widget-header-btn ${configOpen ? "active" : ""}`}
+        title={t("widget.configToggle")}
+        data-testid={`meter-config-btn-${widget.id}`}
+        onClick={() => setConfigOpen((v) => !v)}
+      >
+        ⚙
+      </button>
+    </WidgetHeaderActions>
+  );
+
+  const configOverlay = (
+    <WidgetConfigModal
+      open={configOpen}
+      title={`${widget.title} · ${t("widget.configToggle")}`}
+      doneLabel={t("widget.configDone")}
+      width="sm"
+      onClose={() => setConfigOpen(false)}
+    >
+      <div className="widget-inline-config">
+        <label style={{ gridColumn: "span 2" }}>
+          {t("widget.bindChannelLabel")}
+          <ChannelBindSelect
+            selectedChannelId={binding?.channelId ?? null}
+            channelsById={channelsById}
+            placeholder={t("widget.selectChannel")}
+            title={t("widget.switchChannelTitle")}
+            className="widget-config-select"
+            dataTestId={`meter-bind-select-${widget.id}`}
+            onBindChannel={onBindChannel}
+          />
+        </label>
+        {binding && (
+          <>
+            <label>
+              {t("scope.chScale")}
+              <input
+                type="number"
+                step="0.1"
+                value={binding.scale}
+                onChange={(ev) => {
+                  const scale = Number.parseFloat(ev.target.value);
+                  if (!Number.isFinite(scale)) return;
+                  onUpdateWidget((prev) => ({
+                    ...prev,
+                    primaryBinding: prev.primaryBinding
+                      ? { ...prev.primaryBinding, scale }
+                      : null,
+                  }));
+                }}
+              />
+            </label>
+            <label>
+              {t("scope.chOffset")}
+              <input
+                type="number"
+                step="1"
+                value={binding.offset}
+                onChange={(ev) => {
+                  const offset = Number.parseFloat(ev.target.value);
+                  if (!Number.isFinite(offset)) return;
+                  onUpdateWidget((prev) => ({
+                    ...prev,
+                    primaryBinding: prev.primaryBinding
+                      ? { ...prev.primaryBinding, offset }
+                      : null,
+                  }));
+                }}
+              />
+            </label>
+          </>
+        )}
+      </div>
+    </WidgetConfigModal>
+  );
+
   if (!binding) {
     return (
-      <div className="widget-unbound-box">
-        <span>{t("widget.unbound")}</span>
-        <ChannelBindSelect
-          channelsById={channelsById}
-          placeholder={t("widget.selectChannel")}
-          onBindChannel={onBindChannel}
-        />
-      </div>
+      <>
+        {headerControls}
+        <div className="widget-unbound-box">
+          <span>{t("widget.unbound")}</span>
+          {onBindChannel && (
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() => setConfigOpen(true)}
+            >
+              {t("widget.selectChannel")}
+            </button>
+          )}
+        </div>
+        {configOverlay}
+      </>
     );
   }
 
   return (
     <div className="widget-meter-body" data-testid={`widget-meter-${widget.id}`}>
-      <div className="widget-meter-top">
-        <span className="widget-ch-badge">{ch ? ch.full_path : `ch${binding.channelId}`}</span>
-        <button
-          type="button"
-          className="scope-btn-xs"
-          onClick={() => setConfigOpen((v) => !v)}
-        >
-          {t("widget.configToggle")}
-        </button>
-      </div>
+      {headerControls}
 
       <div className="widget-meter-main" ref={valRef}>
         --
@@ -200,59 +294,9 @@ export function DigitalMeterWidget({
         <span>
           <em>{t("widget.max")}:</em> <strong ref={maxRef}>--</strong>
         </span>
-        <button
-          type="button"
-          className="scope-btn-xs"
-          onClick={() => {
-            peaksRef.current = { min: Infinity, max: -Infinity, history: [] };
-            if (minRef.current) minRef.current.textContent = "--";
-            if (maxRef.current) maxRef.current.textContent = "--";
-          }}
-        >
-          {t("widget.resetPeaks")}
-        </button>
       </div>
 
-      {configOpen && (
-        <div className="widget-inline-config">
-          <label>
-            {t("scope.chScale")}
-            <input
-              type="number"
-              step="0.1"
-              value={binding.scale}
-              onChange={(ev) => {
-                const scale = Number.parseFloat(ev.target.value);
-                if (!Number.isFinite(scale)) return;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  primaryBinding: prev.primaryBinding
-                    ? { ...prev.primaryBinding, scale }
-                    : null,
-                }));
-              }}
-            />
-          </label>
-          <label>
-            {t("scope.chOffset")}
-            <input
-              type="number"
-              step="1"
-              value={binding.offset}
-              onChange={(ev) => {
-                const offset = Number.parseFloat(ev.target.value);
-                if (!Number.isFinite(offset)) return;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  primaryBinding: prev.primaryBinding
-                    ? { ...prev.primaryBinding, offset }
-                    : null,
-                }));
-              }}
-            />
-          </label>
-        </div>
-      )}
+      {configOverlay}
     </div>
   );
 }

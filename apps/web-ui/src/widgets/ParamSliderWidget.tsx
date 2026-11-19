@@ -12,6 +12,8 @@ import {
   type CommandDefinition,
 } from "../workspace/command-system.ts";
 import type { DashboardWidgetItem, WidgetSliderConfig } from "./types.ts";
+import { WidgetConfigModal } from "./WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "./WidgetHeaderSlot.tsx";
 
 export interface ParamSliderWidgetProps {
   widget: DashboardWidgetItem;
@@ -161,26 +163,35 @@ export function ParamSliderWidget({
     );
   };
 
-  const decimals = cfg.step < 1 ? Math.min(3, Math.max(1, String(cfg.step).split(".")[1]?.length ?? 2)) : 0;
+  const handleSelectCommand = (nextId: string | null) => {
+    setCmdError(null);
+    if (onBindCommand) {
+      onBindCommand(nextId);
+      return;
+    }
+    const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
+    onUpdateWidget((prev) => ({
+      ...prev,
+      ...(nextCmd ? { title: nextCmd.name } : {}),
+      sliderConfig: {
+        ...getSliderCfg(prev, sourceIds),
+        commandId: nextId,
+        ...(nextCmd?.targetSourceId ? { sourceId: nextCmd.targetSourceId } : {}),
+      },
+    }));
+  };
 
   return (
     <div className="widget-slider-body" data-testid={`widget-slider-${widget.id}`}>
-      <div className="widget-slider-top">
-        {boundCommand ? (
-          <span className="widget-ch-badge widget-cmd-bound-badge" title={boundCommand.template}>
-            ⚡ {boundCommand.name} · {effectiveTarget}
-          </span>
-        ) : (
-          <span className="widget-ch-badge">
-            {cfg.sourceId}:{cfg.key}
-          </span>
-        )}
+      <WidgetHeaderActions>
         {boundCommand && placeholders.length > 1 && (
           <select
-            className="widget-slot-select"
+            className="widget-header-slot-select"
             data-testid={`widget-slot-select-${widget.id}`}
             title={t("widget.cmdPlaceholderLabel")}
             value={String(effectiveSlot)}
+            onPointerDown={(ev) => ev.stopPropagation()}
+            onClick={(ev) => ev.stopPropagation()}
             onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
           >
             {placeholders.map((ph) => (
@@ -190,11 +201,10 @@ export function ParamSliderWidget({
             ))}
           </select>
         )}
-        <span className="widget-slider-val">{cfg.value.toFixed(decimals)}</span>
         {boundCommand && (
           <button
             type="button"
-            className="scope-btn-xs scope-btn-accent"
+            className="widget-header-btn is-accent"
             title={t("widget.btn.send")}
             onClick={() => commitValue(cfg.value, true)}
           >
@@ -203,12 +213,14 @@ export function ParamSliderWidget({
         )}
         <button
           type="button"
-          className="scope-btn-xs"
+          className={`widget-header-btn ${configOpen ? "active" : ""}`}
+          title={t("widget.configToggle")}
+          data-testid={`slider-config-btn-${widget.id}`}
           onClick={() => setConfigOpen((v) => !v)}
         >
-          {t("widget.configToggle")}
+          ⚙
         </button>
-      </div>
+      </WidgetHeaderActions>
 
       <div className="widget-slider-controls">
         <input
@@ -244,133 +256,122 @@ export function ParamSliderWidget({
         </div>
       )}
 
-      {configOpen && (
+      <WidgetConfigModal
+        open={configOpen}
+        title={`${widget.title} · ${t("widget.configToggle")}`}
+        doneLabel={t("widget.configDone")}
+        width="sm"
+        onClose={() => setConfigOpen(false)}
+      >
         <div className="widget-inline-config">
-          <label style={{ gridColumn: "span 2" }}>
-            {t("widget.cmdBindLabel")}
-            <select
-              data-testid={`slider-cmd-select-${widget.id}`}
-              value={cfg.commandId ?? ""}
-              onChange={(ev) => {
-                const nextId = ev.target.value || null;
-                setCmdError(null);
-                if (onBindCommand) {
-                  onBindCommand(nextId);
-                  return;
-                }
-                const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  ...(nextCmd ? { title: nextCmd.name } : {}),
-                  sliderConfig: {
-                    ...getSliderCfg(prev, sourceIds),
-                    commandId: nextId,
-                    ...(nextCmd?.targetSourceId ? { sourceId: nextCmd.targetSourceId } : {}),
-                  },
-                }));
-              }}
-            >
-              <option value="">{t("widget.cmdBindNoneKv")}</option>
-              {commands.map((cmd) => (
-                <option key={cmd.id} value={cmd.id}>
-                  {cmd.name} ({cmd.format.toUpperCase()})
-                </option>
-              ))}
-            </select>
-          </label>
-          {boundCommand && placeholders.length > 0 && (
             <label style={{ gridColumn: "span 2" }}>
-              {t("widget.cmdPlaceholderLabel")}
+              {t("widget.cmdBindLabel")}
               <select
-                data-testid={`slider-arg-select-${widget.id}`}
-                value={String(effectiveSlot)}
-                onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
+                data-testid={`slider-cmd-select-${widget.id}`}
+                value={cfg.commandId ?? ""}
+                onChange={(ev) => handleSelectCommand(ev.target.value || null)}
               >
-                {placeholders.map((ph) => (
-                  <option key={ph.index} value={String(ph.index)}>
-                    {t("widget.cmdPlaceholderSlot", {
-                      num: ph.index + 1,
-                      token: ph.token,
-                    })}
+                <option value="">{t("widget.cmdBindNoneKv")}</option>
+                {commands.map((cmd) => (
+                  <option key={cmd.id} value={cmd.id}>
+                    {cmd.name} ({cmd.format.toUpperCase()})
                   </option>
                 ))}
               </select>
             </label>
-          )}
-          {boundCommand && (
-            <label style={{ gridColumn: "span 2", flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={cfg.autoSend !== false}
-                onChange={(ev) => updateCfg({ autoSend: ev.target.checked })}
-              />
-              <span>{t("widget.slider.autoSend")}</span>
-            </label>
-          )}
-          {(!boundCommand || !boundCommand.targetSourceId) && (
+            {boundCommand && placeholders.length > 0 && (
+              <label style={{ gridColumn: "span 2" }}>
+                {t("widget.cmdPlaceholderLabel")}
+                <select
+                  data-testid={`slider-arg-select-${widget.id}`}
+                  value={String(effectiveSlot)}
+                  onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
+                >
+                  {placeholders.map((ph) => (
+                    <option key={ph.index} value={String(ph.index)}>
+                      {t("widget.cmdPlaceholderSlot", {
+                        num: ph.index + 1,
+                        token: ph.token,
+                      })}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {boundCommand && (
+              <label style={{ gridColumn: "span 2", flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={cfg.autoSend !== false}
+                  onChange={(ev) => updateCfg({ autoSend: ev.target.checked })}
+                />
+                <span>{t("widget.slider.autoSend")}</span>
+              </label>
+            )}
+            {(!boundCommand || !boundCommand.targetSourceId) && (
+              <label>
+                {t("widget.slider.source")}
+                <select
+                  value={cfg.sourceId}
+                  onChange={(ev) => updateCfg({ sourceId: ev.target.value })}
+                >
+                  {(sourceIds.length > 0 ? sourceIds : [cfg.sourceId]).map((id) => (
+                    <option key={id} value={id}>
+                      {id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {!boundCommand && (
+              <label>
+                {t("widget.slider.key")}
+                <input
+                  type="text"
+                  value={cfg.key}
+                  onChange={(ev) => updateCfg({ key: ev.target.value })}
+                />
+              </label>
+            )}
             <label>
-              {t("widget.slider.source")}
-              <select
-                value={cfg.sourceId}
-                onChange={(ev) => updateCfg({ sourceId: ev.target.value })}
-              >
-                {(sourceIds.length > 0 ? sourceIds : [cfg.sourceId]).map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {!boundCommand && (
-            <label>
-              {t("widget.slider.key")}
+              {t("widget.rangeMin")}
               <input
-                type="text"
-                value={cfg.key}
-                onChange={(ev) => updateCfg({ key: ev.target.value })}
+                type="number"
+                step="any"
+                value={cfg.min}
+                onChange={(ev) => {
+                  const min = Number.parseFloat(ev.target.value);
+                  if (Number.isFinite(min)) updateCfg({ min });
+                }}
               />
             </label>
-          )}
-          <label>
-            {t("widget.rangeMin")}
-            <input
-              type="number"
-              step="any"
-              value={cfg.min}
-              onChange={(ev) => {
-                const min = Number.parseFloat(ev.target.value);
-                if (Number.isFinite(min)) updateCfg({ min });
-              }}
-            />
-          </label>
-          <label>
-            {t("widget.rangeMax")}
-            <input
-              type="number"
-              step="any"
-              value={cfg.max}
-              onChange={(ev) => {
-                const max = Number.parseFloat(ev.target.value);
-                if (Number.isFinite(max)) updateCfg({ max });
-              }}
-            />
-          </label>
-          <label>
-            {t("widget.slider.step")}
-            <input
-              type="number"
-              step="any"
-              min="0.0001"
-              value={cfg.step}
-              onChange={(ev) => {
-                const step = Number.parseFloat(ev.target.value);
-                if (Number.isFinite(step) && step > 0) updateCfg({ step });
-              }}
-            />
-          </label>
-        </div>
-      )}
+            <label>
+              {t("widget.rangeMax")}
+              <input
+                type="number"
+                step="any"
+                value={cfg.max}
+                onChange={(ev) => {
+                  const max = Number.parseFloat(ev.target.value);
+                  if (Number.isFinite(max)) updateCfg({ max });
+                }}
+              />
+            </label>
+            <label>
+              {t("widget.slider.step")}
+              <input
+                type="number"
+                step="any"
+                min="0.0001"
+                value={cfg.step}
+                onChange={(ev) => {
+                  const step = Number.parseFloat(ev.target.value);
+                  if (Number.isFinite(step) && step > 0) updateCfg({ step });
+                }}
+              />
+            </label>
+          </div>
+      </WidgetConfigModal>
     </div>
   );
 }

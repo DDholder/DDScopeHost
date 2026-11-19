@@ -18,6 +18,8 @@ import type {
   WidgetCmdTableConfig,
   WidgetCmdTableRow,
 } from "./types.ts";
+import { WidgetConfigModal } from "./WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "./WidgetHeaderSlot.tsx";
 
 export interface CmdTableWidgetProps {
   widget: DashboardWidgetItem;
@@ -185,30 +187,115 @@ export function CmdTableWidget({
     }
   };
 
+  const headerControls = (
+    <WidgetHeaderActions>
+      {boundCommand && (
+        <>
+          {status && (
+            <span
+              className={`widget-cmd-table-status ${status.ok ? "ok" : "err"}`}
+              title={status.text}
+            >
+              {status.text}
+            </span>
+          )}
+          <button
+            type="button"
+            className="widget-header-btn is-accent"
+            title={t("widget.cmdTable.addRow")}
+            data-testid={`cmd-table-add-row-${widget.id}`}
+            onClick={handleAddRow}
+          >
+            {t("widget.cmdTable.addRow")}
+          </button>
+        </>
+      )}
+      <button
+        type="button"
+        className={`widget-header-btn ${configOpen ? "active" : ""}`}
+        title={t("widget.configToggle")}
+        data-testid={`cmd-table-config-btn-${widget.id}`}
+        onClick={() => setConfigOpen((v) => !v)}
+      >
+        ⚙
+      </button>
+    </WidgetHeaderActions>
+  );
+
+  const configOverlay = (
+    <WidgetConfigModal
+      open={configOpen}
+      title={`${widget.title} · ${t("widget.configToggle")}`}
+      doneLabel={t("widget.configDone")}
+      width="sm"
+      onClose={() => setConfigOpen(false)}
+    >
+      <div className="widget-inline-config">
+        <label style={{ gridColumn: "span 2" }}>
+          {t("widget.cmdBindLabel")}
+          <select
+            data-testid={`cmd-table-bind-select-${widget.id}`}
+            value={cfg.commandId ?? ""}
+            onChange={(ev) => handleSelectCommand(ev.target.value || null)}
+          >
+            <option value="">{t("widget.cmdTable.selectCmd")}</option>
+            {commands.map((cmd) => (
+              <option key={cmd.id} value={cmd.id}>
+                {cmd.name} ({cmd.format.toUpperCase()})
+              </option>
+            ))}
+          </select>
+        </label>
+        {boundCommand && !boundCommand.targetSourceId && (
+          <label style={{ gridColumn: "span 2" }}>
+            {t("widget.slider.source")}
+            <select
+              value={cfg.sourceId}
+              onChange={(ev) =>
+                updateCfg((prev) => ({ ...prev, sourceId: ev.target.value }))
+              }
+            >
+              {(sourceIds.length > 0 ? sourceIds : [cfg.sourceId]).map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {boundCommand && (
+          <div
+            className="widget-cmd-preview"
+            style={{ gridColumn: "span 2", marginTop: 0 }}
+            title={boundCommand.template}
+          >
+            {boundCommand.template} · {effectiveTarget} ·{" "}
+            {boundCommand.format === "hex" ? "HEX" : "STR"}
+          </div>
+        )}
+      </div>
+    </WidgetConfigModal>
+  );
+
   if (!boundCommand) {
     return (
-      <div
-        className="widget-unbound-box"
-        data-testid={`widget-cmd-table-${widget.id}`}
-      >
-        <span>{t("widget.cmdTable.unbound")}</span>
-        <select
-          className="widget-bind-select"
-          data-testid={`cmd-table-bind-select-${widget.id}`}
-          value=""
-          onChange={(ev) => {
-            const nextId = ev.target.value || null;
-            if (nextId) handleSelectCommand(nextId);
-          }}
+      <>
+        {headerControls}
+        <div
+          className="widget-unbound-box"
+          data-testid={`widget-cmd-table-${widget.id}`}
         >
-          <option value="">{t("widget.cmdTable.selectCmd")}</option>
-          {commands.map((cmd) => (
-            <option key={cmd.id} value={cmd.id}>
-              {cmd.name} ({cmd.format.toUpperCase()})
-            </option>
-          ))}
-        </select>
-      </div>
+          <span>{t("widget.cmdTable.unbound")}</span>
+          <button
+            type="button"
+            className="scope-btn-xs"
+            onClick={() => setConfigOpen(true)}
+          >
+            {t("widget.cmdTable.selectCmd")}
+          </button>
+        </div>
+        {configOverlay}
+      </>
     );
   }
 
@@ -217,75 +304,9 @@ export function CmdTableWidget({
       className="widget-cmd-table-body"
       data-testid={`widget-cmd-table-${widget.id}`}
     >
-      <div className="widget-cmd-top">
-        <span
-          className="widget-ch-badge widget-cmd-bound-badge"
-          title={boundCommand.template}
-        >
-          ⚡ {boundCommand.name} · {effectiveTarget} ·{" "}
-          {boundCommand.format === "hex" ? "HEX" : "STR"}
-        </span>
-        {status && (
-          <span
-            className={`widget-cmd-table-status ${status.ok ? "ok" : "err"}`}
-            title={status.text}
-          >
-            {status.text}
-          </span>
-        )}
-        <button
-          type="button"
-          className="scope-btn-xs scope-btn-accent"
-          data-testid={`cmd-table-add-row-${widget.id}`}
-          onClick={handleAddRow}
-        >
-          {t("widget.cmdTable.addRow")}
-        </button>
-        <button
-          type="button"
-          className="scope-btn-xs"
-          onClick={() => setConfigOpen((v) => !v)}
-        >
-          {t("widget.configToggle")}
-        </button>
-      </div>
+      {headerControls}
 
-      {configOpen && (
-        <div className="widget-inline-config">
-          <label style={{ gridColumn: "span 2" }}>
-            {t("widget.cmdBindLabel")}
-            <select
-              data-testid={`cmd-table-cmd-select-${widget.id}`}
-              value={cfg.commandId ?? ""}
-              onChange={(ev) => handleSelectCommand(ev.target.value || null)}
-            >
-              <option value="">{t("widget.cmdTable.selectCmd")}</option>
-              {commands.map((cmd) => (
-                <option key={cmd.id} value={cmd.id}>
-                  {cmd.name} ({cmd.format.toUpperCase()})
-                </option>
-              ))}
-            </select>
-          </label>
-          {!boundCommand.targetSourceId && (
-            <label>
-              {t("widget.slider.source")}
-              <select
-                value={cfg.sourceId}
-                onChange={(ev) =>
-                  updateCfg((prev) => ({ ...prev, sourceId: ev.target.value }))
-                }
-              >
-                {(sourceIds.length > 0 ? sourceIds : [cfg.sourceId]).map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-      )}
+      {configOverlay}
 
       <div className="widget-cmd-table-wrap">
         <table className="widget-watch-table widget-cmd-table">

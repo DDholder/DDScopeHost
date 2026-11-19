@@ -5,6 +5,8 @@ export * from "./WidgetToolbox.tsx";
 export * from "./CommandPanel.tsx";
 export * from "./VirtualChannelPanel.tsx";
 export * from "./DashboardCanvas.tsx";
+export * from "./WidgetHeaderSlot.tsx";
+export * from "./WidgetConfigModal.tsx";
 export * from "./ChannelBindSelect.tsx";
 export * from "./DigitalMeterWidget.tsx";
 export * from "./RadialGaugeWidget.tsx";

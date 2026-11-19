@@ -21,6 +21,8 @@ import type {
   WidgetBitItem,
   WidgetBitParserConfig,
 } from "./types.ts";
+import { WidgetConfigModal } from "./WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "./WidgetHeaderSlot.tsx";
 
 export interface BitParserWidgetProps {
   widget: DashboardWidgetItem;
@@ -50,7 +52,6 @@ export function BitParserWidget({
 
   const cfg = widget.bitParserConfig ?? createDefaultBitParserConfig();
   const binding = widget.primaryBinding;
-  const ch = binding ? channelsById[binding.channelId] : undefined;
 
   useEffect(() => {
     const chId = binding?.channelId;
@@ -142,30 +143,10 @@ export function BitParserWidget({
     }));
   };
 
-  if (!binding) {
-    return (
-      <div className="widget-unbound-box">
-        <span>{t("widget.unbound")}</span>
-        <ChannelBindSelect
-          channelsById={channelsById}
-          placeholder={t("widget.selectChannel")}
-          dataTestId={`bit-parser-bind-${widget.id}`}
-          onBindChannel={onBindChannel}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className="widget-bit-parser-body"
-      data-testid={`widget-bit-parser-${widget.id}`}
-    >
-      <div className="widget-meter-top">
-        <span className="widget-ch-badge">
-          {ch ? ch.full_path : `ch${binding.channelId}`}
-        </span>
-        <div className="bit-parser-header-right">
+  const headerControls = (
+    <WidgetHeaderActions>
+      {binding && (
+        <>
           <span className="bit-parser-word-badge">
             {liveWord !== null
               ? `${formatBitWordHex(liveWord, cfg.bitWidth)} (${liveWord})`
@@ -176,16 +157,156 @@ export function BitParserWidget({
               {t("widget.bitParser.activeCount", { count: activeBits.length })}
             </span>
           )}
-          <button
-            type="button"
-            className={`scope-btn-xs ${configOpen ? "active" : ""}`}
-            data-testid={`bit-parser-config-btn-${widget.id}`}
-            onClick={() => setConfigOpen((v) => !v)}
-          >
-            {t("widget.configToggle")}
-          </button>
+        </>
+      )}
+      <button
+        type="button"
+        className={`widget-header-btn ${configOpen ? "active" : ""}`}
+        title={t("widget.configToggle")}
+        data-testid={`bit-parser-config-btn-${widget.id}`}
+        onClick={() => setConfigOpen((v) => !v)}
+      >
+        ⚙
+      </button>
+    </WidgetHeaderActions>
+  );
+
+  const configOverlay = (
+    <WidgetConfigModal
+      open={configOpen}
+      title={`${widget.title} · ${t("widget.configToggle")}`}
+      doneLabel={t("widget.configDone")}
+      width="lg"
+      dataTestId={`bit-parser-config-panel-${widget.id}`}
+      onClose={() => setConfigOpen(false)}
+    >
+      <div className="bit-parser-config-panel">
+        <div className="bit-parser-config-toolbar">
+          <label className="bit-parser-toolbar-field bit-parser-channel-field">
+            <span>{t("widget.bindChannelLabel")}</span>
+            <ChannelBindSelect
+              selectedChannelId={binding?.channelId ?? null}
+              channelsById={channelsById}
+              placeholder={t("widget.selectChannel")}
+              title={t("widget.switchChannelTitle")}
+              className="widget-config-select"
+              dataTestId={`bit-parser-bind-${widget.id}`}
+              onBindChannel={onBindChannel}
+            />
+          </label>
+          <label className="bit-parser-toolbar-field">
+            <span>{t("widget.bitParser.width")}</span>
+            <select
+              value={cfg.bitWidth}
+              onChange={(ev) => {
+                const nextW = Number(ev.target.value) as BitParserWidth;
+                if (!VALID_BIT_WIDTHS.includes(nextW)) return;
+                updateBitConfig((prevCfg) => ({
+                  ...prevCfg,
+                  bitWidth: nextW,
+                }));
+              }}
+            >
+              {VALID_BIT_WIDTHS.map((w) => (
+                <option key={w} value={w}>
+                  {w} bit
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="bit-parser-toolbar-check">
+            <input
+              type="checkbox"
+              checked={Boolean(cfg.showUnlabeled)}
+              onChange={(ev) => {
+                const checked = ev.target.checked;
+                updateBitConfig((prevCfg) => ({
+                  ...prevCfg,
+                  showUnlabeled: checked,
+                }));
+              }}
+            />
+            <span>{t("widget.bitParser.showUnlabeled")}</span>
+          </label>
+        </div>
+
+        <div className="bit-parser-config-rows">
+          {lsbToMsbIndices.map((bit) => {
+            const item = bitMap.get(bit);
+            const isHigh = liveWord !== null && isBitSet(liveWord, bit);
+            return (
+              <div key={bit} className="bit-parser-config-row">
+                <span
+                  className={`bit-parser-row-dot${isHigh ? " is-high" : ""}`}
+                  title={`B${bit} = ${isHigh ? 1 : 0}`}
+                >
+                  {isHigh ? "1" : "0"}
+                </span>
+                <span className="bit-parser-row-idx">B{bit}</span>
+                <input
+                  type="text"
+                  className="bit-parser-row-input"
+                  value={item?.label ?? ""}
+                  placeholder={t("widget.bitParser.bitPlaceholder", { bit })}
+                  onChange={(ev) => {
+                    const val = ev.target.value;
+                    updateBitConfig((prevCfg) =>
+                      upsertBitConfigItem(prevCfg, bit, { label: val }),
+                    );
+                  }}
+                />
+                <select
+                  className="bit-parser-row-tone"
+                  value={item?.tone ?? "info"}
+                  onChange={(ev) => {
+                    const tone = ev.target.value as BitParserTone;
+                    if (!VALID_BIT_TONES.includes(tone)) return;
+                    updateBitConfig((prevCfg) =>
+                      upsertBitConfigItem(prevCfg, bit, { tone }),
+                    );
+                  }}
+                >
+                  {VALID_BIT_TONES.map((tone) => (
+                    <option key={tone} value={tone}>
+                      {t(`widget.bitParser.tone.${tone}`)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
         </div>
       </div>
+    </WidgetConfigModal>
+  );
+
+  if (!binding) {
+    return (
+      <>
+        {headerControls}
+        <div className="widget-unbound-box">
+          <span>{t("widget.unbound")}</span>
+          {onBindChannel && (
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() => setConfigOpen(true)}
+            >
+              {t("widget.selectChannel")}
+            </button>
+          )}
+        </div>
+        {configOverlay}
+      </>
+    );
+  }
+
+  return (
+    <div
+      className="widget-bit-parser-body"
+      data-testid={`widget-bit-parser-${widget.id}`}
+    >
+      {headerControls}
 
       <div className="bit-parser-strip" aria-label="Bit State Strip">
         {msbToLsbIndices.map((b) => {
@@ -236,96 +357,7 @@ export function BitParserWidget({
         )}
       </div>
 
-      {configOpen && (
-        <div
-          className="bit-parser-config-panel"
-          data-testid={`bit-parser-config-panel-${widget.id}`}
-        >
-          <div className="bit-parser-config-toolbar">
-            <label className="bit-parser-toolbar-field">
-              <span>{t("widget.bitParser.width")}</span>
-              <select
-                value={cfg.bitWidth}
-                onChange={(ev) => {
-                  const nextW = Number(ev.target.value) as BitParserWidth;
-                  if (!VALID_BIT_WIDTHS.includes(nextW)) return;
-                  updateBitConfig((prevCfg) => ({
-                    ...prevCfg,
-                    bitWidth: nextW,
-                  }));
-                }}
-              >
-                {VALID_BIT_WIDTHS.map((w) => (
-                  <option key={w} value={w}>
-                    {w} bit
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="bit-parser-toolbar-check">
-              <input
-                type="checkbox"
-                checked={Boolean(cfg.showUnlabeled)}
-                onChange={(ev) => {
-                  const checked = ev.target.checked;
-                  updateBitConfig((prevCfg) => ({
-                    ...prevCfg,
-                    showUnlabeled: checked,
-                  }));
-                }}
-              />
-              <span>{t("widget.bitParser.showUnlabeled")}</span>
-            </label>
-          </div>
-
-          <div className="bit-parser-config-rows">
-            {lsbToMsbIndices.map((bit) => {
-              const item = bitMap.get(bit);
-              const isHigh = liveWord !== null && isBitSet(liveWord, bit);
-              return (
-                <div key={bit} className="bit-parser-config-row">
-                  <span
-                    className={`bit-parser-row-dot${isHigh ? " is-high" : ""}`}
-                    title={`B${bit} = ${isHigh ? 1 : 0}`}
-                  >
-                    {isHigh ? "1" : "0"}
-                  </span>
-                  <span className="bit-parser-row-idx">B{bit}</span>
-                  <input
-                    type="text"
-                    className="bit-parser-row-input"
-                    value={item?.label ?? ""}
-                    placeholder={t("widget.bitParser.bitPlaceholder", { bit })}
-                    onChange={(ev) => {
-                      const val = ev.target.value;
-                      updateBitConfig((prevCfg) =>
-                        upsertBitConfigItem(prevCfg, bit, { label: val }),
-                      );
-                    }}
-                  />
-                  <select
-                    className="bit-parser-row-tone"
-                    value={item?.tone ?? "info"}
-                    onChange={(ev) => {
-                      const tone = ev.target.value as BitParserTone;
-                      if (!VALID_BIT_TONES.includes(tone)) return;
-                      updateBitConfig((prevCfg) =>
-                        upsertBitConfigItem(prevCfg, bit, { tone }),
-                      );
-                    }}
-                  >
-                    {VALID_BIT_TONES.map((tone) => (
-                      <option key={tone} value={tone}>
-                        {t(`widget.bitParser.tone.${tone}`)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {configOverlay}
     </div>
   );
 }

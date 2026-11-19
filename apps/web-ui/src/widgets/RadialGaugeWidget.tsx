@@ -7,6 +7,8 @@ import { channelValueToAxis } from "../scope-engine/layout.ts";
 import { formatMetricValue } from "../scope-engine/time-format.ts";
 import { ChannelBindSelect } from "./ChannelBindSelect.tsx";
 import type { DashboardWidgetItem } from "./types.ts";
+import { WidgetConfigModal } from "./WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "./WidgetHeaderSlot.tsx";
 
 export interface RadialGaugeWidgetProps {
   widget: DashboardWidgetItem;
@@ -93,27 +95,150 @@ export function RadialGaugeWidget({
     return unsub;
   }, [binding?.channelId, binding?.scale, binding?.offset, gaugeCfg.min, gaugeCfg.max, gaugeCfg.warnHigh]);
 
+  const headerControls = (
+    <WidgetHeaderActions>
+      <button
+        type="button"
+        className={`widget-header-btn ${configOpen ? "active" : ""}`}
+        title={t("widget.configToggle")}
+        data-testid={`gauge-config-btn-${widget.id}`}
+        onClick={() => setConfigOpen((v) => !v)}
+      >
+        ⚙
+      </button>
+    </WidgetHeaderActions>
+  );
+
+  const configOverlay = (
+    <WidgetConfigModal
+      open={configOpen}
+      title={`${widget.title} · ${t("widget.configToggle")}`}
+      doneLabel={t("widget.configDone")}
+      width="sm"
+      onClose={() => setConfigOpen(false)}
+    >
+      <div className="widget-inline-config">
+        <label style={{ gridColumn: "span 2" }}>
+          {t("widget.bindChannelLabel")}
+          <ChannelBindSelect
+            selectedChannelId={binding?.channelId ?? null}
+            channelsById={channelsById}
+            placeholder={t("widget.selectChannel")}
+            title={t("widget.switchChannelTitle")}
+            className="widget-config-select"
+            dataTestId={`gauge-bind-select-${widget.id}`}
+            onBindChannel={onBindChannel}
+          />
+        </label>
+        <label>
+          {t("widget.rangeMin")}
+          <input
+            type="number"
+            value={gaugeCfg.min}
+            onChange={(ev) => {
+              const min = Number.parseFloat(ev.target.value);
+              if (!Number.isFinite(min)) return;
+              onUpdateWidget((prev) => ({
+                ...prev,
+                gaugeConfig: { ...(prev.gaugeConfig ?? gaugeCfg), min },
+              }));
+            }}
+          />
+        </label>
+        <label>
+          {t("widget.rangeMax")}
+          <input
+            type="number"
+            value={gaugeCfg.max}
+            onChange={(ev) => {
+              const max = Number.parseFloat(ev.target.value);
+              if (!Number.isFinite(max)) return;
+              onUpdateWidget((prev) => ({
+                ...prev,
+                gaugeConfig: { ...(prev.gaugeConfig ?? gaugeCfg), max },
+              }));
+            }}
+          />
+        </label>
+        <label>
+          {t("widget.warnHigh")}
+          <input
+            type="number"
+            value={gaugeCfg.warnHigh}
+            onChange={(ev) => {
+              const warnHigh = Number.parseFloat(ev.target.value);
+              if (!Number.isFinite(warnHigh)) return;
+              onUpdateWidget((prev) => ({
+                ...prev,
+                gaugeConfig: { ...(prev.gaugeConfig ?? gaugeCfg), warnHigh },
+              }));
+            }}
+          />
+        </label>
+        {binding && (
+          <>
+            <label>
+              {t("scope.chScale")}
+              <input
+                type="number"
+                step="0.1"
+                value={binding.scale}
+                onChange={(ev) => {
+                  const scale = Number.parseFloat(ev.target.value);
+                  if (!Number.isFinite(scale)) return;
+                  onUpdateWidget((prev) => ({
+                    ...prev,
+                    primaryBinding: prev.primaryBinding ? { ...prev.primaryBinding, scale } : null,
+                  }));
+                }}
+              />
+            </label>
+            <label>
+              {t("scope.chOffset")}
+              <input
+                type="number"
+                step="1"
+                value={binding.offset}
+                onChange={(ev) => {
+                  const offset = Number.parseFloat(ev.target.value);
+                  if (!Number.isFinite(offset)) return;
+                  onUpdateWidget((prev) => ({
+                    ...prev,
+                    primaryBinding: prev.primaryBinding ? { ...prev.primaryBinding, offset } : null,
+                  }));
+                }}
+              />
+            </label>
+          </>
+        )}
+      </div>
+    </WidgetConfigModal>
+  );
+
   if (!binding) {
     return (
-      <div className="widget-unbound-box">
-        <span>{t("widget.unbound")}</span>
-        <ChannelBindSelect
-          channelsById={channelsById}
-          placeholder={t("widget.selectChannel")}
-          onBindChannel={onBindChannel}
-        />
-      </div>
+      <>
+        {headerControls}
+        <div className="widget-unbound-box">
+          <span>{t("widget.unbound")}</span>
+          {onBindChannel && (
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() => setConfigOpen(true)}
+            >
+              {t("widget.selectChannel")}
+            </button>
+          )}
+        </div>
+        {configOverlay}
+      </>
     );
   }
 
   return (
     <div className="widget-gauge-body" data-testid={`widget-gauge-${widget.id}`}>
-      <div className="widget-meter-top">
-        <span className="widget-ch-badge">{ch ? ch.full_path : `ch${binding.channelId}`}</span>
-        <button type="button" className="scope-btn-xs" onClick={() => setConfigOpen((v) => !v)}>
-          {t("widget.configToggle")}
-        </button>
-      </div>
+      {headerControls}
 
       <svg className="widget-gauge-svg" viewBox="0 0 110 86">
         <circle
@@ -173,87 +298,7 @@ export function RadialGaugeWidget({
         </text>
       </svg>
 
-      {configOpen && (
-        <div className="widget-inline-config">
-          <label>
-            {t("widget.rangeMin")}
-            <input
-              type="number"
-              value={gaugeCfg.min}
-              onChange={(ev) => {
-                const min = Number.parseFloat(ev.target.value);
-                if (!Number.isFinite(min)) return;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  gaugeConfig: { ...(prev.gaugeConfig ?? gaugeCfg), min },
-                }));
-              }}
-            />
-          </label>
-          <label>
-            {t("widget.rangeMax")}
-            <input
-              type="number"
-              value={gaugeCfg.max}
-              onChange={(ev) => {
-                const max = Number.parseFloat(ev.target.value);
-                if (!Number.isFinite(max)) return;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  gaugeConfig: { ...(prev.gaugeConfig ?? gaugeCfg), max },
-                }));
-              }}
-            />
-          </label>
-          <label>
-            {t("widget.warnHigh")}
-            <input
-              type="number"
-              value={gaugeCfg.warnHigh}
-              onChange={(ev) => {
-                const warnHigh = Number.parseFloat(ev.target.value);
-                if (!Number.isFinite(warnHigh)) return;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  gaugeConfig: { ...(prev.gaugeConfig ?? gaugeCfg), warnHigh },
-                }));
-              }}
-            />
-          </label>
-          <label>
-            {t("scope.chScale")}
-            <input
-              type="number"
-              step="0.1"
-              value={binding.scale}
-              onChange={(ev) => {
-                const scale = Number.parseFloat(ev.target.value);
-                if (!Number.isFinite(scale)) return;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  primaryBinding: prev.primaryBinding ? { ...prev.primaryBinding, scale } : null,
-                }));
-              }}
-            />
-          </label>
-          <label>
-            {t("scope.chOffset")}
-            <input
-              type="number"
-              step="1"
-              value={binding.offset}
-              onChange={(ev) => {
-                const offset = Number.parseFloat(ev.target.value);
-                if (!Number.isFinite(offset)) return;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  primaryBinding: prev.primaryBinding ? { ...prev.primaryBinding, offset } : null,
-                }));
-              }}
-            />
-          </label>
-        </div>
-      )}
+      {configOverlay}
     </div>
   );
 }

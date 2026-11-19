@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type ReactNode,
 } from "react";
 import {
   type EdgeSlopeDto,
@@ -15,6 +16,8 @@ import type { DdsfFrameHeaderView, DdsfScopeView } from "../bridge/ddsf-parser.t
 import { DdsfSnapshotKind, TriggerRuntimeStateCode } from "../bridge/ddsf-spec.ts";
 import { MOCK_BASE_HOST_NS } from "../bridge/mock-ddsf-core.ts";
 import { translate, type MessageKey, type UiLocale } from "../i18n/index.ts";
+import { WidgetConfigModal } from "../widgets/WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "../widgets/WidgetHeaderSlot.tsx";
 import {
   DDSCOPE_POINTER_DROP_EVENT,
   type PointerDropEventDetail,
@@ -69,6 +72,7 @@ export interface ScopeViewportWidgetProps {
   channelsById: ScopeChannelLookup;
   callbacks: ScopeCallbacks;
   locale?: UiLocale;
+  embedded?: boolean;
   isFocused?: boolean;
   runBoundariesNs?: ReadonlyArray<number>;
   onFocusScope?: (scopeId: number) => void;
@@ -161,11 +165,44 @@ function findAnalogRectForY(
   return exact?.rect ?? layout.analogRegion;
 }
 
+function ScopeControlsHost({
+  embedded,
+  open,
+  title,
+  doneLabel,
+  scopeId,
+  onClose,
+  children,
+}: {
+  embedded: boolean;
+  open: boolean;
+  title: string;
+  doneLabel: string;
+  scopeId: number;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  if (!embedded) return <>{children}</>;
+  return (
+    <WidgetConfigModal
+      open={open}
+      title={title}
+      doneLabel={doneLabel}
+      width="xl"
+      dataTestId={`scope-config-modal-${scopeId}`}
+      onClose={onClose}
+    >
+      {children}
+    </WidgetConfigModal>
+  );
+}
+
 export function ScopeViewportWidget({
   config,
   channelsById,
   callbacks,
   locale = "en",
+  embedded = false,
   isFocused = false,
   runBoundariesNs = [],
   onFocusScope,
@@ -195,6 +232,7 @@ export function ScopeViewportWidget({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [editingChannelId, setEditingChannelId] = useState<number | null>(null);
+  const [embeddedControlsOpen, setEmbeddedControlsOpen] = useState(false);
 
   const configRef = useRef(config);
   configRef.current = config;
@@ -397,7 +435,7 @@ export function ScopeViewportWidget({
       }
     }
     flushChipValues();
-  }, [config.tracks, channelsById, locale, flushChipValues]);
+  }, [config.tracks, channelsById, locale, embeddedControlsOpen, flushChipValues]);
 
   // Initialize GPU backend, ResizeObserver, and requestAnimationFrame loop
   useEffect(() => {
@@ -1207,6 +1245,34 @@ export function ScopeViewportWidget({
     }));
   };
 
+  const boundChannelIdSet = useMemo(
+    () => new Set(config.tracks.map((tr) => tr.channelId)),
+    [config.tracks],
+  );
+  const availableChannels = useMemo(
+    () =>
+      Object.values(channelsById)
+        .filter((ch) => !boundChannelIdSet.has(ch.channel_id))
+        .sort((a, b) => a.full_path.localeCompare(b.full_path)),
+    [channelsById, boundChannelIdSet],
+  );
+
+  const handleTogglePause = () => {
+    const nextPaused = !config.paused;
+    if (nextPaused) {
+      const sd = pendingScopeRef.current;
+      pausedHostNowNsRef.current =
+        latestHeaderRef.current?.hostNowNs ??
+        (sd ? sd.winTStartNs + sd.winTSpanNs : null);
+    } else {
+      pausedHostNowNsRef.current = null;
+    }
+    callbacks.onUpdateScope(config.scopeId, (prev) => ({
+      ...prev,
+      paused: nextPaused,
+    }));
+  };
+
   return (
     <div
       ref={rootRef}
@@ -1218,7 +1284,66 @@ export function ScopeViewportWidget({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* Top Instrument Control Bar */}
+      {embedded && (
+        <WidgetHeaderActions>
+          <span
+            className={`scope-status-pill scope-status-${statusMeta.tone} widget-header-pill`}
+            data-testid={`scope-status-${config.scopeId}`}
+          >
+            {t(statusMeta.labelKey)}
+          </span>
+          {(config.sweepMode === "single" ||
+            runtimeTriggerState === TriggerRuntimeStateCode.LatchedPinned) && (
+            <button
+              type="button"
+              className="widget-header-btn is-accent"
+              title={t("scope.rearm")}
+              data-testid={`scope-rearm-${config.scopeId}`}
+              onClick={() => {
+                pausedHostNowNsRef.current = null;
+                callbacks.onRearmScope(config.scopeId);
+              }}
+            >
+              {t("scope.rearm")}
+            </button>
+          )}
+          <button
+            type="button"
+            className={`widget-header-btn ${config.paused ? "scope-btn-warn" : ""}`}
+            title={config.paused ? t("scope.resume") : t("scope.pause")}
+            onClick={handleTogglePause}
+          >
+            {config.paused ? "▶" : "⏸"}
+          </button>
+          <button
+            type="button"
+            className="widget-header-btn"
+            title={t("scope.autoYTitle")}
+            onClick={handleAutoFitY}
+          >
+            {t("scope.autoY")}
+          </button>
+          <button
+            type="button"
+            className={`widget-header-btn ${embeddedControlsOpen ? "active" : ""}`}
+            title={t("widget.scopeToolbarToggle")}
+            data-testid={`scope-toolbar-toggle-${config.scopeId}`}
+            onClick={() => setEmbeddedControlsOpen((v) => !v)}
+          >
+            ⚙
+          </button>
+        </WidgetHeaderActions>
+      )}
+
+      {/* Instrument Control Bar & Bound Channel Strip */}
+      <ScopeControlsHost
+        embedded={embedded}
+        open={embeddedControlsOpen}
+        title={`${config.title} · ${t("widget.configToggle")}`}
+        doneLabel={t("widget.configDone")}
+        scopeId={config.scopeId}
+        onClose={() => setEmbeddedControlsOpen(false)}
+      >
       <div className="scope-toolbar">
         <div className="scope-toolbar-group">
           <div className="scope-segmented" role="group" aria-label={t("scope.sweepModeAria")}>
@@ -1241,46 +1366,35 @@ export function ScopeViewportWidget({
             ))}
           </div>
 
-          <span
-            className={`scope-status-pill scope-status-${statusMeta.tone}`}
-            data-testid={`scope-status-${config.scopeId}`}
-          >
-            {t(statusMeta.labelKey)}
-          </span>
-
-          {(config.sweepMode === "single" ||
-            runtimeTriggerState === TriggerRuntimeStateCode.LatchedPinned) && (
-            <button
-              type="button"
-              className="scope-btn scope-btn-accent"
-              data-testid={`scope-rearm-${config.scopeId}`}
-              onClick={() => {
-                pausedHostNowNsRef.current = null;
-                callbacks.onRearmScope(config.scopeId);
-              }}
+          {!embedded && (
+            <span
+              className={`scope-status-pill scope-status-${statusMeta.tone}`}
+              data-testid={`scope-status-${config.scopeId}`}
             >
-              {t("scope.rearm")}
-            </button>
+              {t(statusMeta.labelKey)}
+            </span>
           )}
+
+          {!embedded &&
+            (config.sweepMode === "single" ||
+              runtimeTriggerState === TriggerRuntimeStateCode.LatchedPinned) && (
+              <button
+                type="button"
+                className="scope-btn scope-btn-accent"
+                data-testid={`scope-rearm-${config.scopeId}`}
+                onClick={() => {
+                  pausedHostNowNsRef.current = null;
+                  callbacks.onRearmScope(config.scopeId);
+                }}
+              >
+                {t("scope.rearm")}
+              </button>
+            )}
 
           <button
             type="button"
             className={`scope-btn ${config.paused ? "scope-btn-warn" : ""}`}
-            onClick={() => {
-              const nextPaused = !config.paused;
-              if (nextPaused) {
-                const sd = pendingScopeRef.current;
-                pausedHostNowNsRef.current =
-                  latestHeaderRef.current?.hostNowNs ??
-                  (sd ? sd.winTStartNs + sd.winTSpanNs : null);
-              } else {
-                pausedHostNowNsRef.current = null;
-              }
-              callbacks.onUpdateScope(config.scopeId, (prev) => ({
-                ...prev,
-                paused: nextPaused,
-              }));
-            }}
+            onClick={handleTogglePause}
           >
             {config.paused ? t("scope.resume") : t("scope.pause")}
           </button>
@@ -1750,39 +1864,32 @@ export function ScopeViewportWidget({
           {config.tracks.length === 0 && (
             <span className="scope-empty-hint">{t("scope.emptyTracksHint")}</span>
           )}
-          {(() => {
-            const boundIds = new Set(config.tracks.map((tr) => tr.channelId));
-            const available = Object.values(channelsById)
-              .filter((ch) => !boundIds.has(ch.channel_id))
-              .sort((a, b) => a.full_path.localeCompare(b.full_path));
-            if (available.length === 0) return null;
-            return (
-              <select
-                className="scope-select-sm scope-add-track-select"
-                data-testid={`scope-add-track-${config.scopeId}`}
-                aria-label={t("scope.addTrackPlaceholder")}
-                value=""
-                onMouseDown={(ev) => ev.stopPropagation()}
-                onClick={(ev) => ev.stopPropagation()}
-                onChange={(ev) => {
-                  const id = Number.parseInt(ev.target.value, 10);
-                  if (Number.isFinite(id)) {
-                    callbacks.onDropChannel(config.scopeId, id);
-                  }
-                }}
-              >
-                <option value="" disabled>
-                  {t("scope.addTrackPlaceholder")}
+          {availableChannels.length > 0 && (
+            <select
+              className="scope-select-sm scope-add-track-select"
+              data-testid={`scope-add-track-${config.scopeId}`}
+              aria-label={t("scope.addTrackPlaceholder")}
+              value=""
+              onMouseDown={(ev) => ev.stopPropagation()}
+              onClick={(ev) => ev.stopPropagation()}
+              onChange={(ev) => {
+                const id = Number.parseInt(ev.target.value, 10);
+                if (Number.isFinite(id)) {
+                  callbacks.onDropChannel(config.scopeId, id);
+                }
+              }}
+            >
+              <option value="" disabled>
+                {t("scope.addTrackPlaceholder")}
+              </option>
+              {availableChannels.map((ch) => (
+                <option key={ch.channel_id} value={ch.channel_id}>
+                  {ch.full_path}
+                  {ch.unit ? ` (${ch.unit})` : ""}
                 </option>
-                {available.map((ch) => (
-                  <option key={ch.channel_id} value={ch.channel_id}>
-                    {ch.full_path}
-                    {ch.unit ? ` (${ch.unit})` : ""}
-                  </option>
-                ))}
-              </select>
-            );
-          })()}
+              ))}
+            </select>
+          )}
         </div>
 
         {/* Per-channel independent Scale / Offset & Color editor bar */}
@@ -1902,6 +2009,7 @@ export function ScopeViewportWidget({
           </div>
         )}
       </div>
+      </ScopeControlsHost>
 
       {/* Stacked GPU + Canvas 2D HUD Viewport Stage */}
       <div className="scope-canvas-stage" ref={stageRef}>

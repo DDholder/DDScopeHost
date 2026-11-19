@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChannelNodeDto_Serialize } from "../bridge/bindings.ts";
 import { bridgeClient } from "../bridge/control-client.ts";
 import { DdsfSnapshotKind } from "../bridge/ddsf-spec.ts";
@@ -6,6 +6,8 @@ import type { UiLocale } from "../i18n/index.ts";
 import { translate } from "../i18n/index.ts";
 import { ChannelBindSelect } from "./ChannelBindSelect.tsx";
 import type { DashboardWidgetItem } from "./types.ts";
+import { WidgetConfigModal } from "./WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "./WidgetHeaderSlot.tsx";
 
 export interface StatusLedWidgetProps {
   widget: DashboardWidgetItem;
@@ -23,6 +25,7 @@ export function StatusLedWidget({
   const t = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) =>
     translate(locale, key, params);
 
+  const [configOpen, setConfigOpen] = useState(false);
   const lampRef = useRef<HTMLSpanElement | null>(null);
   const labelRef = useRef<HTMLDivElement | null>(null);
   const enumPillRefs = useRef<Map<number, HTMLSpanElement>>(new Map());
@@ -92,24 +95,69 @@ export function StatusLedWidget({
     return unsub;
   }, [binding?.channelId, locale]);
 
+  const headerControls = (
+    <WidgetHeaderActions>
+      <button
+        type="button"
+        className={`widget-header-btn ${configOpen ? "active" : ""}`}
+        title={t("widget.configToggle")}
+        data-testid={`led-config-btn-${widget.id}`}
+        onClick={() => setConfigOpen((v) => !v)}
+      >
+        ⚙
+      </button>
+    </WidgetHeaderActions>
+  );
+
+  const configOverlay = (
+    <WidgetConfigModal
+      open={configOpen}
+      title={`${widget.title} · ${t("widget.configToggle")}`}
+      doneLabel={t("widget.configDone")}
+      width="sm"
+      onClose={() => setConfigOpen(false)}
+    >
+      <div className="widget-inline-config">
+        <label style={{ gridColumn: "span 2" }}>
+          {t("widget.bindChannelLabel")}
+          <ChannelBindSelect
+            selectedChannelId={binding?.channelId ?? null}
+            channelsById={channelsById}
+            placeholder={t("widget.selectChannel")}
+            title={t("widget.switchChannelTitle")}
+            className="widget-config-select"
+            dataTestId={`led-bind-select-${widget.id}`}
+            onBindChannel={onBindChannel}
+          />
+        </label>
+      </div>
+    </WidgetConfigModal>
+  );
+
   if (!binding) {
     return (
-      <div className="widget-unbound-box">
-        <span>{t("widget.unbound")}</span>
-        <ChannelBindSelect
-          channelsById={channelsById}
-          placeholder={t("widget.selectChannel")}
-          onBindChannel={onBindChannel}
-        />
-      </div>
+      <>
+        {headerControls}
+        <div className="widget-unbound-box">
+          <span>{t("widget.unbound")}</span>
+          {onBindChannel && (
+            <button
+              type="button"
+              className="scope-btn-xs"
+              onClick={() => setConfigOpen(true)}
+            >
+              {t("widget.selectChannel")}
+            </button>
+          )}
+        </div>
+        {configOverlay}
+      </>
     );
   }
 
   return (
     <div className="widget-led-body" data-testid={`widget-led-${widget.id}`}>
-      <div className="widget-meter-top">
-        <span className="widget-ch-badge">{ch ? ch.full_path : `ch${binding.channelId}`}</span>
-      </div>
+      {headerControls}
       <div className="widget-led-center">
         <span className="widget-led-lamp tone-idle" ref={lampRef} />
         <div className="widget-led-label" ref={labelRef}>
@@ -132,6 +180,7 @@ export function StatusLedWidget({
           ))}
         </div>
       )}
+      {configOverlay}
     </div>
   );
 }

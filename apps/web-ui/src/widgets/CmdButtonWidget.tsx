@@ -12,6 +12,8 @@ import {
   type CommandDefinition,
 } from "../workspace/command-system.ts";
 import type { DashboardWidgetItem, WidgetButtonConfig } from "./types.ts";
+import { WidgetConfigModal } from "./WidgetConfigModal.tsx";
+import { WidgetHeaderActions } from "./WidgetHeaderSlot.tsx";
 
 export interface CmdButtonWidgetProps {
   widget: DashboardWidgetItem;
@@ -195,25 +197,36 @@ export function CmdButtonWidget({
     }
   };
 
+  const handleSelectCommand = (nextId: string | null) => {
+    setStatusMsg(null);
+    if (onBindCommand) {
+      onBindCommand(nextId);
+      return;
+    }
+    const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
+    onUpdateWidget((prev) => ({
+      ...prev,
+      ...(nextCmd ? { title: nextCmd.name } : {}),
+      buttonConfig: {
+        ...getButtonCfg(prev, sourceIds),
+        commandId: nextId,
+        ...(nextCmd?.targetSourceId ? { sourceId: nextCmd.targetSourceId } : {}),
+        ...(nextCmd ? { priority: nextCmd.priority } : {}),
+      },
+    }));
+  };
+
   return (
     <div className="widget-cmd-body" data-testid={`widget-cmd-${widget.id}`}>
-      <div className="widget-cmd-top">
-        {boundCommand ? (
-          <span className="widget-ch-badge widget-cmd-bound-badge" title={boundCommand.template}>
-            ⚡ {boundCommand.name} · {effectiveTarget} ·{" "}
-            {boundCommand.format === "hex" ? "HEX" : "STR"}
-          </span>
-        ) : (
-          <span className="widget-ch-badge">
-            {cfg.sourceId} · {cfg.mode.toUpperCase()}
-          </span>
-        )}
+      <WidgetHeaderActions>
         {boundCommand && placeholders.length > 1 && (
           <select
-            className="widget-slot-select"
+            className="widget-header-slot-select"
             data-testid={`widget-slot-select-${widget.id}`}
             title={t("widget.cmdPlaceholderLabel")}
             value={String(effectiveSlot)}
+            onPointerDown={(ev) => ev.stopPropagation()}
+            onClick={(ev) => ev.stopPropagation()}
             onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
           >
             {placeholders.map((ph) => (
@@ -226,12 +239,14 @@ export function CmdButtonWidget({
         )}
         <button
           type="button"
-          className="scope-btn-xs"
+          className={`widget-header-btn ${configOpen ? "active" : ""}`}
+          title={t("widget.configToggle")}
+          data-testid={`btn-config-btn-${widget.id}`}
           onClick={() => setConfigOpen((v) => !v)}
         >
-          {t("widget.configToggle")}
+          ⚙
         </button>
-      </div>
+      </WidgetHeaderActions>
 
       <div className="widget-cmd-action-row">
         {boundCommand && placeholders.length > 0 && effectiveSlot >= 0 && (
@@ -267,128 +282,116 @@ export function CmdButtonWidget({
         {statusMsg && <span className="widget-cmd-status">{statusMsg}</span>}
       </div>
 
-      {configOpen && (
+      <WidgetConfigModal
+        open={configOpen}
+        title={`${widget.title} · ${t("widget.configToggle")}`}
+        doneLabel={t("widget.configDone")}
+        width="sm"
+        onClose={() => setConfigOpen(false)}
+      >
         <div className="widget-inline-config">
-          <label style={{ gridColumn: "span 2" }}>
-            {t("widget.cmdBindLabel")}
-            <select
-              data-testid={`btn-cmd-select-${widget.id}`}
-              value={cfg.commandId ?? ""}
-              onChange={(ev) => {
-                const nextId = ev.target.value || null;
-                setStatusMsg(null);
-                if (onBindCommand) {
-                  onBindCommand(nextId);
-                  return;
-                }
-                const nextCmd = nextId ? commands.find((c) => c.id === nextId) ?? null : null;
-                onUpdateWidget((prev) => ({
-                  ...prev,
-                  ...(nextCmd ? { title: nextCmd.name } : {}),
-                  buttonConfig: {
-                    ...getButtonCfg(prev, sourceIds),
-                    commandId: nextId,
-                    ...(nextCmd?.targetSourceId ? { sourceId: nextCmd.targetSourceId } : {}),
-                    ...(nextCmd ? { priority: nextCmd.priority } : {}),
-                  },
-                }));
-              }}
-            >
-              <option value="">{t("widget.cmdBindNoneCustom")}</option>
-              {commands.map((cmd) => (
-                <option key={cmd.id} value={cmd.id}>
-                  {cmd.name} ({cmd.format.toUpperCase()})
-                </option>
-              ))}
-            </select>
-          </label>
-          {boundCommand && placeholders.length > 0 && (
             <label style={{ gridColumn: "span 2" }}>
-              {t("widget.cmdPlaceholderLabel")}
+              {t("widget.cmdBindLabel")}
               <select
-                data-testid={`btn-arg-select-${widget.id}`}
-                value={String(effectiveSlot)}
-                onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
+                data-testid={`btn-cmd-select-${widget.id}`}
+                value={cfg.commandId ?? ""}
+                onChange={(ev) => handleSelectCommand(ev.target.value || null)}
               >
-                {placeholders.map((ph) => (
-                  <option key={ph.index} value={String(ph.index)}>
-                    {t("widget.cmdPlaceholderSlot", {
-                      num: ph.index + 1,
-                      token: ph.token,
-                    })}
-                  </option>
-                ))}
-                <option value="-1">{t("widget.cmdPlaceholderTriggerAll")}</option>
-              </select>
-            </label>
-          )}
-          {(!boundCommand || !boundCommand.targetSourceId) && (
-            <label>
-              {t("widget.slider.source")}
-              <select
-                value={cfg.sourceId}
-                onChange={(ev) => updateCfg({ sourceId: ev.target.value })}
-              >
-                {(sourceIds.length > 0 ? sourceIds : [cfg.sourceId]).map((id) => (
-                  <option key={id} value={id}>
-                    {id}
+                <option value="">{t("widget.cmdBindNoneCustom")}</option>
+                {commands.map((cmd) => (
+                  <option key={cmd.id} value={cmd.id}>
+                    {cmd.name} ({cmd.format.toUpperCase()})
                   </option>
                 ))}
               </select>
             </label>
-          )}
-          {!boundCommand && (
-            <>
-              <label>
-                {t("widget.btn.mode")}
+            {boundCommand && placeholders.length > 0 && (
+              <label style={{ gridColumn: "span 2" }}>
+                {t("widget.cmdPlaceholderLabel")}
                 <select
-                  value={cfg.mode}
-                  onChange={(ev) =>
-                    updateCfg({ mode: ev.target.value as WidgetButtonConfig["mode"] })
-                  }
+                  data-testid={`btn-arg-select-${widget.id}`}
+                  value={String(effectiveSlot)}
+                  onChange={(ev) => handleSlotChange(Number.parseInt(ev.target.value, 10))}
                 >
-                  <option value="ascii">ASCII</option>
-                  <option value="hex">HEX</option>
-                  <option value="kv">KV</option>
+                  {placeholders.map((ph) => (
+                    <option key={ph.index} value={String(ph.index)}>
+                      {t("widget.cmdPlaceholderSlot", {
+                        num: ph.index + 1,
+                        token: ph.token,
+                      })}
+                    </option>
+                  ))}
+                  <option value="-1">{t("widget.cmdPlaceholderTriggerAll")}</option>
                 </select>
               </label>
-              {cfg.mode === "kv" ? (
-                <>
-                  <label>
-                    {t("widget.slider.key")}
-                    <input
-                      type="text"
-                      value={cfg.kvKey}
-                      onChange={(ev) => updateCfg({ kvKey: ev.target.value })}
-                    />
-                  </label>
-                  <label>
+            )}
+            {(!boundCommand || !boundCommand.targetSourceId) && (
+              <label>
+                {t("widget.slider.source")}
+                <select
+                  value={cfg.sourceId}
+                  onChange={(ev) => updateCfg({ sourceId: ev.target.value })}
+                >
+                  {(sourceIds.length > 0 ? sourceIds : [cfg.sourceId]).map((id) => (
+                    <option key={id} value={id}>
+                      {id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {!boundCommand && (
+              <>
+                <label>
+                  {t("widget.btn.mode")}
+                  <select
+                    value={cfg.mode}
+                    onChange={(ev) =>
+                      updateCfg({ mode: ev.target.value as WidgetButtonConfig["mode"] })
+                    }
+                  >
+                    <option value="ascii">ASCII</option>
+                    <option value="hex">HEX</option>
+                    <option value="kv">KV</option>
+                  </select>
+                </label>
+                {cfg.mode === "kv" ? (
+                  <>
+                    <label>
+                      {t("widget.slider.key")}
+                      <input
+                        type="text"
+                        value={cfg.kvKey}
+                        onChange={(ev) => updateCfg({ kvKey: ev.target.value })}
+                      />
+                    </label>
+                    <label>
+                      {t("widget.btn.cmd")}
+                      <input
+                        type="number"
+                        step="any"
+                        value={cfg.kvValue}
+                        onChange={(ev) => {
+                          const v = Number.parseFloat(ev.target.value);
+                          if (Number.isFinite(v)) updateCfg({ kvValue: v });
+                        }}
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <label style={{ gridColumn: "span 2" }}>
                     {t("widget.btn.cmd")}
                     <input
-                      type="number"
-                      step="any"
-                      value={cfg.kvValue}
-                      onChange={(ev) => {
-                        const v = Number.parseFloat(ev.target.value);
-                        if (Number.isFinite(v)) updateCfg({ kvValue: v });
-                      }}
+                      type="text"
+                      value={cfg.command}
+                      onChange={(ev) => updateCfg({ command: ev.target.value })}
                     />
                   </label>
-                </>
-              ) : (
-                <label style={{ gridColumn: "span 2" }}>
-                  {t("widget.btn.cmd")}
-                  <input
-                    type="text"
-                    value={cfg.command}
-                    onChange={(ev) => updateCfg({ command: ev.target.value })}
-                  />
-                </label>
-              )}
-            </>
-          )}
-        </div>
-      )}
+                )}
+              </>
+            )}
+          </div>
+      </WidgetConfigModal>
     </div>
   );
 }

@@ -4,6 +4,7 @@ import {
   useState,
   type DragEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import type {
   ChannelNodeDto_Serialize,
@@ -28,6 +29,7 @@ import { RadialGaugeWidget } from "./RadialGaugeWidget.tsx";
 import { StatusLedWidget } from "./StatusLedWidget.tsx";
 import { BitParserWidget } from "./BitParserWidget.tsx";
 import { WatchTableWidget } from "./WatchTableWidget.tsx";
+import { WidgetHeaderSlotProvider } from "./WidgetHeaderSlot.tsx";
 import {
   DASHBOARD_GRID_COLS,
   DASHBOARD_GRID_ROW_STRIDE_PX,
@@ -94,6 +96,157 @@ const GRID_ROW_STRIDE_PX = DASHBOARD_GRID_ROW_STRIDE_PX;
 
 function isCommandBindableWidget(type: WidgetType): boolean {
   return type === "param_slider" || type === "cmd_button" || type === "cmd_table";
+}
+
+interface WidgetCardShellProps {
+  widget: DashboardWidgetItem;
+  canvasId: number;
+  locked: boolean;
+  isCardDropTarget: boolean;
+  isRenaming: boolean;
+  titleDraft: string;
+  renameTitleTip: string;
+  removeTitleTip: string;
+  onTitleDraftChange: (next: string) => void;
+  onStartRename: () => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onStartMoveDrag: (ev: ReactPointerEvent<HTMLDivElement>) => void;
+  onStartResizeDrag: (ev: ReactPointerEvent<HTMLDivElement>) => void;
+  onRemoveWidget: () => void;
+  onDragOver: (ev: DragEvent<HTMLDivElement>) => void;
+  onDragLeave: (ev: DragEvent<HTMLDivElement>) => void;
+  onDrop: (ev: DragEvent<HTMLDivElement>) => void;
+  children: ReactNode;
+}
+
+function WidgetCardShell({
+  widget,
+  canvasId,
+  locked,
+  isCardDropTarget,
+  isRenaming,
+  titleDraft,
+  renameTitleTip,
+  removeTitleTip,
+  onTitleDraftChange,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onStartMoveDrag,
+  onStartResizeDrag,
+  onRemoveWidget,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  children,
+}: WidgetCardShellProps) {
+  const [headerSlotEl, setHeaderSlotEl] = useState<HTMLDivElement | null>(null);
+
+  return (
+    <div
+      className={`widget-card ${isCardDropTarget ? "is-channel-drop-over" : ""} ${
+        !locked ? "is-editable" : ""
+      }`}
+      data-drop-widget-id={widget.id}
+      {...(isCommandBindableWidget(widget.type)
+        ? { "data-drop-command-widget-id": widget.id }
+        : {})}
+      data-drop-canvas-id={canvasId}
+      data-testid={`widget-card-${widget.id}`}
+      style={{
+        gridColumn: `${widget.col + 1} / span ${widget.colSpan}`,
+        gridRow: `${widget.row + 1} / span ${widget.rowSpan}`,
+      }}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <div className="widget-card-header" onPointerDown={onStartMoveDrag}>
+        <div className="widget-card-header-left">
+          {isRenaming ? (
+            <input
+              type="text"
+              className="inline-rename-input"
+              data-testid={`rename-widget-input-${widget.id}`}
+              value={titleDraft}
+              autoFocus
+              onFocus={(ev) => ev.currentTarget.select()}
+              onChange={(ev) => onTitleDraftChange(ev.target.value)}
+              onBlur={onCommitRename}
+              onPointerDown={(ev) => ev.stopPropagation()}
+              onMouseDown={(ev) => ev.stopPropagation()}
+              onClick={(ev) => ev.stopPropagation()}
+              onKeyDown={(ev) => {
+                ev.stopPropagation();
+                if (ev.key === "Enter") {
+                  ev.preventDefault();
+                  onCommitRename();
+                } else if (ev.key === "Escape") {
+                  ev.preventDefault();
+                  onCancelRename();
+                }
+              }}
+            />
+          ) : (
+            <div className="widget-card-title-wrap">
+              <span
+                className="widget-card-title"
+                title={!locked ? renameTitleTip : widget.title}
+                onDoubleClick={(ev) => {
+                  ev.stopPropagation();
+                  onStartRename();
+                }}
+              >
+                {widget.title}
+              </span>
+              {!locked && (
+                <button
+                  type="button"
+                  className="inline-rename-btn"
+                  title={renameTitleTip}
+                  data-testid={`rename-widget-btn-${widget.id}`}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    onStartRename();
+                  }}
+                >
+                  ✎
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="widget-card-header-right">
+          <div className="widget-card-header-actions" ref={setHeaderSlotEl} />
+          {!locked && (
+            <button
+              type="button"
+              className="widget-remove-btn"
+              title={removeTitleTip}
+              data-testid={`remove-widget-${widget.id}`}
+              onClick={onRemoveWidget}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="widget-card-content">
+        <WidgetHeaderSlotProvider value={headerSlotEl}>{children}</WidgetHeaderSlotProvider>
+      </div>
+
+      {!locked && (
+        <div
+          className="widget-resize-handle"
+          data-testid={`resize-widget-${widget.id}`}
+          onPointerDown={onStartResizeDrag}
+        />
+      )}
+    </div>
+  );
 }
 
 function parseDroppedWidgetType(ev: DragEvent): WidgetType | null {
@@ -433,7 +586,7 @@ export function DashboardCanvas({
     widget: DashboardWidgetItem,
   ) => {
     if (canvas.locked) return;
-    if ((ev.target as HTMLElement).closest("button, input, select")) return;
+    if ((ev.target as HTMLElement).closest("button, input, select, label, a")) return;
     const gridEl = gridRef.current;
     if (!gridEl) return;
 
@@ -618,6 +771,7 @@ export function DashboardCanvas({
               channelsById={channelsById}
               callbacks={scopeCallbacks}
               locale={locale}
+              embedded={true}
               isFocused={focusedScopeId === scopeCfg.scopeId}
               runBoundariesNs={runBoundariesNs}
               onFocusScope={onFocusScope}
@@ -727,21 +881,26 @@ export function DashboardCanvas({
           canvas.widgets.map((widget) => {
             const isCardDropTarget = cardDragOverId === widget.id;
             return (
-              <div
+              <WidgetCardShell
                 key={widget.id}
-                className={`widget-card ${isCardDropTarget ? "is-channel-drop-over" : ""} ${
-                  !canvas.locked ? "is-editable" : ""
-                }`}
-                data-drop-widget-id={widget.id}
-                {...(isCommandBindableWidget(widget.type)
-                  ? { "data-drop-command-widget-id": widget.id }
-                  : {})}
-                data-drop-canvas-id={canvas.canvasId}
-                data-testid={`widget-card-${widget.id}`}
-                style={{
-                  gridColumn: `${widget.col + 1} / span ${widget.colSpan}`,
-                  gridRow: `${widget.row + 1} / span ${widget.rowSpan}`,
+                widget={widget}
+                canvasId={canvas.canvasId}
+                locked={canvas.locked}
+                isCardDropTarget={isCardDropTarget}
+                isRenaming={renamingWidgetId === widget.id}
+                titleDraft={widgetTitleDraft}
+                renameTitleTip={t("widget.renameTitle")}
+                removeTitleTip={t("widget.remove")}
+                onTitleDraftChange={setWidgetTitleDraft}
+                onStartRename={() => startWidgetRename(widget)}
+                onCommitRename={() => commitWidgetRename(widget)}
+                onCancelRename={() => {
+                  skipBlurCommitRef.current = true;
+                  setRenamingWidgetId(null);
                 }}
+                onStartMoveDrag={(ev) => startMoveDrag(ev, widget)}
+                onStartResizeDrag={(ev) => startResizeDrag(ev, widget)}
+                onRemoveWidget={() => onRemoveWidget(canvas.canvasId, widget.id)}
                 onDragOver={(ev) => {
                   const types = Array.from(ev.dataTransfer.types);
                   const isWidgetDrag = types.includes("application/x-ddscope-widget");
@@ -770,86 +929,8 @@ export function DashboardCanvas({
                 }}
                 onDrop={(ev) => handleCardDrop(ev, widget)}
               >
-                <div
-                  className="widget-card-header"
-                  onPointerDown={(ev) => startMoveDrag(ev, widget)}
-                >
-                  {renamingWidgetId === widget.id ? (
-                    <input
-                      type="text"
-                      className="inline-rename-input"
-                      data-testid={`rename-widget-input-${widget.id}`}
-                      value={widgetTitleDraft}
-                      autoFocus
-                      onFocus={(ev) => ev.currentTarget.select()}
-                      onChange={(ev) => setWidgetTitleDraft(ev.target.value)}
-                      onBlur={() => commitWidgetRename(widget)}
-                      onPointerDown={(ev) => ev.stopPropagation()}
-                      onMouseDown={(ev) => ev.stopPropagation()}
-                      onClick={(ev) => ev.stopPropagation()}
-                      onKeyDown={(ev) => {
-                        ev.stopPropagation();
-                        if (ev.key === "Enter") {
-                          ev.preventDefault();
-                          commitWidgetRename(widget);
-                        } else if (ev.key === "Escape") {
-                          ev.preventDefault();
-                          skipBlurCommitRef.current = true;
-                          setRenamingWidgetId(null);
-                        }
-                      }}
-                    />
-                  ) : (
-                    <div className="widget-card-title-wrap">
-                      <span
-                        className="widget-card-title"
-                        title={!canvas.locked ? t("widget.renameTitle") : widget.title}
-                        onDoubleClick={(ev) => {
-                          ev.stopPropagation();
-                          startWidgetRename(widget);
-                        }}
-                      >
-                        {widget.title}
-                      </span>
-                      {!canvas.locked && (
-                        <button
-                          type="button"
-                          className="inline-rename-btn"
-                          title={t("widget.renameTitle")}
-                          data-testid={`rename-widget-btn-${widget.id}`}
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            startWidgetRename(widget);
-                          }}
-                        >
-                          ✎
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  {!canvas.locked && (
-                    <button
-                      type="button"
-                      className="widget-remove-btn"
-                      title={t("widget.remove")}
-                      data-testid={`remove-widget-${widget.id}`}
-                      onClick={() => onRemoveWidget(canvas.canvasId, widget.id)}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-
-                <div className="widget-card-content">{renderWidgetBody(widget)}</div>
-
-                {!canvas.locked && (
-                  <div
-                    className="widget-resize-handle"
-                    data-testid={`resize-widget-${widget.id}`}
-                    onPointerDown={(ev) => startResizeDrag(ev, widget)}
-                  />
-                )}
-              </div>
+                {renderWidgetBody(widget)}
+              </WidgetCardShell>
             );
           })
         )}
