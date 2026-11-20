@@ -31,6 +31,11 @@
    - Gate 4 总览结论、M5 边缘异常加固清单（热插拔与时钟重启恢复、Windows UDP `10054` 容错、宏观数字边沿防漏抽取、多通道 Pinning 公平淘汰与前端状态闭环）
    - Phase 1 MVP 四大 DoD 验收矩阵、`ddscope-cli soak` 30 秒 Release 压测实测数据与 30 分钟长稳复核命令
    - 全量测试门禁统计、桌面端 Release 冒烟结果与 Windows `.msi` / `-setup.exe` 安装包构建产物路径
+6. **[06-cli-service-and-tui-architecture-plan.md](./06-cli-service-and-tui-architecture-plan.md) — CLI 统一引擎服务、全功能 TUI 与真·C/S 跨端架构设计及开发实施计划**
+   - **需求拆解与范围界定**：CLI-First 统一引擎定位、22 项功能需求（`ddscope-service` / `ddscope-cli` / `TUI` / `web-ui` / `desktop` / `build`）与性能防反压 NFR
+   - **架构拓扑与模块框架图**：四种运行形态全景图、Monorepo Crate 演进对比、共享服务层、`CliBackend` 双态 TUI、桌面端 Sidecar + Win32 Job Object 及前端五级自动发现框架
+   - **详细接口与构建设计**：REST `/api/*` 与 `/ws/data` (`DDSF v1`) / `/ws/telemetry` 协议、单文件 `rust-embed` + `--web-dir` 容错机制、`apps/desktop/tests/*` 平移对照与 `scripts/build.ps1` 构建流水线
+   - **开发路线图与串并联拓扑**：`M0 ~ M5` 四轨高度并行（服务/前端/桌面/TUI）+ 内部并发开发主流程图（含关键路径标注）、多轨联调时序图、完整 WBS 依赖详表与 DoD 验收清单
 
 ---
 
@@ -48,3 +53,4 @@
 | **虚拟通道编排与回算** | **「数学公式表达式 + React Flow 节点连线图」双入口**；暂停或复盘时新建/改参自动触发**视口优先历史分块即时回算** |
 | **虚拟示波器架构** | **多实例独立触发锁存**（单台 `Single` 触发时自动 `Pin` 住内存块防覆盖，不打断其他示波器/仪表）+ **`SyncGroup` 联动** + **MSO 模拟/逻辑/状态机色带同屏** |
 | **面板拖拽布局** | **`Dockview` 多窗口停靠分屏** + **24/48 列细粒度磁吸自适应网格画布**（支持从全局通道/命令树直接拖拽到控件完成绑定） |
+| **服务化部署与多端协同** | **CLI-First 真·C/S 架构**：`ddscope-cli`（基于 `ddscope-service`）作为唯一引擎进程提供 HTTP REST + `/ws/data` (`DDSF v1`) + 内嵌静态 Web UI，同时支持本地/远程全功能 `ratatui` TUI；`ddscope-desktop` 通过 Win32 Job Object 托管本地 CLI Sidecar 并支持自由切换远端服务器 |
